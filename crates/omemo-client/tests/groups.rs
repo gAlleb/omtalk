@@ -3,12 +3,10 @@
 //! Three people, five devices, one members-only room. A member who is not in the room
 //! right now must still get the keys: they are encrypted for members, not for occupants.
 
-mod common;
-
 use std::time::Duration;
 
-use common::{Device, WAIT, converge, text};
 use omtalk_omemo::Direction;
+use omtalk_testkit::{Device, WAIT, converge, text};
 use omtalk_xmpp::{Affiliation, BareJid};
 use tokio::time::timeout;
 

@@ -4,12 +4,10 @@
 //! laptops) talking to someone with two. Every device must read every message, the own
 //! sent ones included.
 
-mod common;
-
 use std::time::Duration;
 
-use common::{Device, WAIT, befriend, converge, text, unfriend};
 use omtalk_omemo::Direction;
+use omtalk_testkit::{Device, WAIT, befriend, converge, text, unfriend};
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread")]

@@ -39,13 +39,21 @@ async fn wait_for<T>(
     found.expect("no matching event within 20 s; is the test server up (`mise run prosody`)?")
 }
 
-async fn online(events: &mut UnboundedReceiver<AccountEvent>, account: &Account) -> Jid {
-    let jid = account.jid().clone();
-    wait_for(events, |e| match &e.event {
-        Event::Online { jid: full, .. } if e.account == jid => Some(full.clone().into()),
-        _ => None,
-    })
-    .await
+/// Waits until all `accounts` are online, in whatever order their events come.
+async fn online(events: &mut UnboundedReceiver<AccountEvent>, accounts: &[&Account]) -> Vec<Jid> {
+    let mut found: Vec<Option<Jid>> = vec![None; accounts.len()];
+    while found.iter().any(Option::is_none) {
+        let (index, jid) = wait_for(events, |e| match &e.event {
+            Event::Online { jid, .. } => accounts
+                .iter()
+                .position(|a| a.jid() == &e.account)
+                .map(|index| (index, Jid::from(jid.clone()))),
+            _ => None,
+        })
+        .await;
+        found[index] = Some(jid);
+    }
+    found.into_iter().map(Option::unwrap).collect()
 }
 
 #[tokio::test]
@@ -82,8 +90,7 @@ async fn omemo_nodes_are_published_open_and_readable_by_others() {
     let (mut accounts, mut events) = Accounts::new();
     let carol = accounts.add(config("carol")).await;
     let dave = accounts.add(config("dave")).await;
-    online(&mut events, &carol).await;
-    online(&mut events, &dave).await;
+    online(&mut events, &[&carol, &dave]).await;
 
     let keys = OwnKeys::generate(0).unwrap();
     carol
@@ -128,8 +135,8 @@ async fn own_other_device_is_notified_of_device_list_changes() {
     let (mut phone_accounts, mut phone_events) = Accounts::new();
     let laptop = laptop_accounts.add(config("erin")).await;
     let phone = phone_accounts.add(config("erin")).await;
-    online(&mut laptop_events, &laptop).await;
-    online(&mut phone_events, &phone).await;
+    online(&mut laptop_events, &[&laptop]).await;
+    online(&mut phone_events, &[&phone]).await;
 
     // The server sends notifications only if our caps say `+notify`; that takes a
     // disco round trip from the server to the phone, which the client must answer.
@@ -170,10 +177,10 @@ async fn own_other_device_is_notified_of_device_list_changes() {
 async fn client_answers_disco_and_ping() {
     let (mut accounts, mut events) = Accounts::new();
     let frank = accounts.add(config("frank")).await;
-    let frank_full = online(&mut events, &frank).await;
+    let frank_full = online(&mut events, &[&frank]).await.remove(0);
     let (mut others, mut other_events) = Accounts::new();
     let asker = others.add(config("frank")).await;
-    online(&mut other_events, &asker).await;
+    online(&mut other_events, &[&asker]).await;
 
     let disco: Element = xmpp_parsers::disco::DiscoInfoQuery { node: None }.into();
     let answer = asker.get(Some(frank_full.clone()), disco).await.unwrap().unwrap();
@@ -192,4 +199,45 @@ async fn client_answers_disco_and_ping() {
         asker.get(Some(frank_full), unknown).await,
         Err(omtalk_xmpp::Error::Stanza(_))
     ));
+}
+
+#[tokio::test]
+async fn wrong_password_is_reported_and_stops_the_account() {
+    let (mut accounts, mut events) = Accounts::new();
+    let mut wrong = config("u38");
+    wrong.password = "not the password".into();
+    let account = accounts.add(wrong).await;
+
+    let reason = wait_for(&mut events, |e| match &e.event {
+        Event::AuthFailed { reason } => Some(reason.clone()),
+        Event::Online { .. } => panic!("logged in with a wrong password"),
+        _ => None,
+    })
+    .await;
+    assert!(
+        reason.contains("NotAuthorized"),
+        "reason names the server's answer: {reason}"
+    );
+    assert!(
+        matches!(
+            account.items(account.jid(), DEVICE_LIST_NODE).await,
+            Err(omtalk_xmpp::Error::Stopped)
+        ),
+        "a refused account must not keep retrying in the background"
+    );
+}
+
+#[tokio::test]
+async fn unreachable_server_is_reported_and_retried() {
+    let (mut accounts, mut events) = Accounts::new();
+    let mut nowhere = config("u37");
+    nowhere.server = Server::Plaintext {
+        addr: "127.0.0.1:1".into(),
+    };
+    accounts.add(nowhere).await;
+    wait_for(&mut events, |e| match &e.event {
+        Event::Disconnected { .. } => Some(()),
+        _ => None,
+    })
+    .await;
 }

@@ -17,7 +17,13 @@ pub enum Event {
         jid: FullJid,
         resumed: bool,
     },
-    /// The connection broke; it is being re-established in the background.
+    /// The server refused the password (or the account). The account has stopped: fix
+    /// the credentials and add it again.
+    AuthFailed {
+        reason: String,
+    },
+    /// The connection broke or could not be made; it is being re-established in the
+    /// background.
     Disconnected {
         reason: String,
     },

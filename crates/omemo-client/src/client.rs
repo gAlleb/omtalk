@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use omemo::{DeviceId, Session};
 use omemo_xml::{DEVICE_LIST_NODE, bundle, bundle_node, device_list, message, xml};
@@ -9,7 +10,8 @@ use xmpp_parsers::eme::ExplicitMessageEncryption;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
 use crate::envelope::{self, Direction};
-use crate::{Error, State};
+use crate::state::Identity;
+use crate::{Ephemeral, Error, Persist, State};
 
 /// python-omemo answers with an empty message once it has received this many messages
 /// in one chain without replying, so the sender's chain does not grow forever.
@@ -22,6 +24,7 @@ pub struct Omemo {
     account: Account,
     device_id: DeviceId,
     state: Mutex<State>,
+    persist: Arc<dyn Persist>,
     /// Room occupants by nick, with their real JIDs: a group message names only the
     /// nick, but its keys belong to the real account.
     occupants: Mutex<HashMap<BareJid, HashMap<String, BareJid>>>,
@@ -49,11 +52,18 @@ pub struct SendReport {
 }
 
 impl Omemo {
+    /// OMEMO for `account`; nothing is saved. See [`Omemo::persisting`].
     pub fn new(account: Account, state: State) -> Self {
+        Self::persisting(account, state, Arc::new(Ephemeral))
+    }
+
+    /// OMEMO for `account`, writing every change of `state` to `persist`.
+    pub fn persisting(account: Account, state: State, persist: Arc<dyn Persist>) -> Self {
         Self {
             account,
             device_id: state.keys.device_id,
             state: Mutex::new(state),
+            persist,
             occupants: Mutex::new(HashMap::new()),
         }
     }
@@ -84,6 +94,8 @@ impl Omemo {
             Err(error) => return Err(error.into()),
         };
         let mut state = self.state.lock().await;
+        // On disk before on the server: a published pre key must never be one we lost.
+        self.persist.keys(&state.keys)?;
         self.publish_bundle(&state).await?;
         self.ensure_listed(&mut state, current).await
     }
@@ -163,12 +175,7 @@ impl Omemo {
         let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &envelope.encrypted)?;
 
         let identity = *decrypted.received.session.their_identity();
-        if !state.check_identity(&envelope.sender, device, &identity) {
-            return Err(Error::IdentityChanged {
-                jid: envelope.sender,
-                device,
-            });
-        }
+        self.record_identity(&mut state, &envelope.sender, device, &identity)?;
 
         // A device missing from the cached list means the cache is stale: drop it, so
         // the next message reads the list from the server again. Taking the sender into
@@ -187,6 +194,7 @@ impl Omemo {
         if let Some(pre_key) = decrypted.received.used_pre_key {
             state.keys.remove_pre_key(pre_key);
             state.keys.refill_pre_keys()?;
+            self.persist.keys(&state.keys)?;
             self.publish_bundle(&state).await?;
         }
         if answer_needed {
@@ -198,6 +206,7 @@ impl Omemo {
                 .send(stanza(MessageType::Chat, envelope.sender.clone(), empty, false))
                 .await?;
         }
+        self.persist.session(&key.0, key.1, &session)?;
         state.sessions.insert(key, session);
 
         Ok(Incoming {
@@ -222,7 +231,7 @@ impl Omemo {
         if !targets.iter().any(|(jid, _)| jid == to) {
             return Err(Error::NoDevices(to.clone()));
         }
-        let encrypted = encrypt_for(&mut state, &targets, text)?;
+        let encrypted = self.encrypt_for(&mut state, &targets, text)?;
         self.account
             .send(stanza(MessageType::Chat, to.clone(), encrypted, true))
             .await?;
@@ -250,7 +259,7 @@ impl Omemo {
         if !targets.iter().any(|(jid, _)| jid != self.account.jid()) {
             return Err(Error::NoDevices(room.clone()));
         }
-        let encrypted = encrypt_for(&mut state, &targets, text)?;
+        let encrypted = self.encrypt_for(&mut state, &targets, text)?;
         self.account
             .send(stanza(MessageType::Groupchat, room.clone(), encrypted, true))
             .await?;
@@ -300,21 +309,59 @@ impl Omemo {
         Ok(targets)
     }
 
-    async fn start_session(&self, state: &State, jid: &BareJid, device: DeviceId) -> Result<Session, Error> {
+    async fn start_session(
+        &self,
+        state: &mut State,
+        jid: &BareJid,
+        device: DeviceId,
+    ) -> Result<Session, Error> {
         let items = self.account.items(jid, &bundle_node(device)).await?;
         let item = items.first().ok_or(Error::NoDevices(jid.clone()))?;
         let bundle = xml::Bundle::try_from(item.payload.clone())
             .map_err(|_| omemo_xml::Error::Malformed("bundle does not parse"))?;
         let bundle = bundle::from_xml(&bundle)?;
-        if let Some(known) = state.identities.get(&(jid.clone(), device))
-            && known != &bundle.identity_key
-        {
-            return Err(Error::IdentityChanged {
+        let session = Session::initiate(&state.keys, &bundle)?;
+        self.record_identity(state, jid, device, &bundle.identity_key)?;
+        Ok(session)
+    }
+
+    /// Trusts a device's first identity key (BTBV) and refuses a changed one.
+    fn record_identity(
+        &self,
+        state: &mut State,
+        jid: &BareJid,
+        device: DeviceId,
+        key: &[u8; 32],
+    ) -> Result<(), Error> {
+        match state.check_identity(jid, device, key) {
+            Identity::Known => Ok(()),
+            Identity::New => Ok(self.persist.identity(jid, device, key)?),
+            Identity::Changed => Err(Error::IdentityChanged {
                 jid: jid.clone(),
                 device,
-            });
+            }),
         }
-        Ok(Session::initiate(&state.keys, &bundle)?)
+    }
+
+    fn encrypt_for(
+        &self,
+        state: &mut State,
+        targets: &[(BareJid, DeviceId)],
+        text: &str,
+    ) -> Result<xml::Encrypted, Error> {
+        let sender_device = state.keys.device_id;
+        let recipients = state
+            .sessions
+            .iter_mut()
+            .filter(|(key, _)| targets.contains(key))
+            .map(|((_, device), session)| (*device, session));
+        let encrypted = message::encrypt(sender_device, text.as_bytes(), recipients)?;
+        // Every one of these sessions moved a step.
+        for (jid, device) in targets {
+            self.persist
+                .session(jid, *device, &state.sessions[&(jid.clone(), *device)])?;
+        }
+        Ok(encrypted)
     }
 
     async fn publish_bundle(&self, state: &State) -> Result<(), Error> {
@@ -350,20 +397,6 @@ fn parse_device_list(items: &[PepItem]) -> BTreeSet<DeviceId> {
         .and_then(|item| xml::DeviceList::try_from(item.payload.clone()).ok())
         .map(|list| device_list::from_xml(&list))
         .unwrap_or_default()
-}
-
-fn encrypt_for(
-    state: &mut State,
-    targets: &[(BareJid, DeviceId)],
-    text: &str,
-) -> Result<xml::Encrypted, Error> {
-    let sender_device = state.keys.device_id;
-    let recipients = state
-        .sessions
-        .iter_mut()
-        .filter(|(key, _)| targets.contains(key))
-        .map(|((_, device), session)| (*device, session));
-    Ok(message::encrypt(sender_device, text.as_bytes(), recipients)?)
 }
 
 fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, with_body: bool) -> Message {

@@ -7,6 +7,8 @@ pub enum Error {
     Xmpp(#[from] omtalk_xmpp::Error),
     #[error(transparent)]
     Omemo(#[from] omemo_xml::Error),
+    #[error(transparent)]
+    Persist(#[from] crate::PersistError),
     #[error("{0} has no OMEMO device that can receive messages")]
     NoDevices(BareJid),
     #[error("{nick} in {room} is not known to the room as a real account")]

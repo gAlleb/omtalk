@@ -5,12 +5,12 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::connect::DnsConfig;
-use tokio_xmpp::xmlstream::Timeouts;
 use tokio_xmpp::{Client, Event as ClientEvent, IqRequest, IqResponse, Stanza};
 use xmpp_parsers::jid::{BareJid, Jid};
 use xmpp_parsers::message::Message;
 use xmpp_parsers::minidom::Element;
 
+use crate::login::{self, Login};
 use crate::pep::{self, Access};
 use crate::{AccountConfig, AccountEvent, Error, Event, PepItem, Server, disco};
 
@@ -38,11 +38,13 @@ impl Account {
     pub(crate) fn spawn(config: AccountConfig, events: mpsc::UnboundedSender<AccountEvent>) -> Self {
         let (commands, queue) = mpsc::channel(64);
         let jid = config.jid.clone();
-        tokio::spawn(run(connect(&config), jid.clone(), queue, events));
+        let account = jid.clone();
+        let iq_timeout = config.iq_timeout;
+        tokio::spawn(supervise(config, account, queue, events));
         Self {
             jid,
             commands,
-            iq_timeout: config.iq_timeout,
+            iq_timeout,
         }
     }
 
@@ -116,23 +118,26 @@ fn connect(config: &AccountConfig) -> Client {
     match &config.server {
         Server::Auto => Client::new(jid, password),
         Server::StartTls { host, port } => {
-            Client::new_starttls(jid, password, DnsConfig::no_srv(host, *port), Timeouts::default())
+            Client::new_starttls(jid, password, DnsConfig::no_srv(host, *port), config.timeouts())
         }
         Server::DirectTls { host, port } => Client::new_direct_tls_with_config(
             jid,
             password,
             DnsConfig::no_srv(host, *port),
-            Timeouts::default(),
+            config.timeouts(),
         ),
         #[cfg(feature = "insecure-tcp")]
         Server::Plaintext { addr } => {
-            Client::new_plaintext(jid, password, DnsConfig::addr(addr), Timeouts::default())
+            Client::new_plaintext(jid, password, DnsConfig::addr(addr), config.timeouts())
         }
     }
 }
 
-async fn run(
-    mut client: Client,
+/// Checks the password once, then runs the connection. tokio-xmpp re-establishes a
+/// broken connection on its own, also after a server restart; it would also retry a
+/// refused password forever without a word, which the check prevents.
+async fn supervise(
+    config: AccountConfig,
     account: BareJid,
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::UnboundedSender<AccountEvent>,
@@ -143,6 +148,27 @@ async fn run(
             event,
         });
     };
+    match login::check(&config).await {
+        Login::Accepted => {}
+        Login::Refused(reason) => return emit(Event::AuthFailed { reason }),
+        // tokio-xmpp keeps trying from here, with growing pauses.
+        Login::Unreachable(reason) => emit(Event::Disconnected { reason }),
+    }
+    if let Ended::Lost = run(connect(&config), &mut commands, &emit).await {
+        emit(Event::Disconnected {
+            reason: "the connection task ended".into(),
+        });
+    }
+}
+
+enum Ended {
+    /// Asked to stop, or every handle is gone.
+    Stopped,
+    /// tokio-xmpp's own task ended, which it does only when it fails internally.
+    Lost,
+}
+
+async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &impl Fn(Event)) -> Ended {
     loop {
         tokio::select! {
             event = client.next() => match event {
@@ -151,36 +177,55 @@ async fn run(
                         emit(event);
                     }
                 }
-                None => break,
+                // The client's worker is gone; `send_end` would panic now.
+                None => return Ended::Lost,
             },
             command = commands.recv() => match command {
-                Some(Command::Send(stanza, reply)) => {
-                    let result = client.send_stanza(*stanza).await.map(drop).map_err(|e| Error::Send(e.to_string()));
-                    let _ = reply.send(result);
+                Some(command) => {
+                    if let Some(done) = execute(&mut client, command).await {
+                        return stop(client, done).await;
+                    }
                 }
-                Some(Command::Iq { to, request, reply }) => {
-                    let token = client.send_iq(to, request).await;
-                    // The answer arrives later; waiting for it here would stall the stream.
-                    tokio::spawn(async move {
-                        let _ = reply.send(match token.await {
-                            Ok(IqResponse::Result(payload)) => Ok(payload),
-                            Ok(IqResponse::Error(error)) => Err(Error::Stanza(Box::new(error))),
-                            Err(failure) => Err(Error::Send(format!("{failure:?}"))),
-                        });
-                    });
-                }
-                Some(Command::Stop(done)) => {
-                    let _ = client.send_end().await;
-                    let _ = done.send(());
-                    return;
-                }
-                None => {
-                    let _ = client.send_end().await;
-                    return;
-                }
+                // Every handle is gone.
+                None => return stop(client, None).await,
             },
         }
     }
+}
+
+async fn stop(client: Client, done: Option<oneshot::Sender<()>>) -> Ended {
+    let _ = client.send_end().await;
+    if let Some(done) = done {
+        let _ = done.send(());
+    }
+    Ended::Stopped
+}
+
+/// Carries out one command; `Some` if it asks to stop, carrying whom to tell.
+async fn execute(client: &mut Client, command: Command) -> Option<Option<oneshot::Sender<()>>> {
+    match command {
+        Command::Send(stanza, reply) => {
+            let result = client
+                .send_stanza(*stanza)
+                .await
+                .map(drop)
+                .map_err(|e| Error::Send(e.to_string()));
+            let _ = reply.send(result);
+        }
+        Command::Iq { to, request, reply } => {
+            let token = client.send_iq(to, request).await;
+            // The answer arrives later; waiting for it here would stall the stream.
+            tokio::spawn(async move {
+                let _ = reply.send(match token.await {
+                    Ok(IqResponse::Result(payload)) => Ok(payload),
+                    Ok(IqResponse::Error(error)) => Err(Error::Stanza(Box::new(error))),
+                    Err(failure) => Err(Error::Send(format!("{failure:?}"))),
+                });
+            });
+        }
+        Command::Stop(done) => return Some(Some(done)),
+    }
+    None
 }
 
 /// Answers what the protocol requires and turns the rest into an [`Event`].

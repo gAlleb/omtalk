@@ -1,14 +1,15 @@
-//! Test devices: each one a client with its own connection, keys and event loop,
-//! against the test Prosody (`mise run prosody`).
-
-#![allow(dead_code)]
+//! Test devices for the integration tests of this workspace: each one a client with
+//! its own connection, keys and event loop, against the test Prosody
+//! (`mise run prosody`).
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use omemo::{DeviceId, OwnKeys};
-use omtalk_omemo::{Incoming, Omemo, State};
+use omtalk_omemo::{Ephemeral, Incoming, Omemo, Persist, State};
+use omtalk_store::Store;
 use omtalk_xmpp::{Account, AccountConfig, Accounts, BareJid, Event, Server};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -21,17 +22,40 @@ pub struct Device {
     pub omemo: Arc<Omemo>,
     pub jid: BareJid,
     inbox: mpsc::UnboundedReceiver<Result<Incoming, String>>,
+    /// Connection events after the first login: `Online` and `Disconnected`.
+    connection: mpsc::UnboundedReceiver<Event>,
 }
 
 impl Device {
-    /// One client: its own connection and keys, driven by its own event loop.
+    /// One client with fresh keys that keeps nothing.
     pub async fn start(user: &str) -> Self {
+        let state = State::new(OwnKeys::generate(0).unwrap());
+        Self::start_with(user, state, Arc::new(Ephemeral)).await
+    }
+
+    /// One client keeping its OMEMO state in the database at `path`: started again on
+    /// the same file, it is the same device.
+    pub async fn start_stored(user: &str, path: &Path) -> Self {
+        let store = Store::open(path).unwrap();
+        let jid: BareJid = format!("{user}@localhost").parse().unwrap();
+        let state = store
+            .load_omemo(&jid)
+            .unwrap()
+            .unwrap_or_else(|| State::new(OwnKeys::generate(0).unwrap()));
+        Self::start_with(user, state, store.omemo(&jid)).await
+    }
+
+    /// One client: its own connection and keys, driven by its own event loop.
+    pub async fn start_with(user: &str, state: State, persist: Arc<dyn Persist>) -> Self {
         let jid: BareJid = format!("{user}@localhost").parse().unwrap();
         let mut config = AccountConfig::new(jid.clone(), "test");
         config.server = Server::Plaintext {
             addr: "127.0.0.1:15222".into(),
         };
         config.iq_timeout = Duration::from_secs(5);
+        // A dead connection is noticed within seconds here, not a minute.
+        config.keepalive = Duration::from_secs(2);
+        config.keepalive_answer = Duration::from_secs(2);
 
         let (mut accounts, mut events) = Accounts::new();
         let account = accounts.add(config).await;
@@ -41,22 +65,28 @@ impl Device {
         .await
         .expect("online; is the test server up (`mise run prosody`)?");
 
-        let omemo = Arc::new(Omemo::new(
-            account.clone(),
-            State::new(OwnKeys::generate(0).unwrap()),
-        ));
+        let omemo = Arc::new(Omemo::persisting(account.clone(), state, persist));
         omemo.announce().await.unwrap();
 
         let (tx, inbox) = mpsc::unbounded_channel();
+        let (connection_tx, connection) = mpsc::unbounded_channel();
         let driver = omemo.clone();
         tokio::spawn(async move {
             let _accounts = accounts;
             while let Some(event) = events.recv().await {
                 match &event.event {
-                    Event::Online { resumed: false, .. } => driver.announce().await.unwrap(),
-                    // Shown only when a test fails, where a broken connection explains a lot.
+                    Event::Online { resumed, .. } => {
+                        if !resumed {
+                            driver.announce().await.unwrap();
+                        }
+                        let _ = connection_tx.send(event.event);
+                        continue;
+                    }
                     Event::Disconnected { reason } => {
-                        eprintln!("{} disconnected: {reason}", driver.device_id())
+                        // Shown only when a test fails, where a broken connection explains a lot.
+                        eprintln!("{} disconnected: {reason}", driver.device_id());
+                        let _ = connection_tx.send(event.event);
+                        continue;
                     }
                     _ => {}
                 }
@@ -72,7 +102,31 @@ impl Device {
             omemo,
             jid,
             inbox,
+            connection,
         }
+    }
+
+    /// Waits for the next login after a broken connection; `true` if the stream was
+    /// resumed (XEP-0198), `false` if it is a new session.
+    pub async fn reconnected(&mut self) -> bool {
+        self.reconnected_within(WAIT).await
+    }
+
+    pub async fn reconnected_within(&mut self, limit: Duration) -> bool {
+        timeout(limit, async {
+            loop {
+                if let Event::Online { resumed, .. } = self.connection.recv().await.unwrap() {
+                    return resumed;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{} did not reconnect", self.jid))
+    }
+
+    /// Disconnects, like quitting the client.
+    pub async fn stop(self) {
+        self.account.stop().await;
     }
 
     pub async fn own_list(&self) -> BTreeSet<DeviceId> {

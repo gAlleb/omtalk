@@ -7,7 +7,8 @@ use omtalk_xmpp::BareJid;
 /// that matters: a lost session means undecryptable messages until it is rebuilt.
 pub struct State {
     pub keys: OwnKeys,
-    /// Latest known device list per account, the own one included.
+    /// Latest known device list per account, the own one included. A cache, not saved:
+    /// after a restart it is read from the server again.
     pub device_lists: HashMap<BareJid, BTreeSet<DeviceId>>,
     pub sessions: HashMap<(BareJid, DeviceId), Session>,
     /// Identity key first seen for each device. Trusted blindly until the user decides
@@ -27,7 +28,20 @@ impl State {
     }
 
     /// Records the identity key of a device, or checks it against the recorded one.
-    pub(crate) fn check_identity(&mut self, jid: &BareJid, device: DeviceId, key: &[u8; 32]) -> bool {
-        *self.identities.entry((jid.clone(), device)).or_insert(*key) == *key
+    pub(crate) fn check_identity(&mut self, jid: &BareJid, device: DeviceId, key: &[u8; 32]) -> Identity {
+        match self.identities.get(&(jid.clone(), device)) {
+            Some(known) if known == key => Identity::Known,
+            Some(_) => Identity::Changed,
+            None => {
+                self.identities.insert((jid.clone(), device), *key);
+                Identity::New
+            }
+        }
     }
+}
+
+pub(crate) enum Identity {
+    Known,
+    New,
+    Changed,
 }

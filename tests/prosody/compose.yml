@@ -7,7 +7,11 @@ services:
     volumes:
       - ./prosody.cfg.lua:/etc/prosody/prosody.cfg.lua:ro
       - ./accounts.sh:/omtalk/accounts.sh:ro
-    tmpfs:
-      - /var/lib/prosody:uid=100,gid=102,mode=0750
+      # Survives `docker restart` (the server restart test needs that);
+      # `mise run prosody` deletes it for a clean slate.
+      - data:/var/lib/prosody
     ports:
       - "127.0.0.1:15222:5222"
+
+volumes:
+  data:

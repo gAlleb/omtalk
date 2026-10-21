@@ -10,6 +10,7 @@ mod config;
 mod disco;
 mod error;
 mod event;
+mod login;
 pub mod muc;
 pub mod pep;
 
@@ -20,6 +21,6 @@ pub use accounts::Accounts;
 pub use config::{AccountConfig, Server};
 pub use error::Error;
 pub use event::{AccountEvent, Event, PepItem};
-pub use xmpp_parsers::jid::{BareJid, FullJid, Jid};
+pub use xmpp_parsers::jid::{self, BareJid, FullJid, Jid};
 pub use xmpp_parsers::minidom::Element;
 pub use xmpp_parsers::muc::user::{Affiliation, Role};

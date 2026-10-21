@@ -8,7 +8,7 @@ run = "uv sync --project tests/oracle --frozen"
 
 [tasks.prosody]
 description = "Поднять тестовый Prosody (127.0.0.1:15222, всё в памяти)"
-run = "docker compose -f tests/prosody/compose.yml up -d --force-recreate"
+run = "docker compose -f tests/prosody/compose.yml down -v && docker compose -f tests/prosody/compose.yml up -d"
 
 [tasks.test]
 description = "Все тесты: сверка с python-omemo и интеграция с Prosody"

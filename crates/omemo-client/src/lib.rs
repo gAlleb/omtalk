@@ -9,9 +9,11 @@
 mod client;
 mod envelope;
 mod error;
+mod persist;
 mod state;
 
 pub use client::{Incoming, Omemo, SendReport};
 pub use envelope::Direction;
 pub use error::Error;
+pub use persist::{Ephemeral, Persist, PersistError};
 pub use state::State;

@@ -13,6 +13,13 @@ pub struct AccountConfig {
     /// How long to wait for the answer to an IQ request. A peer that never answers must
     /// not stall whatever is waiting on it.
     pub iq_timeout: Duration,
+    /// After this long without a byte from the server, ask it whether it is still there.
+    /// A connection can die without either side noticing (sleep, a router dropping it,
+    /// a server that parked the session); only asking finds out.
+    pub keepalive: Duration,
+    /// How long the server has to answer that question before the connection counts
+    /// as dead and is replaced.
+    pub keepalive_answer: Duration,
 }
 
 impl AccountConfig {
@@ -25,6 +32,17 @@ impl AccountConfig {
             resource: format!("omtalk.{suffix}"),
             server: Server::Auto,
             iq_timeout: Duration::from_secs(30),
+            keepalive: Duration::from_secs(60),
+            keepalive_answer: Duration::from_secs(30),
+        }
+    }
+}
+
+impl AccountConfig {
+    pub(crate) fn timeouts(&self) -> tokio_xmpp::xmlstream::Timeouts {
+        tokio_xmpp::xmlstream::Timeouts {
+            read_timeout: self.keepalive,
+            response_timeout: self.keepalive_answer,
         }
     }
 }
