@@ -1,0 +1,12 @@
+[tools]
+rust = "1.99.1"
+uv = "0.13.4"
+
+[tasks.setup]
+description = "Подтянуть эталон python-omemo для тестов-сверки"
+run = "uv sync --project tests/oracle --frozen"
+
+[tasks.test]
+description = "Все тесты, включая сверку с python-omemo"
+depends = ["setup"]
+run = "cargo test --workspace"
