@@ -1,0 +1,39 @@
+use xmpp_parsers::jid::{BareJid, FullJid};
+use xmpp_parsers::message::Message;
+use xmpp_parsers::minidom::Element;
+use xmpp_parsers::presence::Presence;
+
+#[derive(Debug)]
+pub struct AccountEvent {
+    pub account: BareJid,
+    pub event: Event,
+}
+
+#[derive(Debug)]
+pub enum Event {
+    /// Connected and bound. After `resumed: false` the session is new: the server forgot
+    /// presence and other per-session state, and the client re-announces it.
+    Online {
+        jid: FullJid,
+        resumed: bool,
+    },
+    /// The connection broke; it is being re-established in the background.
+    Disconnected {
+        reason: String,
+    },
+    Message(Box<Message>),
+    Presence(Box<Presence>),
+    /// A PEP node of `from` changed (published or retracted items).
+    Pep {
+        from: BareJid,
+        node: String,
+        items: Vec<PepItem>,
+        retracted: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PepItem {
+    pub id: Option<String>,
+    pub payload: Element,
+}

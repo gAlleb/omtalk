@@ -1,0 +1,27 @@
+[package]
+name = "omtalk-xmpp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+futures = "0.3.34"
+getrandom = "0.4"
+thiserror = "2.0.21"
+tokio = { version = "1.54.0", features = ["rt", "sync", "macros", "time"] }
+tokio-xmpp = { version = "6.0.0", default-features = false, features = ["starttls", "direct-tls", "ring", "rustls-native-certs"] }
+xmpp-parsers = "0.23.0"
+
+[dev-dependencies]
+omemo = { path = "../omemo" }
+omemo-xml = { path = "../omemo-xml" }
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "time"] }
+xmpp-parsers = "0.23.0"
+
+[features]
+# Plaintext TCP, for the local test server only.
+insecure-tcp = ["tokio-xmpp/insecure-tcp"]
+
+[dev-dependencies.omtalk-xmpp]
+path = "."
+features = ["insecure-tcp"]

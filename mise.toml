@@ -6,7 +6,11 @@ uv = "0.13.4"
 description = "Подтянуть эталон python-omemo для тестов-сверки"
 run = "uv sync --project tests/oracle --frozen"
 
+[tasks.prosody]
+description = "Поднять тестовый Prosody (127.0.0.1:15222, всё в памяти)"
+run = "docker compose -f tests/prosody/compose.yml up -d --force-recreate"
+
 [tasks.test]
-description = "Все тесты, включая сверку с python-omemo"
-depends = ["setup"]
+description = "Все тесты: сверка с python-omemo и интеграция с Prosody"
+depends = ["setup", "prosody"]
 run = "cargo test --workspace"

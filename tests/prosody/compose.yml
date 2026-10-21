@@ -1,0 +1,13 @@
+# Test server: `docker compose -f tests/prosody/compose.yml up -d` (or `mise run prosody`).
+services:
+  prosody:
+    image: prosodyim/prosody:13.0
+    container_name: omtalk-test-prosody
+    entrypoint: ["/omtalk/accounts.sh"]
+    volumes:
+      - ./prosody.cfg.lua:/etc/prosody/prosody.cfg.lua:ro
+      - ./accounts.sh:/omtalk/accounts.sh:ro
+    tmpfs:
+      - /var/lib/prosody:uid=100,gid=102,mode=0750
+    ports:
+      - "127.0.0.1:15222:5222"
