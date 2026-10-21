@@ -55,4 +55,9 @@ async fn restarted_client_is_the_same_device_and_keeps_its_sessions() {
     assert_eq!(text(&bob.next_text().await), "я вернулась");
     bob.omemo.send(&alice.jid, "с возвращением").await.unwrap();
     assert_eq!(text(&alice.next_text().await), "с возвращением");
+
+    // Closed properly: a connection that just vanishes stays parked on the server
+    // (XEP-0198), and the next run's offline message for this account would go to it.
+    alice.stop().await;
+    bob.stop().await;
 }
