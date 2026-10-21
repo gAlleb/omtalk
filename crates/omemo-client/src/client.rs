@@ -1,12 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use omemo::{DeviceId, Session};
 use omemo_xml::{DEVICE_LIST_NODE, bundle, bundle_node, device_list, message, xml};
-use omtalk_xmpp::{Access, Account, BareJid, Element, Event, PepItem};
+use omtalk_xmpp::{Access, Account, Affiliation, BareJid, Element, Event, PepItem, muc};
 use tokio::sync::Mutex;
 use xmpp_parsers::carbons;
 use xmpp_parsers::eme::ExplicitMessageEncryption;
-use xmpp_parsers::message::{Lang, Message};
+use xmpp_parsers::message::{Lang, Message, MessageType};
 
 use crate::envelope::{self, Direction};
 use crate::{Error, State};
@@ -22,6 +22,9 @@ pub struct Omemo {
     account: Account,
     device_id: DeviceId,
     state: Mutex<State>,
+    /// Room occupants by nick, with their real JIDs: a group message names only the
+    /// nick, but its keys belong to the real account.
+    occupants: Mutex<HashMap<BareJid, HashMap<String, BareJid>>>,
 }
 
 /// A decrypted chat message.
@@ -41,6 +44,8 @@ pub struct SendReport {
     pub devices: Vec<(BareJid, DeviceId)>,
     /// Devices without a usable session; they will not be able to read the message.
     pub failed: Vec<(BareJid, DeviceId, Error)>,
+    /// Group members that publish no OMEMO devices at all.
+    pub without_omemo: Vec<BareJid>,
 }
 
 impl Omemo {
@@ -49,11 +54,17 @@ impl Omemo {
             account,
             device_id: state.keys.device_id,
             state: Mutex::new(state),
+            occupants: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn device_id(&self) -> DeviceId {
         self.device_id
+    }
+
+    /// Occupants of `room` this device knows, by nick, with their real accounts.
+    pub async fn occupants(&self, room: &BareJid) -> HashMap<String, BareJid> {
+        self.occupants.lock().await.get(room).cloned().unwrap_or_default()
     }
 
     pub async fn with_state<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
@@ -93,6 +104,38 @@ impl Omemo {
                     state.device_lists.insert(from.clone(), list);
                 }
                 Ok(None)
+            }
+            Event::Presence(presence) => {
+                if let Some(occupant) = muc::occupant(presence) {
+                    let mut rooms = self.occupants.lock().await;
+                    let room = rooms.entry(occupant.room).or_default();
+                    match occupant.real_jid {
+                        Some(jid) if occupant.present => drop(room.insert(occupant.nick, jid)),
+                        _ => drop(room.remove(&occupant.nick)),
+                    }
+                }
+                Ok(None)
+            }
+            Event::Message(message) if message.type_ == MessageType::Groupchat => {
+                let rooms = self.occupants.lock().await.clone();
+                let resolve = |room: &BareJid, nick: &str| rooms.get(room)?.get(nick).cloned();
+                match envelope::open_group(self.account.jid(), (**message).clone(), resolve)? {
+                    // Our own message, reflected by the room: there is no key for us in it.
+                    Some(envelope)
+                        if envelope.sender == *self.account.jid()
+                            && envelope.encrypted.header.sid == self.device_id =>
+                    {
+                        Ok(None)
+                    }
+                    Some(envelope) => match self.receive(envelope).await {
+                        Err(Error::Omemo(omemo_xml::Error::NotForThisDevice))
+                        | Err(Error::Omemo(omemo_xml::Error::Omemo(omemo::Error::DuplicateMessage))) => {
+                            Ok(None)
+                        }
+                        other => other.map(Some),
+                    },
+                    None => Ok(None),
+                }
             }
             Event::Message(message) => match envelope::open(self.account.jid(), (**message).clone()) {
                 // Messages reach every device of an account, but some are addressed to
@@ -150,8 +193,9 @@ impl Omemo {
             // Completes the key exchange, so the sender stops attaching it, or resets a
             // long one-sided chain.
             let empty = message::empty(state.keys.device_id, [(device, &mut session)])?;
+            // To the sender's account, also for group messages: it concerns one session.
             self.account
-                .send(chat(envelope.sender.clone(), empty, false))
+                .send(stanza(MessageType::Chat, envelope.sender.clone(), empty, false))
                 .await?;
         }
         state.sessions.insert(key, session);
@@ -170,26 +214,80 @@ impl Omemo {
     /// Encrypts `text` for all devices of `to` and all other devices of the own account,
     /// and sends it.
     pub async fn send(&self, to: &BareJid, text: &str) -> Result<SendReport, Error> {
-        let own = self.account.jid().clone();
-        let mut report = SendReport::default();
         let mut state = self.state.lock().await;
+        let mut report = SendReport::default();
+        let targets = self
+            .targets(&mut state, std::slice::from_ref(to), &mut report)
+            .await?;
+        if !targets.iter().any(|(jid, _)| jid == to) {
+            return Err(Error::NoDevices(to.clone()));
+        }
+        let encrypted = encrypt_for(&mut state, &targets, text)?;
+        self.account
+            .send(stanza(MessageType::Chat, to.clone(), encrypted, true))
+            .await?;
+        report.devices = targets;
+        Ok(report)
+    }
 
+    /// Encrypts `text` for all devices of all members of `room` (owners, admins and
+    /// members, present or not, and anyone else present), and sends it to the room.
+    /// The room must be non-anonymous, or the members' accounts are unknown.
+    pub async fn send_group(&self, room: &BareJid, text: &str) -> Result<SendReport, Error> {
+        let mut members = BTreeSet::new();
+        for affiliation in [Affiliation::Owner, Affiliation::Admin, Affiliation::Member] {
+            members.extend(self.account.affiliated(room, affiliation).await?);
+        }
+        if let Some(present) = self.occupants.lock().await.get(room) {
+            members.extend(present.values().cloned());
+        }
+        members.remove(self.account.jid());
+
+        let mut state = self.state.lock().await;
+        let mut report = SendReport::default();
+        let members: Vec<_> = members.into_iter().collect();
+        let targets = self.targets(&mut state, &members, &mut report).await?;
+        if !targets.iter().any(|(jid, _)| jid != self.account.jid()) {
+            return Err(Error::NoDevices(room.clone()));
+        }
+        let encrypted = encrypt_for(&mut state, &targets, text)?;
+        self.account
+            .send(stanza(MessageType::Groupchat, room.clone(), encrypted, true))
+            .await?;
+        report.devices = targets;
+        Ok(report)
+    }
+
+    /// All devices of `peers` and the own other devices, with a session for each one
+    /// reachable; the unreachable ones go into the report.
+    async fn targets(
+        &self,
+        state: &mut State,
+        peers: &[BareJid],
+        report: &mut SendReport,
+    ) -> Result<Vec<(BareJid, DeviceId)>, Error> {
+        let own = self.account.jid().clone();
         let mut targets = Vec::new();
-        for jid in [to, &own] {
+        for jid in peers.iter().chain([&own]) {
             if jid != &own && !state.device_lists.contains_key(jid) {
-                let list = parse_device_list(&self.account.items(jid, DEVICE_LIST_NODE).await?);
-                state.device_lists.insert(jid.clone(), list);
+                match self.account.items(jid, DEVICE_LIST_NODE).await {
+                    Ok(items) => drop(state.device_lists.insert(jid.clone(), parse_device_list(&items))),
+                    // No node: this account does not use OMEMO.
+                    Err(omtalk_xmpp::Error::Stanza(_)) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             let devices = state.device_lists.get(jid).cloned().unwrap_or_default();
+            if devices.is_empty() && jid != &own {
+                report.without_omemo.push(jid.clone());
+            }
             for device in devices {
                 if jid == &own && device == state.keys.device_id {
                     continue;
                 }
                 if !state.sessions.contains_key(&(jid.clone(), device)) {
-                    match self.start_session(&state, jid, device).await {
-                        Ok(session) => {
-                            state.sessions.insert((jid.clone(), device), session);
-                        }
+                    match self.start_session(state, jid, device).await {
+                        Ok(session) => drop(state.sessions.insert((jid.clone(), device), session)),
                         Err(error) => {
                             report.failed.push((jid.clone(), device, error));
                             continue;
@@ -199,20 +297,7 @@ impl Omemo {
                 targets.push((jid.clone(), device));
             }
         }
-        if !targets.iter().any(|(jid, _)| jid == to) {
-            return Err(Error::NoDevices(to.clone()));
-        }
-
-        let sender_device = state.keys.device_id;
-        let recipients = state
-            .sessions
-            .iter_mut()
-            .filter(|(key, _)| targets.contains(key))
-            .map(|((_, device), session)| (*device, session));
-        let encrypted = message::encrypt(sender_device, text.as_bytes(), recipients)?;
-        self.account.send(chat(to.clone(), encrypted, true)).await?;
-        report.devices = targets;
-        Ok(report)
+        Ok(targets)
     }
 
     async fn start_session(&self, state: &State, jid: &BareJid, device: DeviceId) -> Result<Session, Error> {
@@ -267,8 +352,22 @@ fn parse_device_list(items: &[PepItem]) -> BTreeSet<DeviceId> {
         .unwrap_or_default()
 }
 
-fn chat(to: BareJid, encrypted: xml::Encrypted, with_body: bool) -> Message {
-    let mut message = Message::chat(Some(to.into()))
+fn encrypt_for(
+    state: &mut State,
+    targets: &[(BareJid, DeviceId)],
+    text: &str,
+) -> Result<xml::Encrypted, Error> {
+    let sender_device = state.keys.device_id;
+    let recipients = state
+        .sessions
+        .iter_mut()
+        .filter(|(key, _)| targets.contains(key))
+        .map(|((_, device), session)| (*device, session));
+    Ok(message::encrypt(sender_device, text.as_bytes(), recipients)?)
+}
+
+fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, with_body: bool) -> Message {
+    let mut message = Message::new_with_type(type_, Some(to.into()))
         .with_payload(encrypted)
         .with_payload(ExplicitMessageEncryption {
             namespace: omemo::NAMESPACE.into(),

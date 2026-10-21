@@ -9,6 +9,8 @@ pub enum Error {
     Omemo(#[from] omemo_xml::Error),
     #[error("{0} has no OMEMO device that can receive messages")]
     NoDevices(BareJid),
+    #[error("{nick} in {room} is not known to the room as a real account")]
+    UnknownOccupant { room: BareJid, nick: String },
     #[error("device {device} of {jid} presents a different identity key than before")]
     IdentityChanged { jid: BareJid, device: DeviceId },
 }

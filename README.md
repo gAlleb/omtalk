@@ -23,8 +23,8 @@ mise run test
 |---|---|
 | `crates/omemo` | OMEMO 0.3: X3DH, Double Ratchet, формат libsignal, полезная нагрузка AES-GCM. Без XML и сети |
 | `crates/omemo-xml` | OMEMO на проводе: devicelist, bundle, `<encrypted>` поверх типов xmpp-parsers; шифрование одного сообщения для многих устройств |
-| `crates/xmpp` | соединения для нескольких аккаунтов, обязательные ответы клиента (disco, ping, caps), PEP |
-| `crates/omemo-client` | OMEMO для аккаунта: своё устройство в списке, carbons, шифрование для всех устройств собеседника и своих, доверие BTBV |
+| `crates/xmpp` | соединения для нескольких аккаунтов, обязательные ответы клиента (disco, ping, caps), PEP, MUC (вход, закрытая комната, участники) |
+| `crates/omemo-client` | OMEMO для аккаунта: своё устройство в списке, carbons, шифрование для всех устройств собеседника и своих, группы (все участники, включая отсутствующих), доверие BTBV |
 | `crates/omemo-oracle` | только для тестов: запуск эталонного устройства и разговор с ним |
 | `tests/prosody` | одноразовый Prosody 13 для интеграционных тестов |
 | `tests/oracle` | эталонное устройство на python-omemo; `crates/omemo/tests/oracle.rs` сверяется с ним байт в байт |

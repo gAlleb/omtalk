@@ -52,6 +52,38 @@ pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
     })
 }
 
+/// Opens a group message, whose sender is known by nick only: `resolve` maps it to the
+/// real account. A sender that cannot be resolved is an error, not a silent drop.
+pub(crate) fn open_group(
+    own: &BareJid,
+    message: Message,
+    resolve: impl Fn(&BareJid, &str) -> Option<BareJid>,
+) -> Result<Option<Envelope>, crate::Error> {
+    let Some(from) = message.from.as_ref().and_then(|f| f.try_as_full().ok()).cloned() else {
+        return Ok(None);
+    };
+    let Some(encrypted) = encrypted_in(message) else {
+        return Ok(None);
+    };
+    let room = from.to_bare();
+    let nick = from.resource().to_string();
+    let sender = resolve(&room, &nick).ok_or(crate::Error::UnknownOccupant {
+        room: room.clone(),
+        nick,
+    })?;
+    let direction = if &sender == own {
+        Direction::Outgoing
+    } else {
+        Direction::Incoming
+    };
+    Ok(Some(Envelope {
+        peer: room,
+        sender,
+        direction,
+        encrypted,
+    }))
+}
+
 fn encrypted_in(mut message: Message) -> Option<xml::Encrypted> {
     message.extract_payload::<xml::Encrypted>().ok().flatten()
 }
