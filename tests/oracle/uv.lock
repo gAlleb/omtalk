@@ -99,6 +99,15 @@ wheels = [
 ]
 
 [[package]]
+name = "elementpath"
+version = "5.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/69/9d/766386c47959bb8b014242af8770c869350884a3c3f7054375576e11f30a/elementpath-5.1.4.tar.gz", hash = "sha256:3c912a9c41311ac5244c038867670d7c0b0fec0e444813608e5b846dbb3428ac", size = 381114, upload-time = "2026-08-08T20:29:22.963Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/b0/b709cc33ccb0288f41f2d92dfd754d2ccf925cb9277a66effbc132cd004c/elementpath-5.1.4-py3-none-any.whl", hash = "sha256:5ec8d7bb44b16c98414a6a95e20cb150f3cbfc3cac65edc14773288c7a937376", size = 261881, upload-time = "2026-08-08T20:29:20.649Z" },
+]
+
+[[package]]
 name = "oldmemo"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -114,6 +123,11 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e6/fb/efab6bd38d0b7e1faa41980c53a1b2008fc15cd52140f6cf09481894663c/oldmemo-2.1.0.tar.gz", hash = "sha256:06d891d1f0b57a08773cfca0270b35f3d82f6e38a1b2c52bcb94b14a1f913758", size = 36989, upload-time = "2026-01-29T21:33:19.726Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/7d/ea851d1d967e7427153dec064b44143f52167d496c70c6251caa2b5f053f/oldmemo-2.1.0-py3-none-any.whl", hash = "sha256:8081164ff9d2d621624841efbb4b9b0b26ab59b32225ee0ca9351d4d265ca70a", size = 38303, upload-time = "2026-01-29T21:33:18.046Z" },
+]
+
+[package.optional-dependencies]
+xml = [
+    { name = "xmlschema" },
 ]
 
 [[package]]
@@ -134,13 +148,13 @@ name = "omtalk-oracle"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "oldmemo" },
+    { name = "oldmemo", extra = ["xml"] },
     { name = "omemo" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "oldmemo" },
+    { name = "oldmemo", extras = ["xml"] },
     { name = "omemo" },
 ]
 
@@ -265,4 +279,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/99/88/1cc278be5ebd98b5432aa4319b6256e651c4c13bf4f709cb5e6b00f4db66/xeddsa-1.2.0-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:98de0ce498124850766d9cf5bc505389976db1e11fc3a0c92bad2b9c54bcaad3", size = 234946, upload-time = "2026-01-29T21:10:29.626Z" },
     { url = "https://files.pythonhosted.org/packages/f4/1d/f606426476940d9eaea01758faedb5366ce1f00aa4876030b3b0d2116226/xeddsa-1.2.0-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2984409eb1f6c5d43f84cc18382507851fabee69e078f74851765af4854919af", size = 250713, upload-time = "2026-01-29T21:10:31.097Z" },
     { url = "https://files.pythonhosted.org/packages/28/d7/7e3ff62f353712f2d8f5693802cbdd15800c413285846e3f8739971fd27e/xeddsa-1.2.0-cp312-cp312-win_amd64.whl", hash = "sha256:84a23b29623cf847dd2b37af4652b426495ba5af6f176e68ee6d9ff0d05ad149", size = 160890, upload-time = "2026-01-29T20:13:30.462Z" },
+]
+
+[[package]]
+name = "xmlschema"
+version = "4.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "elementpath" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/f0/2431c2c8f77326757f2e2b1d79226c17b2abfe44a78a41c7d7b944e90732/xmlschema-4.3.2.tar.gz", hash = "sha256:f3b33a21a2b2cdc404ddc3fb599d8bc1dee90b155d547370672e6e684746b8d6", size = 682724, upload-time = "2026-06-30T06:11:50.744Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/fb/8be39dc47b0ed9bbc80f384906eed87fa974c9b377a7a430118c3b405550/xmlschema-4.3.2-py3-none-any.whl", hash = "sha256:cf5c970a30f6ebcb3da35260e694704cc0b6794d8ace46125bb2a95e38ed9307", size = 504613, upload-time = "2026-06-30T06:11:47.462Z" },
 ]

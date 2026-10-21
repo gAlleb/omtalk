@@ -3,7 +3,7 @@ name = "omtalk-oracle"
 version = "0.0.0"
 description = "Эталон python-omemo для тестов-сверки крейта omemo"
 requires-python = "==3.12.*"
-dependencies = ["omemo", "oldmemo"]
+dependencies = ["omemo", "oldmemo[xml]"]
 
 [tool.uv]
 package = false
