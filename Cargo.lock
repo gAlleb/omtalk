@@ -1047,6 +1047,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omtalk-omemo"
+version = "0.1.0"
+dependencies = [
+ "omemo",
+ "omemo-xml",
+ "omtalk-xmpp",
+ "thiserror",
+ "tokio",
+ "xmpp-parsers",
+]
+
+[[package]]
 name = "omtalk-xmpp"
 version = "0.1.0"
 dependencies = [
