@@ -7,10 +7,12 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use omtalk_omemo::{Direction, Incoming};
-use omtalk_xmpp::BareJid;
+use omtalk_xmpp::services::CommandAction;
+use omtalk_xmpp::{BareJid, Jid};
 use ratatui::layout::Rect;
 
 use crate::config::Modifier;
+use crate::services::{Outcome, Services};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatKind {
@@ -138,6 +140,18 @@ pub enum Splitter {
 }
 
 /// Where things were drawn last, for the mouse.
+/// A button in the services window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceButton {
+    Back,
+    Reload,
+    Close,
+    /// A step of the open command.
+    Step(CommandAction),
+    /// Leave a command's result for the listing.
+    Dismiss,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Areas {
     pub screen: Rect,
@@ -154,9 +168,14 @@ pub struct Areas {
     pub chat_rows: Vec<(Rect, usize)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
+    /// The services window and what is clickable in it.
+    pub service_window: Rect,
+    pub service_rows: Vec<(Rect, usize)>,
+    pub service_fields: Vec<(Rect, usize)>,
+    pub service_buttons: Vec<(Rect, ServiceButton)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Send {
         account: BareJid,
@@ -192,13 +211,19 @@ pub enum Action {
         account: BareJid,
         jid: BareJid,
     },
+    /// Ask a server what it offers, or run one step of a command.
+    Services {
+        request: crate::services::Request,
+        /// The command's title, for the form that comes back.
+        title: String,
+    },
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
     Quit,
 }
 
 pub const HELP: &str = "/msg JID — открыть чат · /join КОМНАТА [НИК] · /leave · /add JID [ИМЯ] · \
-/accept JID · /refuse JID · /devices · /help";
+/accept JID · /refuse JID · /devices · /services [АДРЕС] · /help";
 
 pub struct App {
     pub accounts: Vec<BareJid>,
@@ -219,6 +244,8 @@ pub struct App {
     pub status: String,
     pub areas: Areas,
     pub dragging: Option<Splitter>,
+    /// The services window, over the chat while open.
+    pub services: Option<Services>,
     pub quit: bool,
 }
 
@@ -251,6 +278,7 @@ impl App {
             status: String::new(),
             areas: Areas::default(),
             dragging: None,
+            services: None,
             quit: false,
         }
     }
@@ -365,6 +393,10 @@ impl App {
             self.quit = true;
             return vec![Action::Quit];
         }
+        if let Some(services) = self.services.as_mut() {
+            let outcome = services.on_key(key);
+            return self.services_outcome(outcome);
+        }
         if key.modifiers.contains(self.modifier) {
             return self.shortcut(key.code);
         }
@@ -405,6 +437,7 @@ impl App {
                 self.toggle_omemo();
                 Vec::new()
             }
+            KeyCode::Char('s') => self.open_services(None),
             KeyCode::Char('b') => {
                 self.show_left = !self.show_left;
                 Vec::new()
@@ -563,6 +596,10 @@ impl App {
                 }]),
                 _ => Err("откройте личный чат".to_owned()),
             },
+            ("/services", _) => match args.first().map(|a| a.parse::<Jid>()) {
+                Some(Err(_)) => Err("/services: нужен адрес сервиса, например example.org".to_owned()),
+                address => return self.open_services(address.and_then(Result::ok)),
+            },
             ("/help", _) => Err(HELP.to_owned()),
             ("/msg" | "/join" | "/add" | "/accept" | "/refuse", None) => {
                 Err(format!("{name}: нужен адрес вида name@server"))
@@ -576,6 +613,91 @@ impl App {
                 Vec::new()
             }
         }
+    }
+
+    /// Opens the services window on `jid`, or on the current account's own server.
+    pub fn open_services(&mut self, jid: Option<Jid>) -> Vec<Action> {
+        let account = self
+            .current()
+            .map(|c| c.account.clone())
+            .or_else(|| self.accounts.first().cloned());
+        let Some(account) = account else { return Vec::new() };
+        let jid = jid.unwrap_or_else(|| Jid::from(account.domain().to_owned()));
+        let (services, request) = Services::open(account, jid);
+        self.services = Some(services);
+        vec![Action::Services {
+            request,
+            title: String::new(),
+        }]
+    }
+
+    /// Closes the window; a command still waiting for its form is cancelled on the
+    /// server, so it does not hang there half done.
+    pub fn close_services(&mut self) -> Vec<Action> {
+        let Some(mut services) = self.services.take() else {
+            return Vec::new();
+        };
+        match services.form.as_ref().filter(|f| !f.finished()) {
+            Some(_) => match services.act(CommandAction::Cancel) {
+                Outcome::Request(request, title) => vec![Action::Services { request, title }],
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        }
+    }
+
+    fn services_outcome(&mut self, outcome: Outcome) -> Vec<Action> {
+        match outcome {
+            Outcome::Stay => Vec::new(),
+            Outcome::Close => self.close_services(),
+            Outcome::Request(request, title) => vec![Action::Services { request, title }],
+        }
+    }
+
+    fn services_mouse(&mut self, mouse: MouseEvent) -> Vec<Action> {
+        let (x, y) = (mouse.column, mouse.row);
+        let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        let areas = &self.areas;
+        let row = areas
+            .service_rows
+            .iter()
+            .find(|(r, _)| inside(*r))
+            .map(|&(_, i)| i);
+        let field = areas
+            .service_fields
+            .iter()
+            .find(|(r, _)| inside(*r))
+            .map(|&(_, i)| i);
+        let button = areas
+            .service_buttons
+            .iter()
+            .find(|(r, _)| inside(*r))
+            .map(|&(_, b)| b);
+        let outside = !inside(areas.service_window);
+        let Some(services) = self.services.as_mut() else {
+            return Vec::new();
+        };
+        let outcome = match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => match (button, row, field) {
+                (Some(ServiceButton::Close), ..) => return self.close_services(),
+                (Some(ServiceButton::Back), ..) => services.go_back(),
+                (Some(ServiceButton::Reload), ..) => services.reload(),
+                (Some(ServiceButton::Step(action)), ..) => services.act(action),
+                (Some(ServiceButton::Dismiss), ..) => {
+                    services.form = None;
+                    Outcome::Stay
+                }
+                (None, Some(row), _) => services.click_row(row),
+                (None, _, Some(field)) => services.click_field(field),
+                // A click beside the window leaves it, as Esc does.
+                _ if outside => return self.close_services(),
+                _ => Outcome::Stay,
+            },
+            MouseEventKind::ScrollUp => services.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            MouseEventKind::ScrollDown => services.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            _ => Outcome::Stay,
+        };
+        self.services_outcome(outcome)
     }
 
     pub fn toggle_omemo(&mut self) {
@@ -611,6 +733,9 @@ impl App {
         let (x, y) = (mouse.column, mouse.row);
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         let inside_opt = |r: Option<Rect>| r.is_some_and(inside);
+        if self.services.is_some() {
+            return self.services_mouse(mouse);
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // A pane's inner border is its handle.

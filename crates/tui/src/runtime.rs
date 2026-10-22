@@ -14,7 +14,8 @@ use futures::StreamExt;
 use omemo::OwnKeys;
 use omtalk_omemo::{Direction, Incoming, Omemo, State};
 use omtalk_store::{Store, StoredMessage};
-use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Server, muc};
+use omtalk_xmpp::services::{CommandAction, CommandStep};
+use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Jid, Server, muc};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
@@ -23,6 +24,7 @@ use xmpp_parsers::message::{Lang, Message};
 
 use crate::app::{Action, App, ChatKind, DeviceRow, Line, MediaState};
 use crate::config::{self, AccountEntry, Config};
+use crate::services::{Listing, Request};
 use crate::view::{self, Pictures};
 
 /// How many messages of each chat are loaded on start.
@@ -190,6 +192,18 @@ enum Msg {
     Picture {
         url: String,
         image: image::DynamicImage,
+    },
+    /// What an address offers, for the services window.
+    Listed {
+        jid: Jid,
+        node: Option<String>,
+        listing: Result<Listing, String>,
+    },
+    /// The answer to a command step.
+    Stepped {
+        jid: Jid,
+        title: String,
+        step: Result<CommandStep, String>,
     },
 }
 
@@ -375,6 +389,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.media_done(&url, state);
         }
         Msg::Picture { .. } => {}
+        Msg::Listed { jid, node, listing } => {
+            if let Some(services) = app.services.as_mut() {
+                services.listed(&jid, &node, listing);
+            }
+        }
+        Msg::Stepped { jid, title, step } => {
+            if let Some(services) = app.services.as_mut() {
+                services.stepped(jid, title, step);
+            }
+        }
         Msg::Notice { account, chat, text } => {
             let index = chat.map(|chat| app.chat(&account, &chat, ChatKind::Direct));
             app.notice(index, text, now());
@@ -606,6 +630,28 @@ fn refusal(error: &omtalk_xmpp::Error) -> String {
     }
 }
 
+/// A failed service query, in words.
+fn service_error(error: &omtalk_xmpp::Error) -> String {
+    use omtalk_xmpp::stanza_error::DefinedCondition as C;
+    match error {
+        omtalk_xmpp::Error::Stanza(e) => {
+            let what = match e.defined_condition {
+                C::Forbidden | C::NotAuthorized => "нет прав".to_owned(),
+                C::ItemNotFound => "такого нет".to_owned(),
+                C::ServiceUnavailable | C::FeatureNotImplemented => "не поддерживается".to_owned(),
+                C::BadRequest => "сервер не принял запрос".to_owned(),
+                C::RemoteServerNotFound | C::RemoteServerTimeout => "сервер недоступен".to_owned(),
+                ref other => format!("{other:?}"),
+            };
+            match e.texts.values().next() {
+                Some(text) => format!("{what}: {text}"),
+                None => what,
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
 async fn perform(action: Action, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
@@ -753,6 +799,65 @@ async fn perform(action: Action, shared: Shared) {
                     chat: Some(jid),
                     text: format!("устройства: {e}"),
                 }),
+            }
+        }
+        Action::Services { request, title } => {
+            let account = match &request {
+                Request::Browse { account, .. } | Request::Execute { account, .. } => account.clone(),
+            };
+            let Some((xmpp, _)) = get(&account) else { return };
+            match request {
+                Request::Browse { jid, node, .. } => {
+                    // Commands are listed under the address itself, not under its nodes.
+                    let (info, items, commands) = tokio::join!(
+                        xmpp.disco_info(&jid, node.as_deref()),
+                        xmpp.disco_items(&jid, node.as_deref()),
+                        async {
+                            match node {
+                                None => xmpp.commands(&jid).await.unwrap_or_default(),
+                                Some(_) => Vec::new(),
+                            }
+                        },
+                    );
+                    // An address may answer one query and not the other; only both
+                    // failing is a failure.
+                    let listing = match (info, items) {
+                        (Err(e), Err(_)) => Err(service_error(&e)),
+                        (info, items) => {
+                            let commands: Vec<_> = commands;
+                            let items = items
+                                .unwrap_or_default()
+                                .into_iter()
+                                // Commands also show up as items of their own node.
+                                .filter(|i| !commands.contains(i))
+                                .collect();
+                            Ok(Listing {
+                                info: info.ok(),
+                                items,
+                                commands,
+                            })
+                        }
+                    };
+                    tell(Msg::Listed { jid, node, listing });
+                }
+                Request::Execute {
+                    jid,
+                    node,
+                    session,
+                    action,
+                    form,
+                    ..
+                } => {
+                    let step = xmpp.execute(&jid, &node, session.as_deref(), action, form).await;
+                    // A cancelled command's window is already gone.
+                    if action != CommandAction::Cancel {
+                        tell(Msg::Stepped {
+                            jid,
+                            title,
+                            step: step.map_err(|e| service_error(&e)),
+                        });
+                    }
+                }
             }
         }
         Action::Open(path) => {

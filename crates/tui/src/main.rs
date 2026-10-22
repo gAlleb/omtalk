@@ -6,6 +6,7 @@
 mod app;
 mod config;
 mod runtime;
+mod services;
 mod theme;
 mod view;
 

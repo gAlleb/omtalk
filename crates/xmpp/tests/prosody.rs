@@ -414,3 +414,100 @@ async fn members_only_room_refuses_strangers_and_admits_members() {
         .unwrap();
     guest.join(&room, "guest").await.unwrap();
 }
+
+#[tokio::test]
+async fn services_are_discovered_and_commands_run_step_by_step() {
+    use omtalk_xmpp::services::{CommandAction, CommandStatus};
+    let (mut accounts, mut events) = Accounts::new();
+    let user = accounts.add(config("u39")).await;
+    let admin = accounts.add(config("admin")).await;
+    online(&mut events, &[&user, &admin]).await;
+    let server: Jid = "localhost".parse().unwrap();
+
+    // What the server offers: the group chat service among others.
+    let items = user.disco_items(&server, None).await.unwrap();
+    let muc = items
+        .iter()
+        .find(|i| i.jid.as_str() == "muc.localhost")
+        .expect("muc.localhost is listed");
+    let info = user.disco_info(&muc.jid, None).await.unwrap();
+    assert!(info.identities.iter().any(|i| i.category == "conference"));
+
+    // A plain user is offered the commands open to everyone, not the administration.
+    let commands = user.commands(&server).await.unwrap();
+    let nodes: Vec<&str> = commands.iter().filter_map(|c| c.node.as_deref()).collect();
+    assert!(
+        nodes.contains(&"uptime") && nodes.contains(&"urn:xmpp:invite#invite"),
+        "{nodes:?}"
+    );
+    assert!(!nodes.iter().any(|n| n.contains("admin#")), "{nodes:?}");
+    let uptime = user
+        .execute(&server, "uptime", None, CommandAction::Execute, None)
+        .await
+        .unwrap();
+    assert_eq!(uptime.status, CommandStatus::Completed);
+    assert!(
+        uptime.notes.iter().any(|n| n.text.contains("running for")),
+        "{:?}",
+        uptime.notes
+    );
+
+    // One step, done: the admin lists the server's modules.
+    let modules = admin
+        .execute(
+            &server,
+            "http://prosody.im/protocol/modules#list",
+            None,
+            CommandAction::Execute,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(modules.status, CommandStatus::Completed);
+    let listed = modules.form.expect("the result comes as a form");
+    assert!(
+        listed
+            .fields
+            .iter()
+            .any(|f| f.values.iter().any(|v| v.contains("adhoc"))),
+        "{listed:?}"
+    );
+
+    // An administration command: a form first, filled and sent back, then the result.
+    let admin_nodes: Vec<_> = admin
+        .commands(&server)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|c| c.node)
+        .collect();
+    let roster_node = admin_nodes
+        .iter()
+        .find(|n| n.ends_with("#get-user-roster"))
+        .unwrap_or_else(|| panic!("the admin is offered administration: {admin_nodes:?}"))
+        .clone();
+    let first = admin
+        .execute(&server, &roster_node, None, CommandAction::Execute, None)
+        .await
+        .unwrap();
+    assert_eq!(first.status, CommandStatus::Executing);
+    let mut form = first.form.expect("a form to fill");
+    let field = form
+        .fields
+        .iter_mut()
+        .find(|f| f.var.as_deref() == Some("accountjid"))
+        .expect("asks for the account");
+    field.values = vec!["u39@localhost".into()];
+    form.type_ = xmpp_parsers::data_forms::DataFormType::Submit;
+    let done = admin
+        .execute(
+            &server,
+            &roster_node,
+            first.session.as_deref(),
+            CommandAction::Complete,
+            Some(form),
+        )
+        .await
+        .unwrap();
+    assert_eq!(done.status, CommandStatus::Completed, "notes: {:?}", done.notes);
+}

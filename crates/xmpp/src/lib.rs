@@ -15,6 +15,7 @@ pub mod mam;
 pub mod muc;
 pub mod pep;
 pub mod roster;
+pub mod services;
 
 pub use pep::Access;
 pub use roster::Contact;

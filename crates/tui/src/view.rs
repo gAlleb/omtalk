@@ -14,7 +14,11 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Areas, Chat, ChatKind, Focus, Line, MediaState};
+use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
+use xmpp_parsers::data_forms::FieldType;
+
+use crate::app::{App, Areas, Chat, ChatKind, Focus, Line, MediaState, ServiceButton};
+use crate::services::FieldState;
 use crate::theme;
 
 /// Narrower than this, the chat list folds away; the participants pane even earlier.
@@ -70,6 +74,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
         app.areas.show_right = Some(right);
     }
     status_line(frame, app, status);
+    services_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -706,10 +711,365 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(hints), right_area);
 }
 
+/// The services window, over the middle of the screen.
+fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(services) = app.services.as_ref() else {
+        return;
+    };
+    let width = screen.width.saturating_sub(4).min(84);
+    let height = screen.height.saturating_sub(3).min(30);
+    let area = Rect {
+        x: screen.x + (screen.width - width) / 2,
+        y: screen.y + (screen.height.saturating_sub(1) - height) / 2,
+        width,
+        height,
+    };
+    app.areas.service_window = area;
+    frame.render_widget(Clear, area);
+    let place = match &services.node {
+        Some(node) => format!("{} · {node}", services.jid),
+        None => services.jid.to_string(),
+    };
+    let title = match &services.form {
+        Some(form) => format!("{} · {}", form.title, form.jid),
+        None => format!("Сервисы · {place}"),
+    };
+    let block = pane(&title, true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 4 || inner.width < 10 {
+        return;
+    }
+    let [body, problem, buttons, hint] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let body = Rect {
+        x: body.x + 1,
+        width: body.width.saturating_sub(2),
+        ..body
+    };
+
+    let (status, problem_style) = match (&services.problem, services.loading) {
+        (Some(text), _) => (text.clone(), Style::default().fg(theme::WARN)),
+        (None, true) => ("загрузка…".to_owned(), Style::default().fg(theme::DIM)),
+        (None, false) => (String::new(), Style::default()),
+    };
+    frame.render_widget(Paragraph::new(format!(" {status}")).style(problem_style), problem);
+
+    let mut row_areas = Vec::new();
+    let mut field_areas = Vec::new();
+    let labels: Vec<(String, ServiceButton, bool)>;
+    let hint_text: String;
+    match &services.form {
+        None => {
+            let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
+            if let Some(info) = services.listing.as_ref().and_then(|l| l.info.as_ref()) {
+                for identity in &info.identities {
+                    let name = identity.name.clone().unwrap_or_default();
+                    lines.push((
+                        TextLine::from(vec![
+                            Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                format!("  {}/{}", identity.category, identity.kind),
+                                Style::default().fg(theme::DIM),
+                            ),
+                        ]),
+                        None,
+                    ));
+                }
+            }
+            let listing = services.listing.clone().unwrap_or_default();
+            let mut row = 0;
+            for (heading, entries, icon) in [
+                ("Сервисы", &listing.items, app.icons.service),
+                ("Команды", &listing.commands, app.icons.command),
+            ] {
+                if entries.is_empty() {
+                    continue;
+                }
+                lines.push((TextLine::default(), None));
+                lines.push((
+                    TextLine::styled(
+                        heading,
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    None,
+                ));
+                for entry in entries {
+                    let name = entry
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| entry.node.clone().unwrap_or_else(|| entry.jid.to_string()));
+                    let address = match (&entry.node, heading) {
+                        (_, "Команды") => String::new(),
+                        (Some(node), _) => format!("  {} · {node}", entry.jid),
+                        (None, _) if name != entry.jid.as_str() => format!("  {}", entry.jid),
+                        (None, _) => String::new(),
+                    };
+                    let mut line = TextLine::from(vec![
+                        Span::raw(format!(" {icon} ")),
+                        Span::raw(name),
+                        Span::styled(address, Style::default().fg(theme::DIM)),
+                    ]);
+                    if row == services.cursor {
+                        line = line.style(theme::selected());
+                    }
+                    lines.push((line, Some(row)));
+                    row += 1;
+                }
+            }
+            if services.listing.is_some() && row == 0 && services.problem.is_none() {
+                lines.push((
+                    TextLine::styled("здесь ничего нет", Style::default().fg(theme::DIM)),
+                    None,
+                ));
+            }
+            let cursor_line = lines
+                .iter()
+                .position(|(_, r)| *r == Some(services.cursor))
+                .unwrap_or(0);
+            let skip = cursor_line.saturating_sub(body.height as usize - 1);
+            for (i, (line, row)) in lines
+                .into_iter()
+                .skip(skip)
+                .take(body.height as usize)
+                .enumerate()
+            {
+                let place = Rect {
+                    y: body.y + i as u16,
+                    height: 1,
+                    ..body
+                };
+                if let Some(row) = row {
+                    row_areas.push((place, row));
+                }
+                frame.render_widget(Paragraph::new(line), place);
+            }
+            labels = vec![
+                ("Назад".into(), ServiceButton::Back, false),
+                ("Обновить".into(), ServiceButton::Reload, false),
+                ("Закрыть".into(), ServiceButton::Close, false),
+            ];
+            hint_text = "Enter открыть · ← назад · r обновить · Esc закрыть".into();
+        }
+        Some(form) => {
+            let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
+            let instructions = form.step.form.as_ref().and_then(|f| f.instructions.clone());
+            for text in instructions.into_iter() {
+                for part in wrap(&text, body.width as usize) {
+                    lines.push((TextLine::styled(part, Style::default().fg(theme::DIM)), None));
+                }
+            }
+            for note in form.notes() {
+                let style = match note.kind {
+                    NoteKind::Info => Style::default(),
+                    NoteKind::Warn | NoteKind::Error => Style::default().fg(theme::WARN),
+                };
+                for part in wrap(&note.text, body.width as usize) {
+                    lines.push((TextLine::styled(part, style), None));
+                }
+            }
+            if !lines.is_empty() {
+                lines.push((TextLine::default(), None));
+            }
+            let label_width = form
+                .fields
+                .iter()
+                .filter(|f| f.shown() && f.kind != FieldType::Fixed)
+                .map(|f| f.label.width() + 2)
+                .max()
+                .unwrap_or(0)
+                .min(body.width as usize / 3);
+            let running = !form.finished();
+            for (index, field) in form.fields.iter().enumerate() {
+                if !field.shown() {
+                    continue;
+                }
+                let focused = running && index == form.focus;
+                if field.kind == FieldType::Fixed {
+                    for part in wrap(&field.value, body.width as usize) {
+                        lines.push((TextLine::styled(part, Style::default().fg(theme::DIM)), None));
+                    }
+                    continue;
+                }
+                let mark = if field.required { "*" } else { "" };
+                let label = format!("{}{mark}", field.label);
+                let value = field_value(field, focused, running);
+                let label_style = if focused {
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::DIM)
+                };
+                let value_style = if focused {
+                    Style::default().add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default()
+                };
+                // A label too long for the column (servers write whole sentences) goes
+                // on its own line, above its value.
+                let label = if label.width() > label_width {
+                    for part in wrap(&label, body.width as usize) {
+                        lines.push((TextLine::styled(part, label_style), Some(index)));
+                    }
+                    " ".repeat(label_width + 1)
+                } else {
+                    format!("{label:>label_width$} ")
+                };
+                lines.push((
+                    TextLine::from(vec![
+                        Span::styled(label, label_style),
+                        Span::styled(value, value_style),
+                    ]),
+                    Some(index),
+                ));
+            }
+            let focus_line = lines
+                .iter()
+                .rposition(|(_, r)| *r == Some(form.focus))
+                .unwrap_or(0);
+            let skip = focus_line.saturating_sub(body.height as usize - 1);
+            for (i, (line, field)) in lines
+                .into_iter()
+                .skip(skip)
+                .take(body.height as usize)
+                .enumerate()
+            {
+                let place = Rect {
+                    y: body.y + i as u16,
+                    height: 1,
+                    ..body
+                };
+                if let Some(field) = field {
+                    field_areas.push((place, field));
+                }
+                frame.render_widget(Paragraph::new(line), place);
+            }
+            if running {
+                let default = form.step.default_action;
+                labels = form
+                    .step
+                    .actions
+                    .iter()
+                    .map(|&a| {
+                        (
+                            step_label(a).to_owned(),
+                            ServiceButton::Step(a),
+                            Some(a) == default,
+                        )
+                    })
+                    .chain([("Отмена".to_owned(), ServiceButton::Close, false)])
+                    .collect();
+                let desc = form.fields.get(form.focus).and_then(|f| f.desc.clone());
+                hint_text = desc
+                    .unwrap_or_else(|| "Tab поле · Пробел/←→ выбрать · Enter дальше · Esc отменить".into());
+            } else {
+                let done = match form.step.status {
+                    CommandStatus::Canceled => "отменено",
+                    _ => "выполнено",
+                };
+                labels = vec![
+                    (format!("К списку ({done})"), ServiceButton::Dismiss, true),
+                    ("Закрыть".into(), ServiceButton::Close, false),
+                ];
+                hint_text = "Enter к списку · Esc закрыть".into();
+            }
+        }
+    }
+
+    // Buttons, right-aligned, the default one stressed.
+    let total: u16 = labels.iter().map(|(l, ..)| l.width() as u16 + 5).sum();
+    let mut x = buttons.x + buttons.width.saturating_sub(total + 1);
+    let mut button_areas = Vec::new();
+    for (label, button, default) in labels {
+        let text = format!("[ {label} ]");
+        let w = text.width() as u16;
+        let place = Rect {
+            x,
+            width: w.min(buttons.right().saturating_sub(x)),
+            ..buttons
+        };
+        let style = if default {
+            theme::selected()
+        } else {
+            Style::default().fg(theme::ACCENT)
+        };
+        frame.render_widget(Paragraph::new(text).style(style), place);
+        button_areas.push((place, button));
+        x += w + 1;
+    }
+    frame.render_widget(
+        Paragraph::new(format!(" {hint_text}")).style(Style::default().fg(theme::DIM)),
+        hint,
+    );
+    app.areas.service_rows = row_areas;
+    app.areas.service_fields = field_areas;
+    app.areas.service_buttons = button_areas;
+}
+
+/// A field's value as shown: secrets hidden, switches and choices drawn as such.
+fn field_value(field: &FieldState, focused: bool, editing: bool) -> String {
+    let caret = if focused { "▏" } else { "" };
+    match field.kind {
+        FieldType::Boolean => {
+            let on = matches!(field.value.as_str(), "1" | "true");
+            if on { "[x]" } else { "[ ]" }.to_owned()
+        }
+        FieldType::ListSingle => {
+            let chosen = field
+                .options
+                .iter()
+                .find(|(_, v)| v == &field.value)
+                .map(|(l, _)| l.clone())
+                .unwrap_or_else(|| field.value.clone());
+            if editing {
+                format!("‹ {chosen} ›")
+            } else {
+                chosen
+            }
+        }
+        FieldType::ListMulti => field
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, (label, value))| {
+                let on = if field.chosen.contains(value) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                let here = if focused && i == field.option_cursor {
+                    "›"
+                } else {
+                    ""
+                };
+                format!("{here}{on} {label}")
+            })
+            .collect::<Vec<_>>()
+            .join("  "),
+        FieldType::TextPrivate => format!("{}{caret}", "•".repeat(field.value.chars().count())),
+        FieldType::TextMulti => format!("{}{caret}", field.value.replace('\n', " ⏎ ")),
+        _ => format!("{}{caret}", field.value),
+    }
+}
+
+fn step_label(action: CommandAction) -> &'static str {
+    match action {
+        CommandAction::Execute => "Выполнить",
+        CommandAction::Prev => "Назад",
+        CommandAction::Next => "Далее",
+        CommandAction::Complete => "Готово",
+        CommandAction::Cancel => "Отмена",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ChatKind;
+    use crate::app::{Action, ChatKind};
     use crate::config::Modifier;
     use omtalk_xmpp::BareJid;
     use ratatui::Terminal;
@@ -849,5 +1209,152 @@ mod tests {
             app.areas.messages.contains(place.as_position()),
             "inside the conversation"
         );
+    }
+
+    #[test]
+    fn the_services_window_lists_runs_a_form_and_its_buttons_click() {
+        use crate::services::{Listing, Request};
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        use omtalk_xmpp::services::{CommandStep, ServiceItem};
+
+        let mut app = app_with_chat();
+        let actions = app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(
+            matches!(&actions[..], [Action::Services { request: Request::Browse { jid, .. }, .. }] if jid.as_str() == "example.org")
+        );
+        let server: omtalk_xmpp::Jid = "example.org".parse().unwrap();
+        app.services.as_mut().unwrap().listed(
+            &server,
+            &None,
+            Ok(Listing {
+                info: None,
+                items: vec![ServiceItem {
+                    jid: "muc.example.org".parse().unwrap(),
+                    node: None,
+                    name: Some("Комнаты".into()),
+                }],
+                commands: vec![ServiceItem {
+                    jid: server.clone(),
+                    node: Some("uptime".into()),
+                    name: Some("Get uptime".into()),
+                }],
+            }),
+        );
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("Сервисы · example.org") && text.contains("Комнаты") && text.contains("Get uptime"),
+            "{text}"
+        );
+
+        // A click on the command runs it.
+        let (row, _) = *app.areas.service_rows.iter().find(|(_, i)| *i == 1).unwrap();
+        let click = |x, y| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let actions = app.on_mouse(click(row.x + 2, row.y));
+        assert!(
+            matches!(&actions[..], [Action::Services { request: Request::Execute { node, .. }, title }] if node == "uptime" && title == "Get uptime")
+        );
+
+        let form: omtalk_xmpp::Element = r#"<x xmlns="jabber:x:data" type="form"><instructions>Fill it</instructions>
+            <field var="secret" type="text-private" label="Пароль" required="true"><required/><value>abc</value></field>
+            <field var="on" type="boolean" label="Включить"/></x>"#
+            .parse()
+            .unwrap();
+        let step = CommandStep {
+            node: "uptime".into(),
+            session: Some("s".into()),
+            status: omtalk_xmpp::services::CommandStatus::Executing,
+            form: Some(form.try_into().unwrap()),
+            notes: Vec::new(),
+            actions: vec![CommandAction::Complete],
+            default_action: Some(CommandAction::Complete),
+        };
+        app.services
+            .as_mut()
+            .unwrap()
+            .stepped(server.clone(), "Get uptime".into(), Ok(step.clone()));
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("Пароль*") && text.contains("•••") && !text.contains("abc"),
+            "secrets stay hidden: {text}"
+        );
+        assert!(
+            text.contains("[ ]") && text.contains("[ Готово ]") && text.contains("[ Отмена ]"),
+            "{text}"
+        );
+
+        // A click on the switch turns it; a click on Готово sends the form.
+        let (switch, _) = *app.areas.service_fields.iter().find(|(_, i)| *i == 1).unwrap();
+        app.on_mouse(click(switch.x + 2, switch.y));
+        assert!(screen(&mut app, 120, 30).contains("[x]"));
+        let (done, _) = *app
+            .areas
+            .service_buttons
+            .iter()
+            .find(|(_, b)| *b == ServiceButton::Step(CommandAction::Complete))
+            .unwrap();
+        let actions = app.on_mouse(click(done.x + 1, done.y));
+        let [
+            Action::Services {
+                request:
+                    Request::Execute {
+                        action: CommandAction::Complete,
+                        form: Some(sent),
+                        ..
+                    },
+                ..
+            },
+        ] = &actions[..]
+        else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(sent.fields[1].values, ["1"]);
+
+        // Esc on a running command cancels it on the server and closes the window.
+        let actions = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            &actions[..],
+            [Action::Services {
+                request: Request::Execute {
+                    action: CommandAction::Cancel,
+                    ..
+                },
+                ..
+            }]
+        ));
+        assert!(app.services.as_ref().unwrap().form.is_none());
+        assert!(
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert!(app.services.is_none());
+
+        // So does a click beside the window while a command waits for its form.
+        app.open_services(None);
+        app.services
+            .as_mut()
+            .unwrap()
+            .stepped(server.clone(), "Get uptime".into(), Ok(step));
+        screen(&mut app, 120, 30);
+        let actions = app.on_mouse(click(0, 0));
+        assert!(
+            matches!(
+                &actions[..],
+                [Action::Services {
+                    request: Request::Execute {
+                        action: CommandAction::Cancel,
+                        form: None,
+                        ..
+                    },
+                    ..
+                }]
+            ),
+            "{actions:?}"
+        );
+        assert!(app.services.is_none());
     }
 }

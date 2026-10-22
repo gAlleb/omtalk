@@ -1,13 +1,13 @@
 -- Disposable server for omtalk's integration tests. Plaintext on purpose: it listens
 -- on 127.0.0.1 only; `mise run prosody` starts it on empty data.
 
-admins = {}
+admins = { "admin@localhost" }
 pidfile = "/var/run/prosody/prosody.pid"
 log = { info = "*console" }
 
 modules_enabled = {
 	"disco", "roster", "saslauth", "presence", "message", "iq", "ping",
-	"carbons", "pep", "mam", "offline", "smacks", "blocklist", "bookmarks", "vcard4", "vcard_legacy",
+	"carbons", "pep", "mam", "offline", "smacks", "adhoc", "admin_adhoc", "uptime", "invites", "invites_adhoc", "blocklist", "bookmarks", "vcard4", "vcard_legacy",
 }
 modules_disabled = { "tls" }
 

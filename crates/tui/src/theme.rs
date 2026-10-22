@@ -61,9 +61,12 @@ pub struct Icons {
     /// Before a shared picture's or file's name.
     pub picture: &'static str,
     pub file: &'static str,
+    /// Before a service and a command in the services window.
+    pub service: &'static str,
+    pub command: &'static str,
 }
 
-/// U+F023 lock, U+F09C unlock.
+/// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal.
 pub const NERD: Icons = Icons {
     locked: "\u{f023} OMEMO",
     unlocked: "\u{f09c} без шифрования",
@@ -71,6 +74,8 @@ pub const NERD: Icons = Icons {
     chat_unlocked: " \u{f09c}",
     picture: "\u{f03e}",
     file: "\u{f15b}",
+    service: "\u{f233}",
+    command: "\u{f120}",
 };
 
 pub const TEXT_ICONS: Icons = Icons {
@@ -80,4 +85,6 @@ pub const TEXT_ICONS: Icons = Icons {
     chat_unlocked: " [откр.]",
     picture: "[картинка]",
     file: "[файл]",
+    service: "›",
+    command: "$",
 };
