@@ -16,5 +16,6 @@ thiserror = "2.0.21"
 [dev-dependencies]
 omemo-xml = { path = "../omemo-xml" }
 omtalk-testkit = { path = "../testkit" }
+omtalk-xmpp = { path = "../xmpp" }
 tempfile = "3.27.0"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "time"] }

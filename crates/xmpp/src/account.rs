@@ -97,6 +97,8 @@ impl Account {
     }
 
     /// Publishes one item to a PEP node of the own account, creating the node if needed.
+    /// A node another client created with other access is reconfigured first: OMEMO
+    /// nodes have to be open, whoever made them.
     pub async fn publish(
         &self,
         node: &str,
@@ -104,9 +106,14 @@ impl Account {
         payload: Element,
         access: Access,
     ) -> Result<(), Error> {
-        self.set(None, pep::publish_request(node, id, payload, access))
-            .await
-            .map(drop)
+        let request = || pep::publish_request(node, id, payload.clone(), access);
+        match self.set(None, request()).await {
+            Err(Error::Stanza(error)) if pep::options_conflict(&error) => {
+                self.set(None, pep::configure_request(node, access)).await?;
+                self.set(None, request()).await.map(drop)
+            }
+            other => other.map(drop),
+        }
     }
 
     /// Reads the items of a PEP node of `owner` (the own account included).

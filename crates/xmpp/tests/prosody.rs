@@ -295,3 +295,32 @@ fn rand_suffix() -> u32 {
         .unwrap()
         .subsec_nanos()
 }
+
+#[tokio::test]
+async fn node_created_with_other_access_is_reconfigured_on_publish() {
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u33")).await;
+    let stranger = accounts.add(config("u32")).await;
+    online(&mut events, &[&owner, &stranger]).await;
+
+    // Another client made the node earlier, readable by contacts only.
+    let node = format!("urn:omtalk:test:{}", rand_suffix());
+    let payload = || Element::builder("note", "urn:omtalk:test").build();
+    owner
+        .publish(&node, Some("current"), payload(), Access::Presence)
+        .await
+        .unwrap();
+    assert!(
+        stranger.items(owner.jid(), &node).await.is_err(),
+        "the node starts closed to strangers"
+    );
+
+    // Publishing with other options than the node has must not fail: OMEMO needs open
+    // nodes whatever created them.
+    owner
+        .publish(&node, Some("current"), payload(), Access::Open)
+        .await
+        .unwrap();
+    let items = stranger.items(owner.jid(), &node).await.unwrap();
+    assert_eq!(items.len(), 1);
+}

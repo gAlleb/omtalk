@@ -2,9 +2,12 @@
 
 use xmpp_parsers::data_forms::{DataForm, DataFormType, Field};
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::ns;
 use xmpp_parsers::pubsub::event::{Event as PubSubEvent, Payload};
+use xmpp_parsers::pubsub::owner::{Owner, Payload as OwnerPayload};
 use xmpp_parsers::pubsub::pubsub::{Item, Items, PubSub, Publish, PublishOptions};
 use xmpp_parsers::pubsub::{ItemId, NodeName};
+use xmpp_parsers::stanza_error::{DefinedCondition, StanzaError};
 
 use crate::{Error, PepItem};
 
@@ -19,11 +22,17 @@ pub enum Access {
     Presence,
 }
 
+impl Access {
+    fn model(self) -> &'static str {
+        match self {
+            Access::Open => "open",
+            Access::Presence => "presence",
+        }
+    }
+}
+
 pub(crate) fn publish_request(node: &str, id: Option<&str>, payload: Element, access: Access) -> PubSub {
-    let access_model = match access {
-        Access::Open => "open",
-        Access::Presence => "presence",
-    };
+    let access_model = access.model();
     PubSub::Publish {
         publish: Publish {
             node: NodeName(node.to_owned()),
@@ -40,6 +49,30 @@ pub(crate) fn publish_request(node: &str, id: Option<&str>, payload: Element, ac
                 vec![Field::text_single("pubsub#access_model", access_model)],
             )),
         }),
+    }
+}
+
+/// Whether a publish failed because the node exists with other settings than the
+/// publish options asked for (XEP-0060, 7.1.5): another client created it.
+pub(crate) fn options_conflict(error: &StanzaError) -> bool {
+    error.defined_condition == DefinedCondition::Conflict
+        && error
+            .other
+            .as_ref()
+            .is_some_and(|e| e.is("precondition-not-met", ns::PUBSUB_ERRORS))
+}
+
+/// Changes the node's access model, as its owner.
+pub(crate) fn configure_request(node: &str, access: Access) -> Owner {
+    Owner {
+        payload: OwnerPayload::Configure {
+            node: Some(NodeName(node.to_owned())),
+            form: Some(DataForm::new(
+                DataFormType::Submit,
+                ns::PUBSUB_CONFIGURE,
+                vec![Field::text_single("pubsub#access_model", access.model())],
+            )),
+        },
     }
 }
 

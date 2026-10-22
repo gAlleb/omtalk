@@ -101,13 +101,57 @@ pub(crate) fn open_archived(own: &BareJid, message: Message) -> Option<Envelope>
     })
 }
 
-/// The id the own archive gave this live message (XEP-0359), if it gave one.
-pub(crate) fn archive_id(own: &BareJid, message: &Message) -> Option<String> {
+/// Opens a message from a room's archive. The archive names the sender's real account
+/// in it, so a sender who has left since is still known.
+pub(crate) fn open_room_archived(
+    own: &BareJid,
+    room: &BareJid,
+    message: Message,
+) -> Result<Option<Envelope>, crate::Error> {
+    let nick = message
+        .from
+        .as_ref()
+        .and_then(|from| from.resource().map(|r| r.to_string()))
+        .unwrap_or_default();
+    // Read by hand: xmpp-parsers wants a full JID here, as presences carry, but the
+    // archive stores the bare one, and the whole element would fail to parse.
+    let real = message
+        .payloads
+        .iter()
+        .filter(|p| p.is("x", xmpp_parsers::ns::MUC_USER))
+        .flat_map(|x| x.children())
+        .find(|item| item.is("item", xmpp_parsers::ns::MUC_USER))
+        .and_then(|item| item.attr(xmpp_parsers::minidom::rxml::xml_ncname!("jid")))
+        .and_then(|jid| jid.parse::<omtalk_xmpp::Jid>().ok())
+        .map(|jid| jid.to_bare());
+    let Some(encrypted) = encrypted_in(message) else {
+        return Ok(None);
+    };
+    let sender = real.ok_or(crate::Error::UnknownOccupant {
+        room: room.clone(),
+        nick,
+    })?;
+    let direction = if &sender == own {
+        Direction::Outgoing
+    } else {
+        Direction::Incoming
+    };
+    Ok(Some(Envelope {
+        peer: room.clone(),
+        sender,
+        direction,
+        encrypted,
+    }))
+}
+
+/// The id `archive` gave this live message (XEP-0359), if it gave one. `archive` is the
+/// own account for chats, the room for group chats.
+pub(crate) fn archive_id(archive: &BareJid, message: &Message) -> Option<String> {
     let by_own = |payloads: &[xmpp_parsers::minidom::Element]| {
         payloads
             .iter()
             .filter_map(|p| xmpp_parsers::stanza_id::StanzaId::try_from(p.clone()).ok())
-            .find(|id| id.by.resource().is_none() && id.by.to_bare() == *own)
+            .find(|id| id.by.resource().is_none() && id.by.to_bare() == *archive)
             .map(|id| id.id)
     };
     by_own(&message.payloads).or_else(|| {

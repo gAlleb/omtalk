@@ -1,0 +1,17 @@
+[package]
+name = "omtalk-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omemo = { version = "0.1.0", path = "../omemo" }
+omtalk-omemo = { version = "0.1.0", path = "../omemo-client" }
+omtalk-store = { version = "0.1.0", path = "../store" }
+omtalk-xmpp = { version = "0.1.0", path = "../xmpp" }
+rpassword = "7.5.4"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync"] }
+
+[features]
+# Plaintext connections to the local test server (--plaintext).
+insecure-tcp = ["omtalk-xmpp/insecure-tcp"]

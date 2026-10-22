@@ -1,6 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use omemo::{DeviceId, Session};
 use omemo_xml::{DEVICE_LIST_NODE, bundle, bundle_node, device_list, message, xml};
@@ -32,7 +31,7 @@ pub struct Omemo {
     /// Whether this session has read the archive yet. Until it has, live messages must
     /// not move the archive position: they arrive first after a reconnect, and moving
     /// past them would skip what was missed before.
-    caught_up: AtomicBool,
+    caught_up: Mutex<HashSet<BareJid>>,
     /// Room occupants by nick, with their real JIDs: a group message names only the
     /// nick, but its keys belong to the real account.
     occupants: Mutex<HashMap<BareJid, HashMap<String, BareJid>>>,
@@ -47,6 +46,29 @@ pub struct Incoming {
     pub direction: Direction,
     /// `None` for a message without content (a handshake answer or a heartbeat).
     pub text: Option<String>,
+}
+
+/// One published device of an account, as [`Omemo::devices`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub device: DeviceId,
+    /// From its bundle now; `None` if the bundle is missing or broken (a dead device).
+    pub identity_key: Option<[u8; 32]>,
+    /// The key this device recorded for it before, if it ever talked to it.
+    pub known_identity_key: Option<[u8; 32]>,
+    pub has_session: bool,
+    /// The device this `Omemo` runs on.
+    pub this_device: bool,
+}
+
+/// An identity key as Gajim and Conversations show it: 64 hex digits in groups of 8.
+pub fn fingerprint(identity_key: &[u8; 32]) -> String {
+    let hex: String = identity_key.iter().map(|b| format!("{b:02x}")).collect();
+    hex.as_bytes()
+        .chunks(8)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What [`Omemo::catch_up`] found in the archive, oldest first.
@@ -80,13 +102,18 @@ impl Omemo {
             device_id: state.keys.device_id,
             state: Mutex::new(state),
             persist,
-            caught_up: AtomicBool::new(false),
+            caught_up: Mutex::new(HashSet::new()),
             occupants: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn device_id(&self) -> DeviceId {
         self.device_id
+    }
+
+    /// This device's identity key; see [`crate::fingerprint`].
+    pub async fn identity_key(&self) -> [u8; 32] {
+        *self.state.lock().await.keys.identity.public()
     }
 
     /// Occupants of `room` this device knows, by nick, with their real accounts.
@@ -102,7 +129,8 @@ impl Omemo {
     /// own other devices reach this one, puts this device into the own device list and
     /// publishes its bundle.
     pub async fn announce(&self) -> Result<(), Error> {
-        self.caught_up.store(false, Ordering::SeqCst);
+        // A new session: rooms have to be joined and every archive read again.
+        self.caught_up.lock().await.clear();
         self.account.set(None, carbons::Enable).await?;
         let own = self.account.jid().clone();
         let current = match self.account.items(&own, DEVICE_LIST_NODE).await {
@@ -156,6 +184,11 @@ impl Omemo {
             Event::Message(message) if message.type_ == MessageType::Groupchat => {
                 let rooms = self.occupants.lock().await.clone();
                 let resolve = |room: &BareJid, nick: &str| rooms.get(room)?.get(nick).cloned();
+                if let Some(room) = message.from.as_ref().map(|f| f.to_bare())
+                    && let Some(id) = envelope::archive_id(&room, message)
+                {
+                    self.live_archive_position(&room, &id).await?;
+                }
                 match envelope::open_group(self.account.jid(), (**message).clone(), resolve)? {
                     // Our own message, reflected by the room: there is no key for us in it.
                     Some(envelope)
@@ -173,10 +206,9 @@ impl Omemo {
                     Some(envelope) => ignorable(self.receive(envelope).await)?,
                     None => None,
                 };
-                if self.caught_up.load(Ordering::SeqCst)
-                    && let Some(id) = envelope::archive_id(self.account.jid(), message)
-                {
-                    self.set_archive_position(&id).await?;
+                let own = self.account.jid().clone();
+                if let Some(id) = envelope::archive_id(&own, message) {
+                    self.live_archive_position(&own, &id).await?;
                 }
                 Ok(incoming)
             }
@@ -242,31 +274,56 @@ impl Omemo {
     /// [`Omemo::announce`]. On the very first run there is no position yet: the archive
     /// is not read, only marked, so an old history is not replayed.
     pub async fn catch_up(&self) -> Result<CatchUp, Error> {
+        self.catch_up_archive(None).await
+    }
+
+    /// The same for a group chat's archive: what the room got while this device was not
+    /// in it. Call it after joining. The room must be non-anonymous; its archive names
+    /// each sender's account.
+    pub async fn catch_up_room(&self, room: &BareJid) -> Result<CatchUp, Error> {
+        self.catch_up_archive(Some(room)).await
+    }
+
+    async fn catch_up_archive(&self, room: Option<&BareJid>) -> Result<CatchUp, Error> {
         let own = self.account.jid().clone();
-        let mut after = self.state.lock().await.archive_positions.get(&own).cloned();
+        let archive = room.cloned().unwrap_or_else(|| own.clone());
+        let mut after = self.state.lock().await.archive_positions.get(&archive).cloned();
         let mut caught = CatchUp::default();
         if after.is_none() {
-            if let Some(newest) = self.account.archive_newest(None).await? {
-                self.set_archive_position(&newest).await?;
+            if let Some(newest) = self.account.archive_newest(room).await? {
+                self.set_archive_position(&archive, &newest).await?;
             }
-            self.caught_up.store(true, Ordering::SeqCst);
+            self.caught_up.lock().await.insert(archive);
             return Ok(caught);
         }
         loop {
             let page = self
                 .account
-                .archive_after(None, after.as_deref(), ARCHIVE_PAGE)
+                .archive_after(room, after.as_deref(), ARCHIVE_PAGE)
                 .await?;
             for archived in page.messages {
-                if let Some(envelope) = envelope::open_archived(&own, archived.message) {
-                    match ignorable(self.receive(envelope).await) {
-                        Ok(Some(incoming)) => caught.messages.push(incoming),
-                        Ok(None) => {}
-                        // One message that does not decrypt must not hold up the rest.
-                        Err(error) => caught.failed.push((archived.id.clone(), error)),
+                let envelope = match room {
+                    None => Ok(envelope::open_archived(&own, archived.message)),
+                    Some(room) => envelope::open_room_archived(&own, room, archived.message),
+                };
+                let result = match envelope {
+                    // This device's own message: it holds no key for itself.
+                    Ok(Some(envelope))
+                        if envelope.sender == own && envelope.encrypted.header.sid == self.device_id =>
+                    {
+                        Ok(None)
                     }
+                    Ok(Some(envelope)) => ignorable(self.receive(envelope).await),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(Some(incoming)) => caught.messages.push(incoming),
+                    Ok(None) => {}
+                    // One message that does not decrypt must not hold up the rest.
+                    Err(error) => caught.failed.push((archived.id.clone(), error)),
                 }
-                self.set_archive_position(&archived.id).await?;
+                self.set_archive_position(&archive, &archived.id).await?;
                 after = Some(archived.id);
             }
             if page.complete || page.last.is_none() {
@@ -274,18 +331,27 @@ impl Omemo {
             }
             after = page.last.or(after);
         }
-        self.caught_up.store(true, Ordering::SeqCst);
+        self.caught_up.lock().await.insert(archive);
         Ok(caught)
     }
 
-    async fn set_archive_position(&self, id: &str) -> Result<(), Error> {
-        let own = self.account.jid().clone();
-        self.persist.archive_position(&own, id)?;
+    /// Moves an archive's position to a live message, but only once that archive was
+    /// read in this session: live messages come first after a reconnect, and moving past
+    /// them would skip what was missed before.
+    async fn live_archive_position(&self, archive: &BareJid, id: &str) -> Result<(), Error> {
+        if self.caught_up.lock().await.contains(archive) {
+            self.set_archive_position(archive, id).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_archive_position(&self, archive: &BareJid, id: &str) -> Result<(), Error> {
+        self.persist.archive_position(archive, id)?;
         self.state
             .lock()
             .await
             .archive_positions
-            .insert(own, id.to_owned());
+            .insert(archive.clone(), id.to_owned());
         Ok(())
     }
 
@@ -395,6 +461,33 @@ impl Omemo {
             }
         }
         Ok(targets)
+    }
+
+    /// The devices `jid` publishes now, each with its identity key and what this device
+    /// knows about it: the material for comparing fingerprints with another client.
+    pub async fn devices(&self, jid: &BareJid) -> Result<Vec<DeviceInfo>, Error> {
+        let list = match self.account.items(jid, DEVICE_LIST_NODE).await {
+            Ok(items) => parse_device_list(&items),
+            Err(omtalk_xmpp::Error::Stanza(_)) => BTreeSet::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let bundles =
+            futures::future::join_all(list.iter().map(|device| self.fetch_bundle(jid, *device))).await;
+        let state = self.state.lock().await;
+        Ok(list
+            .into_iter()
+            .zip(bundles)
+            .map(|(device, bundle)| {
+                let key = (jid.clone(), device);
+                DeviceInfo {
+                    device,
+                    identity_key: bundle.ok().map(|b| b.identity_key),
+                    known_identity_key: state.identities.get(&key).copied(),
+                    has_session: state.sessions.contains_key(&key),
+                    this_device: jid == self.account.jid() && device == self.device_id,
+                }
+            })
+            .collect())
     }
 
     async fn fetch_bundle(&self, jid: &BareJid, device: DeviceId) -> Result<omemo::Bundle, Error> {

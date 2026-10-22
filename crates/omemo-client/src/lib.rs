@@ -12,7 +12,7 @@ mod error;
 mod persist;
 mod state;
 
-pub use client::{CatchUp, Incoming, Omemo, SendReport};
+pub use client::{CatchUp, DeviceInfo, Incoming, Omemo, SendReport, fingerprint};
 pub use envelope::Direction;
 pub use error::Error;
 pub use persist::{Ephemeral, Persist, PersistError};

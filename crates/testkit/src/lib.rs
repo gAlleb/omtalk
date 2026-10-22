@@ -329,3 +329,18 @@ pub async fn stop_all(devices: impl IntoIterator<Item = Device>) {
         device.stop().await;
     }
 }
+
+/// Waits until `device` sees every one of `nicks` in the room with a real JID.
+pub async fn sees(device: &Device, room: &BareJid, nicks: &[&str]) {
+    timeout(WAIT, async {
+        loop {
+            let known = device.omemo.occupants(room).await;
+            if nicks.iter().all(|n| known.contains_key(*n)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{} does not see {nicks:?} in {room}", device.jid));
+}

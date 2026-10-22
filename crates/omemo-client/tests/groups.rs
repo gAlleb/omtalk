@@ -3,27 +3,9 @@
 //! Three people, five devices, one members-only room. A member who is not in the room
 //! right now must still get the keys: they are encrypted for members, not for occupants.
 
-use std::time::Duration;
-
 use omtalk_omemo::Direction;
-use omtalk_testkit::{Device, WAIT, converge, fresh_device_lists, stop_all, text};
+use omtalk_testkit::{Device, converge, fresh_device_lists, sees, stop_all, text};
 use omtalk_xmpp::{Affiliation, BareJid};
-use tokio::time::timeout;
-
-/// Waits until `device` sees every one of `nicks` in the room with a real JID.
-async fn sees(device: &Device, room: &BareJid, nicks: &[&str]) {
-    timeout(WAIT, async {
-        loop {
-            let known = device.omemo.occupants(room).await;
-            if nicks.iter().all(|n| known.contains_key(*n)) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{} does not see {nicks:?} in {room}", device.jid));
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn members_on_all_their_devices_read_group_messages() {
