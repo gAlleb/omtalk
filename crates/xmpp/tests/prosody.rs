@@ -755,8 +755,8 @@ async fn a_nick_change_is_seen_as_the_same_person_renamed() {
 async fn an_avatar_is_published_and_read_by_another_from_pep_and_vcard() {
     use omtalk_xmpp::avatar;
     let (mut accounts, mut events) = Accounts::new();
-    let owner = accounts.add(config("u16")).await;
-    let reader = accounts.add(config("u17")).await;
+    let owner = accounts.add(config("u41")).await;
+    let reader = accounts.add(config("u42")).await;
     online(&mut events, &[&owner, &reader]).await;
     let picture = format!("not really a png {}", rand_suffix()).into_bytes();
     owner.publish_avatar(&picture, 1, 1).await.unwrap();
@@ -772,9 +772,9 @@ async fn an_avatar_is_published_and_read_by_another_from_pep_and_vcard() {
 #[tokio::test]
 async fn a_chats_history_is_read_from_the_archive_by_who_it_was_with() {
     let (mut accounts, mut events) = Accounts::new();
-    let reader = accounts.add(config("u18")).await;
-    let bob = accounts.add(config("u19")).await;
-    let carol = accounts.add(config("u20")).await;
+    let reader = accounts.add(config("u43")).await;
+    let bob = accounts.add(config("u44")).await;
+    let carol = accounts.add(config("u45")).await;
     online(&mut events, &[&reader, &bob, &carol]).await;
     let tag = rand_suffix();
     for (from, text) in [(&bob, "от bob 1"), (&carol, "от carol"), (&bob, "от bob 2")] {
@@ -851,7 +851,7 @@ async fn administer(admin: &omtalk_xmpp::Account, suffix: &str, values: &[(&str,
 #[tokio::test]
 async fn a_password_changed_elsewhere_stops_the_account_with_why() {
     let (mut accounts, mut events) = Accounts::new();
-    let mut user_config = config("u21");
+    let mut user_config = config("u46");
     user_config.keepalive = Duration::from_secs(1);
     user_config.keepalive_answer = Duration::from_secs(1);
     let user = accounts.add(user_config).await;
@@ -861,13 +861,13 @@ async fn a_password_changed_elsewhere_stops_the_account_with_why() {
     administer(
         &admin,
         "#change-user-password",
-        &[("accountjid", &["u21@localhost"]), ("password", &["changed"])],
+        &[("accountjid", &["u46@localhost"]), ("password", &["changed"])],
     )
     .await;
     administer(
         &admin,
         "#end-user-session",
-        &[("accountjids", &["u21@localhost"])],
+        &[("accountjids", &["u46@localhost"])],
     )
     .await;
     // Not wait_for, which gives up by panicking: the password must be put back first.
@@ -887,7 +887,7 @@ async fn a_password_changed_elsewhere_stops_the_account_with_why() {
     administer(
         &admin,
         "#change-user-password",
-        &[("accountjid", &["u21@localhost"]), ("password", &["test"])],
+        &[("accountjid", &["u46@localhost"]), ("password", &["test"])],
     )
     .await;
     refused.expect("the refused password is said, not retried forever in silence");

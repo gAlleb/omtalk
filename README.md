@@ -18,7 +18,7 @@ mise run test
 
 `mise run test` also starts a test Prosody in Docker (`tests/prosody`). It listens on
 `127.0.0.1:15222` only and starts with empty data every time. The accounts `alice`…`frank`
-and `u01`…`u40` `@localhost` all have the password `test`. `admin@localhost` is a server
+and `u01`…`u60` `@localhost` all have the password `test`. `admin@localhost` is a server
 administrator, for testing ad-hoc commands. The upload service is `upload.localhost`, with
 HTTP on `127.0.0.1:15280`.
 

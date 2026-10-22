@@ -17,7 +17,7 @@ mise run test
 ```
 
 `mise run test` поднимает и тестовый Prosody в Docker (`tests/prosody`, слушает только
-`127.0.0.1:15222`, каждый запуск с пустыми данными, аккаунты `alice`…`frank` и `u01`…`u40` `@localhost` с паролем `test`; `admin@localhost` —
+`127.0.0.1:15222`, каждый запуск с пустыми данными, аккаунты `alice`…`frank` и `u01`…`u60` `@localhost` с паролем `test`; `admin@localhost` —
 администратор сервера, для проверки ad-hoc команд; служба загрузки файлов
 `upload.localhost`, HTTP на `127.0.0.1:15280`).
 
