@@ -75,6 +75,11 @@ pub const COMMANDS: &[Command] = &[
         about: "ответить на выделенное или последнее сообщение",
     },
     Command {
+        name: "/settings",
+        args: "",
+        about: "настройки",
+    },
+    Command {
         name: "/keys",
         args: "[АДРЕС]",
         about: "ключи OMEMO: отпечатки, доверие, старые устройства",
@@ -277,7 +282,7 @@ mod tests {
 
     #[test]
     fn commands_complete_and_are_listed_while_typed() {
-        assert_eq!(complete("/se"), Some((0, vec!["/services ".into()])));
+        assert_eq!(complete("/ser"), Some((0, vec!["/services ".into()])));
         assert_eq!(
             complete("/re").unwrap().1,
             ["/refuse ", "/rename-folder ", "/reply "]
@@ -346,7 +351,7 @@ mod tests {
         );
         // The cursor decides, not the end of the line.
         assert_eq!(
-            candidates("/se что-то", 3, &context()),
+            candidates("/ser что-то", 4, &context()),
             Some((0, vec!["/services ".into()]))
         );
     }

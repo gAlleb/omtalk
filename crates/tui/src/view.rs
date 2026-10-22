@@ -83,6 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     status_line(frame, app, status);
     services_window(frame, app, area);
     keys_window(frame, app, area);
+    settings_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -1753,6 +1754,146 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     );
     app.areas.key_rows = row_areas;
     app.areas.key_buttons = button_areas;
+}
+
+/// The settings window, over the middle of the screen: a row per setting, under the
+/// table it is in.
+fn settings_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(settings) = app.settings.as_ref() else {
+        return;
+    };
+    let width = screen.width.saturating_sub(4).min(64);
+    let height = screen
+        .height
+        .saturating_sub(3)
+        .min(settings.rows.len() as u16 + 8);
+    let area = Rect {
+        x: screen.x + (screen.width - width) / 2,
+        y: screen.y + (screen.height.saturating_sub(1) - height) / 2,
+        width,
+        height,
+    };
+    app.areas.settings_window = area;
+    clear(frame, area);
+    let block = pane("Настройки", true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 4 || inner.width < 20 {
+        return;
+    }
+    let [body, status, hint] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+    let body = Rect {
+        x: body.x + 1,
+        width: body.width.saturating_sub(2),
+        ..body
+    };
+    let label_width = settings.rows.iter().map(|r| r.label.width()).max().unwrap_or(0) + 2;
+
+    let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
+    let mut section = "";
+    for (index, row) in settings.rows.iter().enumerate() {
+        if row.section != section {
+            section = row.section;
+            if !lines.is_empty() {
+                lines.push((TextLine::default(), None));
+            }
+            let heading = if section == "notify" {
+                "Уведомления"
+            } else {
+                "Интерфейс"
+            };
+            lines.push((
+                TextLine::styled(
+                    heading,
+                    Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+                ),
+                None,
+            ));
+        }
+        let selected = index == settings.cursor;
+        let label = format!(" {:<w$}", row.label, w = label_width);
+        let label_style = if selected {
+            theme::selected()
+        } else {
+            Style::default()
+        };
+        let room = (body.width as usize).saturating_sub(label.width() + 4);
+        let value = match (&settings.editing, selected) {
+            (Some((text, at)), true) => {
+                // The cursor as a reversed cell; the text scrolled to keep it in view.
+                let chars: Vec<char> = text.chars().collect();
+                let from = at.saturating_sub(room.saturating_sub(1));
+                let before: String = chars[from..*at].iter().collect();
+                let under: String = chars.get(*at).map_or(" ".into(), |c| c.to_string());
+                let after: String = chars.iter().skip(at + 1).collect();
+                vec![
+                    Span::raw(before),
+                    Span::styled(under, Style::default().add_modifier(Modifier::REVERSED)),
+                    Span::raw(truncate(&after, room.saturating_sub(at - from + 1))),
+                ]
+            }
+            _ => {
+                let words = truncate(&row.value.words(), room);
+                let colour = match row.value {
+                    crate::settings::Value::Bool(false) => theme::dim(),
+                    _ => theme::accent(),
+                };
+                let words = match row.value {
+                    crate::settings::Value::Choice(..) | crate::settings::Value::Number { .. }
+                        if selected =>
+                    {
+                        format!("‹ {words} ›")
+                    }
+                    _ => words,
+                };
+                vec![Span::styled(words, Style::default().fg(colour))]
+            }
+        };
+        let mut spans = vec![Span::styled(label, label_style)];
+        spans.extend(value);
+        lines.push((TextLine::from(spans), Some(index)));
+    }
+    let cursor_line = lines
+        .iter()
+        .position(|(_, r)| *r == Some(settings.cursor))
+        .unwrap_or(0);
+    let skip = cursor_line.saturating_sub(body.height as usize - 1);
+    let mut row_areas = Vec::new();
+    for (i, (line, row)) in lines
+        .into_iter()
+        .skip(skip)
+        .take(body.height as usize)
+        .enumerate()
+    {
+        let place = Rect {
+            y: body.y + i as u16,
+            height: 1,
+            ..body
+        };
+        if let Some(row) = row {
+            row_areas.push((place, row));
+        }
+        frame.render_widget(Paragraph::new(line), place);
+    }
+    let (words, style) = match &settings.problem {
+        Some(problem) => (problem.clone(), Style::default().fg(theme::warn())),
+        None => (
+            "меняется сразу и сохраняется в config.toml".to_owned(),
+            Style::default().fg(theme::dim()),
+        ),
+    };
+    frame.render_widget(Paragraph::new(format!(" {words}")).style(style), status);
+    let keys = if settings.editing.is_some() {
+        " Enter сохранить · Esc отмена"
+    } else {
+        " ↑↓ выбрать · Enter или клик изменить · ← → значение · Esc"
+    };
+    frame.render_widget(
+        Paragraph::new(keys).style(Style::default().fg(theme::dim())),
+        hint,
+    );
+    app.areas.settings_rows = row_areas;
 }
 
 /// The services window, over the middle of the screen.
@@ -4052,5 +4193,102 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         let text = screen(&mut app, 120, 40);
         assert!(text.contains("/create") && text.contains("/quit"), "{text}");
+    }
+
+    #[test]
+    fn settings_change_at_once_and_are_written_down() {
+        use crate::settings::Written;
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.focus = Focus::Input;
+        "/settings"
+            .chars()
+            .for_each(|c| drop(app.on_key(key(KeyCode::Char(c)))));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.settings.is_some());
+        let text = screen(&mut app, 120, 34);
+        assert!(
+            text.contains("Настройки") && text.contains("Уведомления"),
+            "{text}"
+        );
+        assert!(text.contains("личные и упоминания"), "{text}");
+
+        // The mouse, by a click on its row and a second one: off now, and written.
+        let row = |app: &App, key: &str| {
+            let settings = app.settings.as_ref().unwrap();
+            let index = settings.rows.iter().position(|r| r.key == key).unwrap();
+            app.areas
+                .settings_rows
+                .iter()
+                .find(|(_, i)| *i == index)
+                .unwrap()
+                .0
+        };
+        let place = row(&app, "mouse");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: place.x + 2,
+            row: place.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.on_mouse(click).is_empty(), "the first click selects");
+        assert_eq!(
+            app.on_mouse(click),
+            [Action::Setting {
+                section: "ui",
+                key: "mouse",
+                value: Written::Bool(false)
+            }]
+        );
+        assert!(!app.mouse);
+
+        // The modifier, by keys: Alt now holds the shortcuts.
+        app.settings.as_mut().unwrap().cursor = 0;
+        let actions = app.on_key(key(KeyCode::Right));
+        assert_eq!(app.modifier, KeyModifiers::ALT, "{actions:?}");
+
+        // Sound for everything: the alert for a room's chatter follows.
+        let sound = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.key == "sound_on")
+            .unwrap();
+        app.settings.as_mut().unwrap().cursor = sound;
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.notify.sound_on, crate::notify::When::ALL);
+
+        // A prefix that is no key: said, not taken.
+        let leader = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.key == "leader")
+            .unwrap();
+        app.settings.as_mut().unwrap().cursor = leader;
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        "hyper+x"
+            .chars()
+            .for_each(|c| drop(app.on_key(key(KeyCode::Char(c)))));
+        assert!(app.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(app.settings.as_ref().unwrap().problem.is_some());
+        assert_eq!(app.leader.0, KeyCode::Char('x'), "the old prefix stays");
+
+        assert!(app.on_key(key(KeyCode::Esc)).is_empty());
+        assert!(app.settings.is_none());
+        // Opened again, it shows what was set.
+        app.open_settings();
+        assert_eq!(
+            app.settings.as_ref().unwrap().get("ui", "mouse"),
+            Some(&crate::settings::Value::Bool(false))
+        );
     }
 }

@@ -27,6 +27,7 @@ use crate::app::{Action, App, ChatKind, Delivery, DeviceRow, Line, MediaState};
 use crate::clipboard;
 use crate::config::{self, AccountEntry, Config};
 use crate::services::{Listing, Request};
+use crate::settings::Written;
 use crate::view::{self, Pictures};
 
 /// How many messages of each chat are loaded on start.
@@ -34,6 +35,8 @@ const HISTORY: usize = 300;
 
 pub struct Options {
     pub config: Config,
+    /// Where the config is: the settings window writes changes there.
+    config_path: PathBuf,
     db: PathBuf,
 }
 
@@ -96,7 +99,11 @@ impl Options {
                 config_path.display()
             ));
         }
-        Ok(Self { config, db })
+        Ok(Self {
+            config,
+            config_path,
+            db,
+        })
     }
 }
 
@@ -346,6 +353,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         notify.bell_on = crate::notify::When::NEVER;
     }
     app.notify = notify;
+    app.config_ui = ui.clone();
+    app.config_notify = options.config.notify.clone();
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -467,6 +476,21 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         for action in actions {
             if action == Action::Quit {
                 break;
+            }
+            if let Action::Setting { section, key, value } = action {
+                // What the runtime itself keeps is used from now on; the file is written aside.
+                match (key, &value) {
+                    ("auto_download", Written::Bool(on)) => shared.auto_download = *on,
+                    ("viewer", Written::Text(text)) => shared.viewer = text.clone(),
+                    _ => {}
+                }
+                let (path, tx) = (options.config_path.clone(), shared.tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    if let Err(problem) = crate::settings::write(&path, section, key, &value) {
+                        let _ = tx.send(Msg::Status(format!("настройка не записана: {problem}")));
+                    }
+                });
+                continue;
             }
             tokio::spawn(perform(action, shared.clone()));
         }
@@ -1256,6 +1280,8 @@ async fn perform(action: Action, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
     match action {
+        // Written by the loop, which keeps what the runtime uses.
+        Action::Setting { .. } => {}
         Action::Send {
             account,
             to,

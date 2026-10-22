@@ -21,6 +21,7 @@ rpassword = "7.5.4"
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "process"] }
 toml = "1"
+toml_edit = "0.23"
 unicode-width = "0.2.2"
 xmpp-parsers = "0.23.0"
 

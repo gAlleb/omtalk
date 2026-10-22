@@ -266,6 +266,8 @@ pub struct Areas {
     /// The keys window and what is clickable in it.
     pub key_window: Rect,
     pub key_rows: Vec<(Rect, usize)>,
+    pub settings_window: Rect,
+    pub settings_rows: Vec<(Rect, usize)>,
     pub key_buttons: Vec<(Rect, crate::keys::KeyButton)>,
     /// People in the pane beside a room who are away: a click opens a chat with them.
     pub people: Vec<(Rect, BareJid)>,
@@ -402,6 +404,12 @@ pub enum Action {
     },
     /// The keys window asks something of OMEMO.
     Keys(crate::keys::Request),
+    /// Write a setting into the config file (and, for those the runtime keeps, use it).
+    Setting {
+        section: &'static str,
+        key: &'static str,
+        value: crate::settings::Written,
+    },
     /// Put text into the clipboards (ordinary and primary).
     Copy(String),
     /// Paste what is selected elsewhere on the desktop (primary).
@@ -495,6 +503,7 @@ pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("r", "правую панель скрыть/показать"),
     ("a", "ответить (на выделенное или последнее)"),
     ("e", "ключи OMEMO: отпечатки, доверие"),
+    ("p", "настройки"),
     ("w", "закрыть чат (комнату — покинуть)"),
     ("z", "только текущий аккаунт / все"),
     ("m", "мышь: omtalk / терминал (выделение tmux)"),
@@ -563,6 +572,11 @@ pub struct App {
     pub services: Option<Services>,
     /// The keys window, likewise.
     pub keys: Option<crate::keys::Keys>,
+    /// The settings window, likewise.
+    pub settings: Option<crate::settings::Settings>,
+    /// `[ui]` and `[notify]` as last set: the settings window starts from them.
+    pub config_ui: crate::config::Ui,
+    pub config_notify: crate::notify::NotifyConfig,
     /// Connected clients by (account, whose), each by resource.
     pub online: BTreeMap<(BareJid, BareJid), BTreeMap<String, Online>>,
     /// This program's own resource on each account.
@@ -576,7 +590,7 @@ pub struct App {
     pub quit: bool,
 }
 
-const MIN_PANE: u16 = 12;
+pub const MIN_PANE: u16 = 12;
 
 impl App {
     pub fn new(accounts: Vec<BareJid>, modifier: Modifier, left: u16, right: u16) -> Self {
@@ -609,6 +623,13 @@ impl App {
             dragging_chat: None,
             services: None,
             keys: None,
+            settings: None,
+            config_ui: crate::config::Ui {
+                left,
+                right,
+                ..Default::default()
+            },
+            config_notify: Default::default(),
             completion: None,
             replying: None,
             last_click: None,
@@ -1252,6 +1273,10 @@ impl App {
             let outcome = keys.on_key(key);
             return self.keys_outcome(outcome);
         }
+        if let Some(settings) = self.settings.as_mut() {
+            let outcome = settings.on_key(key);
+            return self.settings_outcome(outcome);
+        }
         // The prefix, then one key: as tmux, and free of what the input line needs.
         if self.leader_pending {
             self.leader_pending = false;
@@ -1326,6 +1351,7 @@ impl App {
             }
             KeyCode::Char('s') => self.open_services(None),
             KeyCode::Char('e') => self.open_keys(None),
+            KeyCode::Char('p') => self.open_settings(),
             KeyCode::Char('a') => self.reply_here(),
             KeyCode::Char('w') => match self.selected {
                 Some(index) => self.close_chat(index),
@@ -1730,6 +1756,7 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/settings", _) => return self.open_settings(),
             ("/nick", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
                     let nick = line[name.len()..].trim().to_owned();
@@ -2164,6 +2191,157 @@ impl App {
         self.keys_outcome(outcome)
     }
 
+    /// Opens the settings window on the settings as they are now, the ones changed on
+    /// the way (the mouse, the widths) too.
+    pub fn open_settings(&mut self) -> Vec<Action> {
+        let mut ui = self.config_ui.clone();
+        ui.mouse = self.mouse;
+        ui.left = self.left_width;
+        ui.right = self.right_width;
+        ui.read_markers = self.read_markers;
+        ui.typing = self.send_typing;
+        self.settings = Some(crate::settings::Settings::open(crate::settings::Current {
+            ui: &ui,
+            notify: &self.config_notify,
+        }));
+        Vec::new()
+    }
+
+    fn settings_outcome(&mut self, outcome: crate::settings::Outcome) -> Vec<Action> {
+        match outcome {
+            crate::settings::Outcome::Stay => Vec::new(),
+            crate::settings::Outcome::Close => {
+                self.settings = None;
+                Vec::new()
+            }
+            crate::settings::Outcome::Changed(row) => self.apply_setting(row),
+        }
+    }
+
+    /// Puts a changed setting to use at once, and has it written down.
+    fn apply_setting(&mut self, row: usize) -> Vec<Action> {
+        use crate::settings::Value;
+        let Some(settings) = self.settings.as_mut() else {
+            return Vec::new();
+        };
+        let setting = settings.rows[row].clone();
+        let used: Result<(), String> = match (setting.key, &setting.value) {
+            ("modifier", value) => {
+                let (modifier, ui) = match value.text().as_str() {
+                    "alt" => (KeyModifiers::ALT, Modifier::Alt),
+                    "super" => (KeyModifiers::SUPER, Modifier::Super),
+                    "none" => (KeyModifiers::NONE, Modifier::None),
+                    _ => (KeyModifiers::CONTROL, Modifier::Ctrl),
+                };
+                self.modifier = modifier;
+                self.config_ui.modifier = ui;
+                Ok(())
+            }
+            ("leader", Value::Text(text)) => crate::config::parse_key(text).map(|key| {
+                self.leader = key;
+                self.config_ui.leader = text.clone();
+            }),
+            ("icons", value) => {
+                let text = value.text() == "text";
+                self.icons = if text {
+                    crate::theme::TEXT_ICONS
+                } else {
+                    crate::theme::NERD
+                };
+                self.config_ui.icons = if text {
+                    crate::config::IconSet::Text
+                } else {
+                    crate::config::IconSet::Nerd
+                };
+                Ok(())
+            }
+            ("left", Value::Number { value, .. }) => {
+                self.left_width = *value;
+                self.config_ui.left = *value;
+                Ok(())
+            }
+            ("right", Value::Number { value, .. }) => {
+                self.right_width = *value;
+                self.config_ui.right = *value;
+                Ok(())
+            }
+            ("mouse", Value::Bool(on)) => {
+                self.mouse = *on;
+                self.config_ui.mouse = *on;
+                Ok(())
+            }
+            ("read_markers", Value::Bool(on)) => {
+                self.read_markers = *on;
+                self.config_ui.read_markers = *on;
+                Ok(())
+            }
+            ("typing", Value::Bool(on)) => {
+                self.send_typing = *on;
+                self.config_ui.typing = *on;
+                Ok(())
+            }
+            ("auto_download", Value::Bool(on)) => {
+                self.config_ui.auto_download = *on;
+                Ok(())
+            }
+            ("viewer", Value::Text(text)) if text.is_empty() => Err("нужна программа".into()),
+            ("viewer", Value::Text(text)) => {
+                self.config_ui.viewer = text.clone();
+                Ok(())
+            }
+            (_, _) if setting.section == "notify" => {
+                let notify = settings.notify();
+                notify.ready().map(|ready| {
+                    self.notify = ready;
+                    self.config_notify = notify;
+                    self.config_ui.bell = true;
+                })
+            }
+            _ => Ok(()),
+        };
+        let settings = self.settings.as_mut().expect("open");
+        match used {
+            Ok(()) => {
+                settings.problem = None;
+                vec![Action::Setting {
+                    section: setting.section,
+                    key: setting.key,
+                    value: setting.value.written(),
+                }]
+            }
+            Err(problem) => {
+                settings.problem = Some(problem);
+                Vec::new()
+            }
+        }
+    }
+
+    fn settings_mouse(&mut self, mouse: MouseEvent) -> Vec<Action> {
+        let (x, y) = (mouse.column, mouse.row);
+        let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        let row = self
+            .areas
+            .settings_rows
+            .iter()
+            .find(|(r, _)| inside(*r))
+            .map(|&(_, i)| i);
+        let outside = !inside(self.areas.settings_window);
+        let Some(settings) = self.settings.as_mut() else {
+            return Vec::new();
+        };
+        let outcome = match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => match row {
+                Some(row) => settings.click_row(row),
+                None if outside => crate::settings::Outcome::Close,
+                None => crate::settings::Outcome::Stay,
+            },
+            MouseEventKind::ScrollUp => settings.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            MouseEventKind::ScrollDown => settings.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            _ => crate::settings::Outcome::Stay,
+        };
+        self.settings_outcome(outcome)
+    }
+
     /// Opens the services window on `jid`, or on the current account's own server.
     pub fn open_services(&mut self, jid: Option<Jid>) -> Vec<Action> {
         let Some(account) = self.account_for(jid.as_ref()) else {
@@ -2464,6 +2642,9 @@ impl App {
         }
         if self.keys.is_some() {
             return self.keys_mouse(mouse);
+        }
+        if self.settings.is_some() {
+            return self.settings_mouse(mouse);
         }
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))

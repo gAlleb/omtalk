@@ -11,6 +11,7 @@ mod keys;
 mod notify;
 mod runtime;
 mod services;
+mod settings;
 mod theme;
 mod view;
 
