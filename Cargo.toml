@@ -5,3 +5,12 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-or-later"
+
+# One small file to copy: no debug symbols, whole-program optimisation, tuned for size
+# (a chat client is never CPU-bound). Panics still unwind, so one failed task does not
+# take the program down.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"
