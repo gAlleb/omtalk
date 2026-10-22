@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 
 use omtalk_store::Folder;
 
+use crate::complete::{self, Completion};
 use crate::config::Modifier;
 use crate::services::{Outcome, Services};
 
@@ -245,10 +246,6 @@ pub enum Action {
     Quit,
 }
 
-pub const HELP: &str = "/msg JID — открыть чат · /join КОМНАТА [НИК] · /leave · /add JID [ИМЯ] · \
-/accept JID · /refuse JID · /devices · /services [АДРЕС] · /folder [ПАПКА] · \
-/rename-folder СТАРАЯ НОВАЯ · /help";
-
 pub struct App {
     pub accounts: Vec<BareJid>,
     /// Account → connection state, as shown in the status line.
@@ -270,6 +267,8 @@ pub struct App {
     pub dragging: Option<Splitter>,
     /// A chat being dragged to a folder.
     pub dragging_chat: Option<usize>,
+    /// A Tab completion being cycled through in the input line.
+    pub completion: Option<Completion>,
     /// The services window, over the chat while open.
     pub services: Option<Services>,
     /// Headings whose chats are folded away in the list.
@@ -312,6 +311,7 @@ impl App {
             dragging: None,
             dragging_chat: None,
             services: None,
+            completion: None,
             collapsed: BTreeSet::new(),
             folders: Vec::new(),
             active: None,
@@ -438,6 +438,11 @@ impl App {
             return self.shortcut(key.code);
         }
         match key.code {
+            // In a line being typed, Tab completes; elsewhere it moves the focus.
+            KeyCode::Tab | KeyCode::BackTab if self.focus == Focus::Input && !self.input.is_empty() => {
+                self.complete(key.code == KeyCode::Tab);
+                Vec::new()
+            }
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Focus::Chats => Focus::Messages,
@@ -541,6 +546,8 @@ impl App {
     }
 
     fn input_key(&mut self, code: KeyCode) -> Vec<Action> {
+        // Any other key takes the completion as it stands.
+        self.completion = None;
         let len = self.input.chars().count();
         match code {
             KeyCode::Char(c) => {
@@ -698,11 +705,19 @@ impl App {
                     ),
                 }
             }
-            ("/help", _) => Err(HELP.to_owned()),
+            // The list shows while a command is being typed: start one.
+            ("/help", _) => {
+                self.input = "/".into();
+                self.cursor = 1;
+                self.focus = Focus::Input;
+                Ok(Vec::new())
+            }
             ("/msg" | "/join" | "/add" | "/accept" | "/refuse", None) => {
                 Err(format!("{name}: нужен адрес вида name@server"))
             }
-            _ => Err(format!("неизвестная команда {name}; {HELP}")),
+            _ => Err(format!(
+                "неизвестная команда {name}: наберите / — появится список"
+            )),
         };
         match result {
             Ok(actions) => actions,
@@ -728,6 +743,78 @@ impl App {
                 })
         });
         local.or(self.active.as_ref()).or(self.accounts.first()).cloned()
+    }
+
+    /// What Tab can complete here.
+    fn completion_context(&self) -> complete::Context {
+        let mut context = complete::Context::default();
+        if let Some(chat) = self.current().filter(|c| c.is_room()) {
+            let own = match &chat.kind {
+                ChatKind::Room { nick } => nick.as_str(),
+                ChatKind::Direct => "",
+            };
+            context.nicks = chat.occupants.keys().filter(|n| *n != own).cloned().collect();
+        }
+        for chat in &self.chats {
+            let list = if chat.is_room() {
+                &mut context.rooms
+            } else {
+                &mut context.people
+            };
+            list.push(chat.jid.to_string());
+            for real in chat.occupants.values().flatten() {
+                if !self.accounts.contains(real) {
+                    context.people.push(real.to_string());
+                }
+            }
+        }
+        context.folders = self.folders.iter().map(|f| f.name.clone()).collect();
+        context
+    }
+
+    /// Completes the word before the cursor; again, the next candidate (Shift+Tab, the
+    /// one before).
+    fn complete(&mut self, forward: bool) {
+        let completion = match self.completion.take() {
+            Some(mut c) => {
+                let len = c.candidates.len();
+                c.index = if forward {
+                    (c.index + 1) % len
+                } else {
+                    (c.index + len - 1) % len
+                };
+                c
+            }
+            None => {
+                let Some((start, candidates)) =
+                    complete::candidates(&self.input, self.cursor, &self.completion_context())
+                else {
+                    return;
+                };
+                let index = if forward { 0 } else { candidates.len() - 1 };
+                Completion {
+                    start,
+                    inserted: self.cursor - start,
+                    candidates,
+                    index,
+                }
+            }
+        };
+        let chars: Vec<char> = self.input.chars().collect();
+        let candidate = &completion.candidates[completion.index];
+        let mut line: String = chars[..completion.start].iter().collect();
+        line.push_str(candidate);
+        line.extend(&chars[completion.start + completion.inserted..]);
+        self.input = line;
+        let inserted = candidate.chars().count();
+        self.cursor = completion.start + inserted;
+        // One candidate: done. Several: Tab goes on through them.
+        if completion.candidates.len() > 1 {
+            self.completion = Some(Completion {
+                inserted,
+                ..completion
+            });
+        }
     }
 
     /// Opens a direct chat with a room participant, by nick: the room must show who is

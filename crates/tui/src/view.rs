@@ -19,6 +19,7 @@ use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
 use xmpp_parsers::data_forms::FieldType;
 
 use crate::app::{App, Areas, Chat, ChatKind, Entry, Focus, Group, Line, MediaState, ServiceButton};
+use crate::complete;
 use crate::services::FieldState;
 use crate::theme;
 
@@ -363,6 +364,80 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         None => empty_state(frame, inner),
     }
     input_box(frame, app, input);
+    suggestions(frame, app, input, messages);
+}
+
+/// Over the bottom of the chat, just above the input: the commands that fit what is
+/// typed, or the candidates Tab goes through.
+fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
+    let mut rows: Vec<(String, &str, bool)> = match &app.completion {
+        Some(c) if c.candidates.len() > 1 => c
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let text = text.trim_end().trim_end_matches(':').to_owned();
+                let about = complete::about(&text).map(|c| c.about).unwrap_or("");
+                (text, about, i == c.index)
+            })
+            .collect(),
+        _ => complete::commands_for(&app.input)
+            .into_iter()
+            .map(|c| {
+                (
+                    format!("{} {}", c.name, c.args).trim_end().to_owned(),
+                    c.about,
+                    false,
+                )
+            })
+            .collect(),
+    };
+    if rows.is_empty() || app.focus != Focus::Input {
+        return;
+    }
+    let height = (rows.len() as u16 + 2)
+        .min(above.height.saturating_sub(1))
+        .min(14);
+    if height < 3 {
+        return;
+    }
+    rows.truncate(height as usize - 2);
+    let left = rows.iter().map(|(t, ..)| t.width()).max().unwrap_or(0);
+    let wanted = rows
+        .iter()
+        .map(|(_, about, _)| left + 3 + about.width())
+        .max()
+        .unwrap_or(0) as u16
+        + 2;
+    let width = wanted.clamp(24, input.width);
+    let area = Rect::new(input.x, input.y.saturating_sub(height), width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border(true))
+        .title(Span::styled(" Tab — дописать ", Style::default().fg(theme::DIM)));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    let room = (inner.width as usize).saturating_sub(left + 3);
+    let lines: Vec<TextLine> = rows
+        .into_iter()
+        .map(|(text, about, chosen)| {
+            let style = if chosen {
+                theme::selected()
+            } else {
+                Style::default().fg(theme::ACCENT)
+            };
+            TextLine::from(vec![
+                Span::styled(format!("{text:<left$}"), style),
+                Span::styled(
+                    format!("   {}", truncate(about, room)),
+                    Style::default().fg(theme::DIM),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn empty_state(frame: &mut Frame, area: Rect) {
@@ -655,7 +730,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.input.is_empty() {
         let hint = if app.current().is_some() {
-            "Сообщение…   /help — команды"
+            "Сообщение…   / — команды, Tab — дописать"
         } else {
             "/msg имя@сервер или /join комната"
         };
@@ -796,7 +871,9 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         key("R"),
         dim(" панели  "),
         Span::styled("Tab", Style::default().fg(theme::ACCENT)),
-        dim(" фокус  "),
+        dim(" дописать/фокус  "),
+        Span::styled("/", Style::default().fg(theme::ACCENT)),
+        dim(" команды  "),
         key("Q"),
         dim(" выход "),
     ]);
@@ -1705,5 +1782,80 @@ mod tests {
             "{saved:?}"
         );
         assert!(app.folders.is_empty());
+    }
+
+    #[test]
+    fn tab_completes_and_the_list_shows_what_fits() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        for (nick, real) in [
+            ("Алиса", "alice@home.org"),
+            ("alex", "alex@home.org"),
+            ("alexey", "alexey@home.org"),
+            ("me", "me@home.org"),
+        ] {
+            app.chats[room].occupants.insert(nick.into(), Some(jid(real)));
+        }
+        app.focus = Focus::Input;
+        let press = |app: &mut App, code| drop(app.on_key(KeyEvent::new(code, KeyModifiers::NONE)));
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(app, KeyCode::Char(c)));
+
+        // A slash brings up the commands with what they do.
+        typed(&mut app, "/");
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("/services [АДРЕС]") && text.contains("сервисы и команды сервера"),
+            "{text}"
+        );
+        typed(&mut app, "re");
+        let text = screen(&mut app, 120, 30);
+        assert!(text.contains("/refuse") && !text.contains("/services"), "{text}");
+
+        // Tab goes round the candidates, Shift+Tab back; typing takes the one shown.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input, "/refuse ");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input, "/rename-folder ");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.input, "/refuse ");
+        typed(&mut app, "ali");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(
+            app.input, "/refuse alice@home.org ",
+            "addresses of people in the room"
+        );
+
+        // Nicks, without one's own, addressed at the start of the line.
+        press(&mut app, KeyCode::Esc);
+        typed(&mut app, "a");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!((app.input.as_str(), app.cursor), ("alex: ", 6));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input, "alexey: ");
+        assert!(
+            screen(&mut app, 120, 30).contains("alexey"),
+            "the candidates are listed"
+        );
+        press(&mut app, KeyCode::Esc);
+        typed(&mut app, "m");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input, "m", "one's own nick is not offered");
+
+        // With nothing typed Tab still moves the focus; /help opens the list.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Chats);
+        app.focus = Focus::Input;
+        typed(&mut app, "/help");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input, "/");
+        assert!(screen(&mut app, 120, 30).contains("этот список"));
     }
 }
