@@ -768,3 +768,37 @@ async fn an_avatar_is_published_and_read_by_another_from_pep_and_vcard() {
     // Prosody hands it on as the vCard's photo too, for clients that read only that.
     assert_eq!(reader.vcard_avatar(owner.jid()).await.unwrap(), Some(picture));
 }
+
+#[tokio::test]
+async fn a_chats_history_is_read_from_the_archive_by_who_it_was_with() {
+    let (mut accounts, mut events) = Accounts::new();
+    let reader = accounts.add(config("u18")).await;
+    let bob = accounts.add(config("u19")).await;
+    let carol = accounts.add(config("u20")).await;
+    online(&mut events, &[&reader, &bob, &carol]).await;
+    let tag = rand_suffix();
+    for (from, text) in [(&bob, "от bob 1"), (&carol, "от carol"), (&bob, "от bob 2")] {
+        let message = xmpp_parsers::message::Message::chat(Some(reader.jid().clone().into()))
+            .with_body(xmpp_parsers::message::Lang::default(), format!("{text} {tag}"));
+        from.send(message).await.unwrap();
+    }
+    let last = format!("от bob 2 {tag}");
+    wait_for(&mut events, |e| match &e.event {
+        Event::Message(m) if m.get_best_body(vec![]).is_some_and(|(_, b)| *b == last) => Some(()),
+        _ => None,
+    })
+    .await;
+
+    let page = reader.archive_with(bob.jid(), 10).await.unwrap();
+    let texts: Vec<String> = page
+        .messages
+        .iter()
+        .filter_map(|m| m.message.get_best_body(vec![]).map(|(_, b)| b.clone()))
+        .filter(|b| b.ends_with(&tag.to_string()))
+        .collect();
+    assert_eq!(
+        texts,
+        [format!("от bob 1 {tag}"), last],
+        "only bob's, oldest first"
+    );
+}

@@ -400,6 +400,11 @@ pub enum Action {
         room: BareJid,
         jid: BareJid,
     },
+    /// Read a direct chat's history from the account's archive: this device has none.
+    History {
+        account: BareJid,
+        peer: BareJid,
+    },
     /// Fetch the avatar of a person or a room, unless it is known.
     Avatar {
         account: BareJid,
@@ -590,6 +595,8 @@ pub struct App {
     /// Avatars drawn here with block characters (a terminal without pictures): the
     /// square picture by its key; with pictures, they are among the view's pictures.
     pub avatar_blocks: BTreeMap<String, image::DynamicImage>,
+    /// Direct chats whose history was asked of the archive already.
+    pub history_asked: BTreeSet<(BareJid, BareJid)>,
     /// Whose avatars were asked for already, by account.
     pub avatars_asked: BTreeSet<(BareJid, BareJid)>,
     /// `[ui]` and `[notify]` as last set: the settings window starts from them.
@@ -645,6 +652,7 @@ impl App {
             show_avatars: false,
             avatars: BTreeMap::new(),
             avatars_asked: BTreeSet::new(),
+            history_asked: BTreeSet::new(),
             avatar_blocks: BTreeMap::new(),
             config_ui: crate::config::Ui {
                 left,
@@ -1171,6 +1179,7 @@ impl App {
         self.active = Some(self.chats[index].account.clone());
         actions.extend(self.mark_read(index));
         actions.extend(self.ask_avatar(index));
+        actions.extend(self.ask_history(index));
         let chat = &mut self.chats[index];
         chat.unread = 0;
         // A room's pane lists its members who are away: read afresh on opening.
@@ -2272,6 +2281,20 @@ impl App {
             _ => crate::keys::Outcome::Stay,
         };
         self.keys_outcome(outcome)
+    }
+
+    /// A direct chat with nothing in it (this device is new, or never had it): its
+    /// history is asked of the archive, once.
+    fn ask_history(&mut self, index: usize) -> Option<Action> {
+        let chat = self.chats.get(index)?;
+        if chat.kind != ChatKind::Direct || chat.lines.iter().any(|l| !l.notice) {
+            return None;
+        }
+        let key = (chat.account.clone(), chat.jid.clone());
+        self.history_asked.insert(key.clone()).then_some(Action::History {
+            account: key.0,
+            peer: key.1,
+        })
     }
 
     /// The avatar of chat `index`, asked for once while avatars are shown.

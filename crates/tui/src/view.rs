@@ -2736,7 +2736,22 @@ mod tests {
         let name = at(&app, "bob", true).expect("bob's name in the chat is clickable");
         let actions = app.on_mouse(click(name));
         assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
-        assert!(matches!(&actions[..], [Action::Devices { .. }]));
+        assert!(
+            matches!(&actions[..], [Action::History { peer, .. }, Action::Devices { .. }] if peer.as_str() == "bob@example.org"),
+            "a new chat asks the archive for its history: {actions:?}"
+        );
+        // Asked once: opened again, nothing more is read.
+        app.select(room);
+        let index = app
+            .chats
+            .iter()
+            .position(|c| c.jid == jid("bob@example.org"))
+            .unwrap();
+        assert!(
+            !app.select(index)
+                .iter()
+                .any(|a| matches!(a, Action::History { .. }))
+        );
 
         // The participants pane; one whose address the room hides says so.
         app.select(room);

@@ -32,6 +32,8 @@ use crate::view::{self, Pictures};
 
 /// How many messages of each chat are loaded on start.
 const HISTORY: usize = 300;
+/// How many messages of a direct chat are read from the archive when this device has none.
+const HISTORY_FROM_ARCHIVE: usize = 50;
 
 pub struct Options {
     pub config: Config,
@@ -1349,6 +1351,16 @@ async fn key_rows(
     Ok(rows)
 }
 
+/// Old messages encrypted before this device existed, counted in words.
+fn unreadable_words(count: usize) -> String {
+    let (what, verb, them) = match (count % 10, count % 100) {
+        (1, n) if n != 11 => ("старое сообщение", "зашифровано", "его"),
+        (2..=4, n) if !(12..=14).contains(&n) => ("старых сообщения", "зашифрованы", "их"),
+        _ => ("старых сообщений", "зашифрованы", "их"),
+    };
+    format!("ещё {count} {what} {verb} до появления этого устройства — здесь {them} не прочитать")
+}
+
 /// A failed OMEMO send, in words.
 fn omemo_error(error: &omtalk_omemo::Error) -> String {
     match error {
@@ -1857,6 +1869,28 @@ async fn perform(action: Action, shared: Shared) {
                 }),
             }
         }
+        Action::History { account, peer } => {
+            let Some((_, omemo)) = get(&account) else { return };
+            match omemo.history_with(&peer, HISTORY_FROM_ARCHIVE).await {
+                Ok(history) => {
+                    for message in history.messages {
+                        deliver(&shared, &account, message);
+                    }
+                    if history.unreadable > 0 {
+                        tell(Msg::Notice {
+                            account,
+                            chat: Some(peer),
+                            text: unreadable_words(history.unreadable),
+                        });
+                    }
+                }
+                Err(e) => tell(Msg::Notice {
+                    account,
+                    chat: Some(peer),
+                    text: format!("история с сервера: {e}"),
+                }),
+            }
+        }
         Action::Avatar { account, jid, room } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let from = if room {
@@ -2119,4 +2153,15 @@ async fn fetch_media(link: String, shared: Shared) {
         url: media.url().to_owned(),
         state,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unreadable_messages_are_counted_in_proper_russian() {
+        assert!(super::unreadable_words(1).starts_with("ещё 1 старое сообщение зашифровано"));
+        assert!(super::unreadable_words(3).starts_with("ещё 3 старых сообщения зашифрованы"));
+        assert!(super::unreadable_words(11).starts_with("ещё 11 старых сообщений"));
+        assert!(super::unreadable_words(21).contains("здесь его не прочитать"));
+    }
 }

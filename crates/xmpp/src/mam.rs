@@ -65,12 +65,39 @@ impl Account {
         self.archive(room, set).await
     }
 
+    /// The newest `max` messages of the account's own archive exchanged with `with`,
+    /// oldest first: a chat's history, for a device that has none of it.
+    pub async fn archive_with(&self, with: &BareJid, max: usize) -> Result<Page, Error> {
+        use xmpp_parsers::data_forms::{DataForm, DataFormType, Field};
+        let set = SetQuery {
+            max: Some(max),
+            after: None,
+            before: Some(String::new()),
+            index: None,
+        };
+        let form = DataForm::new(
+            DataFormType::Submit,
+            xmpp_parsers::ns::MAM,
+            vec![Field::text_single("with", with.as_str())],
+        );
+        self.archive_query_with(None, Some(form), set).await
+    }
+
     async fn archive(&self, room: Option<&BareJid>, set: SetQuery) -> Result<Page, Error> {
+        self.archive_query_with(room, None, set).await
+    }
+
+    async fn archive_query_with(
+        &self,
+        room: Option<&BareJid>,
+        form: Option<xmpp_parsers::data_forms::DataForm>,
+        set: SetQuery,
+    ) -> Result<Page, Error> {
         let queryid = random_id();
         let query = Query {
             queryid: Some(QueryId(queryid.clone())),
             node: None,
-            form: None,
+            form,
             set: Some(set),
             flip_page: false,
         };

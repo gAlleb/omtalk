@@ -455,6 +455,18 @@ impl Omemo {
         Ok(caught)
     }
 
+    /// The newest `max` messages with `peer` from the account's archive, for a chat this
+    /// device has no history of. Read only: the archive's position does not move. Most
+    /// encrypted ones were written before this device existed and are only counted.
+    pub async fn history_with(&self, peer: &BareJid, max: usize) -> Result<CatchUp, Error> {
+        let page = self.account.archive_with(peer, max).await?;
+        let mut caught = CatchUp::default();
+        for archived in page.messages {
+            self.open_archived(None, archived, &mut caught).await;
+        }
+        Ok(caught)
+    }
+
     /// One archived message: opened, counted, and the archive's position moved past it.
     async fn take_archived(
         &self,
@@ -462,8 +474,20 @@ impl Omemo {
         archived: omtalk_xmpp::mam::Archived,
         caught: &mut CatchUp,
     ) -> Result<(), Error> {
+        let archive = room.cloned().unwrap_or_else(|| self.account.jid().clone());
+        let id = archived.id.clone();
+        self.open_archived(room, archived, caught).await;
+        self.set_archive_position(&archive, &id).await
+    }
+
+    /// One archived message, opened and counted into `caught`.
+    async fn open_archived(
+        &self,
+        room: Option<&BareJid>,
+        archived: omtalk_xmpp::mam::Archived,
+        caught: &mut CatchUp,
+    ) {
         let own = self.account.jid().clone();
-        let archive = room.cloned().unwrap_or_else(|| own.clone());
         let at = archived.stamp.as_ref().map(|s| s.0.timestamp());
         let envelope = match room {
             None => Ok(envelope::open_archived(&own, archived.message)),
@@ -488,7 +512,6 @@ impl Omemo {
             // One message that does not decrypt must not hold up the rest.
             Err(error) => caught.failed.push((archived.id.clone(), error)),
         }
-        self.set_archive_position(&archive, &archived.id).await
     }
 
     /// An encrypted message with text that names no key for this device. Not this
