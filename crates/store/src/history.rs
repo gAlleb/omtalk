@@ -47,7 +47,9 @@ pub struct ChatSummary {
 }
 
 impl Store {
+    /// Saves a message; a chat closed before opens again with it.
     pub fn save_message(&self, account: &BareJid, message: &StoredMessage) -> Result<(), Error> {
+        self.reopen_chat(account, &message.chat)?;
         self.db.lock().unwrap().execute(
             "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

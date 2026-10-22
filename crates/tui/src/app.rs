@@ -290,6 +290,11 @@ pub enum Action {
         marker: Option<String>,
         archive_id: Option<String>,
     },
+    /// The chat was closed: keep it so, until someone writes in it.
+    CloseChat {
+        account: BareJid,
+        jid: BareJid,
+    },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
     /// Put text into the clipboards (ordinary and primary).
@@ -323,6 +328,7 @@ pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("s", "сервисы сервера"),
     ("b", "список чатов скрыть/показать"),
     ("r", "правую панель скрыть/показать"),
+    ("w", "закрыть чат (комнату — покинуть)"),
     ("z", "только текущий аккаунт / все"),
     ("m", "мышь: omtalk / терминал (выделение tmux)"),
     ("↑ ↓ / k j", "предыдущий / следующий чат"),
@@ -465,6 +471,48 @@ impl App {
             self.selected = Some(self.chats.len() - 1);
         }
         self.chats.len() - 1
+    }
+
+    /// Takes a chat off the list; the selection stays near where it was.
+    pub fn remove_chat(&mut self, index: usize) {
+        if index >= self.chats.len() {
+            return;
+        }
+        self.chats.remove(index);
+        self.selected = match self.selected {
+            _ if self.chats.is_empty() => None,
+            Some(s) if s > index => Some(s - 1),
+            Some(s) if s == index => Some(index.min(self.chats.len() - 1)),
+            other => other,
+        };
+        self.selection = None;
+    }
+
+    /// Closes chat `index`: off the list, its history kept, back when someone writes. A
+    /// room is left too.
+    pub fn close_chat(&mut self, index: usize) -> Vec<Action> {
+        let Some(chat) = self.chats.get(index) else {
+            return Vec::new();
+        };
+        let (account, jid) = (chat.account.clone(), chat.jid.clone());
+        let mut actions = vec![Action::CloseChat {
+            account: account.clone(),
+            jid: jid.clone(),
+        }];
+        match &chat.kind {
+            ChatKind::Server => {
+                self.status = "служебный канал не закрывается".into();
+                return Vec::new();
+            }
+            // The room goes once it is left (Msg::Left).
+            ChatKind::Room { nick } => actions.push(Action::Leave {
+                account,
+                room: jid,
+                nick: nick.clone(),
+            }),
+            ChatKind::Direct => self.remove_chat(index),
+        }
+        actions
     }
 
     /// The account's server channel, made if needed.
@@ -813,6 +861,10 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('s') => self.open_services(None),
+            KeyCode::Char('w') => match self.selected {
+                Some(index) => self.close_chat(index),
+                None => Vec::new(),
+            },
             KeyCode::Char('z') => {
                 self.focus_group();
                 Vec::new()
@@ -1061,6 +1113,10 @@ impl App {
                 }
             }
             // The list shows while a command is being typed: start one.
+            ("/close", _) => match self.selected {
+                Some(index) => return self.close_chat(index),
+                None => Err("нет открытого чата".to_owned()),
+            },
             ("/quit", _) => {
                 self.quit = true;
                 return vec![Action::Quit];
@@ -1659,7 +1715,13 @@ impl App {
                 }
                 return vec![Action::Copy(text)];
             }
-            // The middle button pastes what is selected anywhere, as everywhere.
+            // The middle button on a chat closes it, as on a browser's tab.
+            MouseEventKind::Down(MouseButton::Middle)
+                if let Some(&(_, index)) = self.areas.chat_rows.iter().find(|(r, _)| inside(*r)) =>
+            {
+                return self.close_chat(index);
+            }
+            // Elsewhere it pastes what is selected anywhere, as everywhere.
             MouseEventKind::Down(MouseButton::Middle) => {
                 self.focus = Focus::Input;
                 return vec![Action::PastePrimary];

@@ -65,6 +65,11 @@ pub const COMMANDS: &[Command] = &[
         about: "этот список",
     },
     Command {
+        name: "/close",
+        args: "",
+        about: "закрыть чат; комнату — покинуть",
+    },
+    Command {
         name: "/quit",
         args: "",
         about: "выйти из omtalk",

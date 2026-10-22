@@ -2784,4 +2784,69 @@ mod tests {
         );
         assert_eq!(app.chats[server].lines.len(), 1, "a change of state is not news");
     }
+
+    #[test]
+    fn chats_close_by_command_leader_and_middle_click() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let anna = app.chat(&me, &jid("anna@home.org"), ChatKind::Direct);
+        app.chat(&me, &jid("bert@home.org"), ChatKind::Direct);
+        app.chat(&me, &jid("carl@home.org"), ChatKind::Direct);
+        app.select(anna);
+        app.focus = Focus::Input;
+        "/close"
+            .chars()
+            .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+        let closed = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            closed,
+            [Action::CloseChat {
+                account: me.clone(),
+                jid: jid("anna@home.org")
+            }]
+        );
+        let titles = |app: &App| app.chats.iter().map(|c| c.title()).collect::<Vec<_>>();
+        assert_eq!(titles(&app), ["bert", "carl"]);
+        assert_eq!(app.current().unwrap().title(), "bert", "the next one is open");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(titles(&app), ["carl"]);
+
+        // The middle button on a chat in the list closes it.
+        let dave = app.chat(&me, &jid("dave@home.org"), ChatKind::Direct);
+        screen(&mut app, 100, 20);
+        let (row, _) = *app.areas.chat_rows.iter().find(|(_, i)| *i == dave).unwrap();
+        let middle = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Middle),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            app.on_mouse(middle),
+            [Action::CloseChat {
+                account: me.clone(),
+                jid: jid("dave@home.org")
+            }]
+        );
+        assert_eq!(titles(&app), ["carl"]);
+
+        // A room is left (it goes when the room says so); the server channel stays.
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        let actions = app.close_chat(room);
+        assert!(actions.contains(&Action::Leave {
+            account: me.clone(),
+            room: jid("team@muc.home.org"),
+            nick: "me".into()
+        }));
+        let server = app.server_chat(&me);
+        assert!(app.close_chat(server).is_empty());
+        assert!(app.status.contains("не закрывается"));
+    }
 }

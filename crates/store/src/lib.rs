@@ -3,6 +3,7 @@
 //! Secrets are stored unencrypted, as Gajim and Conversations store theirs; the file is
 //! created readable by its owner only.
 
+mod closed;
 mod folders;
 mod history;
 
@@ -64,6 +65,7 @@ const MIGRATIONS: &[&str] = &[
     history::MIGRATION,
     folders::MIGRATION,
     folders::MIGRATION_PER_ACCOUNT,
+    closed::MIGRATION,
 ];
 
 #[derive(Clone)]

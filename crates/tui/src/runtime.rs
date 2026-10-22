@@ -290,6 +290,10 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     for folder in app.folders.clone() {
         for chat in folder.chats {
             if jids.contains(&folder.account)
+                && !store
+                    .closed_chats(&folder.account)
+                    .unwrap_or_default()
+                    .contains(&chat)
                 && !app
                     .chats
                     .iter()
@@ -396,11 +400,17 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
 
 fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
     for account in accounts {
+        let closed = store.closed_chats(account).unwrap_or_default();
         let rooms: HashMap<BareJid, String> = store.rooms(account).unwrap_or_default().into_iter().collect();
         for (room, nick) in &rooms {
             app.chat(account, room, ChatKind::Room { nick: nick.clone() });
         }
-        for summary in store.chats(account).unwrap_or_default() {
+        for summary in store
+            .chats(account)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| !closed.contains(&c.chat))
+        {
             let kind = match rooms.get(&summary.chat) {
                 Some(nick) => ChatKind::Room { nick: nick.clone() },
                 None => ChatKind::Direct,
@@ -514,14 +524,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 .iter()
                 .position(|c| c.account == account && c.jid == room)
             {
-                app.chats.remove(index);
-                app.selected = if app.chats.is_empty() {
-                    None
-                } else {
-                    Some(index.min(app.chats.len() - 1))
-                };
+                app.remove_chat(index);
             }
         }
+
         Msg::Occupant {
             account,
             room,
@@ -1005,6 +1011,11 @@ async fn perform(action: Action, shared: Shared) {
                 chat: Some(jid),
                 text: "не видит ваш статус".into(),
             });
+        }
+        Action::CloseChat { account, jid } => {
+            if let Err(e) = shared.store.close_chat(&account, &jid) {
+                tell(Msg::Status(format!("чат {jid} не закрылся насовсем: {e}")));
+            }
         }
         Action::SaveFolders(folders) => {
             if let Err(e) = shared.store.save_folders(&folders) {
