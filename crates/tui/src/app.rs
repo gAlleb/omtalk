@@ -655,7 +655,11 @@ impl App {
             .iter()
             .position(|c| &c.account == account && &c.jid == jid)
         {
-            if let ChatKind::Room { .. } = kind {
+            // A room learns one's nick in it; an empty one (a message or a presence that
+            // only says "a room") must not wipe the nick known.
+            if let ChatKind::Room { nick } = &kind
+                && (!nick.is_empty() || !self.chats[index].is_room())
+            {
                 self.chats[index].kind = kind;
             }
             return index;

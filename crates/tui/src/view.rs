@@ -3585,6 +3585,11 @@ mod tests {
         };
         let chatter = app.alert_for(&me, &said("всем привет"));
         assert!(chatter.bell && !chatter.sound && !chatter.desktop, "{chatter:?}");
+        // A message in the room, which makes the chat "a room" without a nick, keeps the
+        // nick known: the mention after it is still one.
+        app.on_incoming(&me, &said("всем привет"), 1);
+        assert_eq!(app.chats[room].kind, ChatKind::Room { nick: "me".into() });
+        assert!(app.alert_for(&me, &said("me")).sound, "a one-letter-short nick alone");
         let named = app.alert_for(&me, &said("me, глянь"));
         assert!(named.bell && named.sound && named.desktop, "{named:?}");
         // History read from the archive (a room's, on entering): nothing at all.
