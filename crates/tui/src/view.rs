@@ -1282,17 +1282,28 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
     app.areas.hide_right = Some(Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1));
 
     let Some(chat) = app.current() else { return };
-    // The avatar on top, the rest below it.
-    let avatar = app.avatar_of(&chat.jid).and_then(|key| pictures.get_mut(&key));
-    if let Some(protocol) = avatar {
-        let width = AVATAR_WIDTH.min(inner.width);
-        let height = width / 2;
-        if inner.height > height + 4 {
-            let place = Rect::new(inner.x + (inner.width - width) / 2, inner.y, width, height);
-            frame.render_stateful_widget(StatefulImage::default(), place, protocol);
-            inner.y += height + 1;
-            inner.height -= height + 1;
-        }
+    // The avatar on top, round, the rest below it.
+    let width = AVATAR_WIDTH.min(inner.width);
+    let height = width / 2;
+    let place = Rect::new(inner.x + (inner.width - width) / 2, inner.y, width, height);
+    let fits = inner.height > height + 4;
+    let drawn = match app.avatar_of(&chat.jid) {
+        Some(key) if fits => match (app.avatar_blocks.get(&key), pictures.get_mut(&key)) {
+            (Some(image), _) => {
+                crate::avatar::draw_blocks(image, place, frame.buffer_mut());
+                true
+            }
+            (None, Some(protocol)) => {
+                frame.render_stateful_widget(StatefulImage::default(), place, protocol);
+                true
+            }
+            (None, None) => false,
+        },
+        _ => false,
+    };
+    if drawn {
+        inner.y += height + 1;
+        inner.height -= height + 1;
     }
     let mut rows: Vec<TextLine> = Vec::new();
     let mut nicks = Vec::new();
@@ -4387,6 +4398,28 @@ mod tests {
             first_words as u16 > right.y + AVATAR_WIDTH / 2,
             "below the picture:\n{}",
             text.join("\n")
+        );
+
+        // Without pictures in the terminal: drawn round in block characters, the corners
+        // left to the background.
+        app.avatar_blocks.insert(
+            "avatar:abc".into(),
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                8,
+                8,
+                image::Rgba([200, 0, 0, 255]),
+            )),
+        );
+        terminal
+            .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+            .unwrap();
+        let inner_x = right.x + 1 + (right.width - 2 - AVATAR_WIDTH) / 2;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(inner_x, right.y + 1)].symbol(), " ", "a corner");
+        assert_eq!(
+            buffer[(inner_x + AVATAR_WIDTH / 2, right.y + 1 + AVATAR_WIDTH / 4)].fg,
+            ratatui::style::Color::Rgb(200, 0, 0),
+            "the middle"
         );
 
         // Turned off: not drawn.

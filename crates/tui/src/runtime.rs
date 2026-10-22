@@ -476,6 +476,17 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 let mut next = Some(msg);
                 while let Some(msg) = next {
                     match msg {
+                        // An avatar: round, by the terminal if it shows pictures, else by
+                        // omtalk in block characters, which know no transparency.
+                        Msg::Picture { url, image } if url.starts_with("avatar:") => {
+                            let image = crate::avatar::square(&image);
+                            if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+                                app.avatar_blocks.insert(url, image);
+                            } else {
+                                let round = image::DynamicImage::ImageRgba8(crate::avatar::round(&image));
+                                pictures.insert(url, picker.new_resize_protocol(round));
+                            }
+                        }
                         Msg::Picture { url, image } => drop(pictures.insert(url, picker.new_resize_protocol(image))),
                         msg => apply(&mut app, msg, &shared),
                     }

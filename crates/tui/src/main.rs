@@ -4,6 +4,7 @@
 //!     omtalk me@example.org  one account, without a config file
 
 mod app;
+mod avatar;
 mod clipboard;
 mod complete;
 mod config;

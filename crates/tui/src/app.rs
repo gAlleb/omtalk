@@ -584,6 +584,9 @@ pub struct App {
     pub show_avatars: bool,
     /// Whose avatar is ready to draw: jid → its hash (the picture is "avatar:HASH").
     pub avatars: BTreeMap<BareJid, String>,
+    /// Avatars drawn here with block characters (a terminal without pictures): the
+    /// square picture by its key; with pictures, they are among the view's pictures.
+    pub avatar_blocks: BTreeMap<String, image::DynamicImage>,
     /// Whose avatars were asked for already, by account.
     pub avatars_asked: BTreeSet<(BareJid, BareJid)>,
     /// `[ui]` and `[notify]` as last set: the settings window starts from them.
@@ -639,6 +642,7 @@ impl App {
             show_avatars: false,
             avatars: BTreeMap::new(),
             avatars_asked: BTreeSet::new(),
+            avatar_blocks: BTreeMap::new(),
             config_ui: crate::config::Ui {
                 left,
                 right,
