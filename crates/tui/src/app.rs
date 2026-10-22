@@ -717,8 +717,8 @@ impl App {
         let clients = self.online.entry(key).or_default();
         let known = clients.contains_key(&online.resource);
         let line = match &online.state {
-            Some(_) if !known => Some(format!("{} ({}) в сети", online.client, online.resource)),
-            None if known => Some(format!("{} ({}) вышел", online.client, online.resource)),
+            Some(_) if !known => Some(format!("{} ({}) подключился", online.client, online.resource)),
+            None if known => Some(format!("{} ({}) отключился", online.client, online.resource)),
             _ => None,
         };
         match online.state {
@@ -730,12 +730,21 @@ impl App {
             && !this
             && let Some(line) = line
         {
-            self.server_log(account, format!("свой клиент: {line}"), at);
+            self.server_log(account, format!("ваш {line}"), at);
         }
     }
 
-    /// `who`'s connected clients, the most available first.
+    /// Whether the account is connected now.
+    pub fn connected(&self, account: &BareJid) -> bool {
+        self.connection.get(account).is_some_and(|s| s == "в сети")
+    }
+
+    /// `who`'s connected clients, the most available first. Offline, nobody is known
+    /// to be online: what was heard before may be stale.
     pub fn clients(&self, account: &BareJid, who: &BareJid) -> Vec<&Online> {
+        if !self.connected(account) {
+            return Vec::new();
+        }
         let mut clients: Vec<&Online> = self
             .online
             .get(&(account.clone(), who.clone()))
@@ -932,10 +941,7 @@ impl App {
             (None, Direction::Outgoing) => "ваше другое устройство".to_owned(),
             (None, Direction::Incoming) => message.sender.to_string(),
         };
-        let text = format!(
-            "{who}: сообщение зашифровано не для этого устройства — клиент отправителя его не знает \
-             или ему не доверяет (отметьте доверие к устройству omtalk там, например в Gajim)"
-        );
+        let text = format!("{who}: сообщение не для этого устройства — его клиент не доверяет omtalk");
         let said = self.chats[index]
             .lines
             .iter()
@@ -1216,7 +1222,7 @@ impl App {
     pub fn upload(&mut self, index: usize, path: PathBuf) -> Vec<Action> {
         let chat = &self.chats[index];
         if chat.kind == ChatKind::Server {
-            self.status = "это служебный канал аккаунта: файлы здесь не отправить".into();
+            self.status = "сюда файлы не отправить".into();
             return Vec::new();
         }
         let id = omtalk_xmpp::receipts::new_id();
@@ -1262,7 +1268,7 @@ impl App {
     pub fn send_to(&mut self, index: usize, text: String) -> Vec<Action> {
         let chat = &mut self.chats[index];
         if chat.kind == ChatKind::Server {
-            self.status = "это служебный канал аккаунта: здесь только команды (/help)".into();
+            self.status = "здесь только команды".into();
             return Vec::new();
         }
         chat.scroll = 0;
@@ -1362,10 +1368,7 @@ impl App {
                     });
                 match parts {
                     Some((old, new)) if !old.is_empty() && !new.is_empty() => self.rename_folder(old, new),
-                    _ => Err(
-                        "/rename-folder СТАРАЯ НОВАЯ (или «старая папка → новая» для имён с пробелами)"
-                            .to_owned(),
-                    ),
+                    _ => Err("/rename-folder СТАРАЯ НОВАЯ".to_owned()),
                 }
             }
             // The list shows while a command is being typed: start one.
@@ -1373,7 +1376,7 @@ impl App {
                 let path = line[name.len()..].trim();
                 match (self.selected, expand_home(path)) {
                     (None, _) => Err("нет открытого чата".to_owned()),
-                    (_, None) => Err("/upload ПУТЬ — какой файл отправить (Tab дописывает путь)".to_owned()),
+                    (_, None) => Err("/upload ПУТЬ".to_owned()),
                     (Some(_), Some(file)) if !file.is_file() => {
                         Err(format!("нет такого файла: {}", file.display()))
                     }
@@ -1397,9 +1400,7 @@ impl App {
             ("/msg" | "/join" | "/add" | "/accept" | "/refuse", None) => {
                 Err(format!("{name}: нужен адрес вида name@server"))
             }
-            _ => Err(format!(
-                "неизвестная команда {name}: наберите / — появится список"
-            )),
+            _ => Err(format!("нет команды {name}")),
         };
         match result {
             Ok(actions) => actions,
@@ -1885,7 +1886,7 @@ impl App {
             return Vec::new();
         };
         if chat.kind == ChatKind::Server {
-            self.status = "служебный канал остаётся наверху аккаунта".into();
+            self.status = "служебный канал не кладётся в папку".into();
             return Vec::new();
         }
         let (account, jid) = (chat.account.clone(), chat.jid.clone());
@@ -2051,7 +2052,7 @@ impl App {
                     self.input = "/upload ".into();
                     self.cursor = self.input.chars().count();
                     self.focus = Focus::Input;
-                    self.status = "путь к файлу (Tab дописывает) или перетащите файл в окно".into();
+                    self.status = "путь к файлу или перетащите файл сюда".into();
                 } else if let Some((_, group)) = self.areas.group_rows.iter().find(|(r, _)| inside(*r)) {
                     let group = group.clone();
                     self.toggle_group(&group);
@@ -2072,7 +2073,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.dragging_chat.is_some() && self.dragging.is_none() {
-                    self.status = "отпустите над папкой (или над аккаунтом — вынуть из папки)".into();
+                    self.status = "отпустите на папке".into();
                 }
                 let max = self.max_pane();
                 match self.dragging {
@@ -2233,7 +2234,7 @@ mod tests {
         assert!(type_text(&mut app, "/join").is_empty());
         assert!(app.status.contains("нужен адрес"));
         assert!(type_text(&mut app, "/frobnicate").is_empty());
-        assert!(app.status.contains("неизвестная команда"));
+        assert!(app.status.contains("нет команды"));
 
         // `/msg JID text` opens the chat and sends the text there, also from a room.
         let sent = type_text(&mut app, "/msg  xff@example.org  привет, как ты ");

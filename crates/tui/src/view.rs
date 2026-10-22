@@ -395,11 +395,8 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     );
     if scrolled {
         block = block.title_bottom(
-            TextLine::from(Span::styled(
-                " ↓ ещё ниже — End ",
-                Style::default().fg(theme::accent()),
-            ))
-            .alignment(Alignment::Center),
+            TextLine::from(Span::styled(" ↓ End ", Style::default().fg(theme::accent())))
+                .alignment(Alignment::Center),
         );
     }
     // Who is typing here, at the foot of the conversation.
@@ -461,7 +458,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                         }
                         _ if first_visible => {
                             text = TextLine::from(Span::styled(
-                                format!("  {} — прокрутите, чтобы увидеть", picture.name),
+                                format!("  {}", picture.name),
                                 Style::default().fg(theme::dim()),
                             ));
                         }
@@ -862,10 +859,8 @@ pub fn message_rows(
                     "загружается…".to_owned(),
                     theme::dim(),
                 ),
-                MediaState::Ready(_) if slot.image => {
-                    (icons.picture, "открыть — клик".to_owned(), theme::accent())
-                }
-                MediaState::Ready(_) => (icons.file, "открыть — клик".to_owned(), theme::accent()),
+                MediaState::Ready(_) if slot.image => (icons.picture, "открыть".to_owned(), theme::accent()),
+                MediaState::Ready(_) => (icons.file, "открыть".to_owned(), theme::accent()),
                 MediaState::Failed(e) => (icons.file, format!("не загрузилось: {e}"), theme::warn()),
             };
             let mut spans = vec![Span::raw("  ")];
@@ -1042,7 +1037,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.input.is_empty() {
         let hint = if app.current().is_some() {
-            "Сообщение…   / — команды, Tab — дописать"
+            ""
         } else {
             "/msg имя@сервер или /join комната"
         };
@@ -1239,7 +1234,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(theme::warn()),
                     )));
                     rows.push(TextLine::from(Span::styled(
-                        "пишите без шифрования (^O)",
+                        "без шифрования: ^O",
                         Style::default().fg(theme::dim()),
                     )));
                     &[][..]
@@ -1265,7 +1260,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                 rows.push(TextLine::from(header));
                 let detail = match &device.fingerprint {
                     Some(fp) => fp.clone(),
-                    None => "нет ключей — неактивно?".to_owned(),
+                    None => "нет ключей".to_owned(),
                 };
                 for part in wrap(&detail, inner.width.saturating_sub(2) as usize) {
                     rows.push(TextLine::from(Span::styled(
@@ -2808,6 +2803,7 @@ mod tests {
         use omtalk_xmpp::presence::{Online, State};
         let me = jid("me@home.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
+        app.connection.insert(me.clone(), "в сети".into());
         let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
         app.select(bob);
         assert!(screen(&mut app, 120, 24).contains("не в сети"));
@@ -2837,6 +2833,11 @@ mod tests {
             text.contains("Gajim  отошёл") && text.contains("Monal  в сети"),
             "{text}"
         );
+        // This side offline: what was heard may be stale, nobody is shown online.
+        app.connection
+            .insert(me.clone(), "переподключение (сервер не отвечает)".into());
+        assert!(screen(&mut app, 120, 24).contains("bob@home.org · не в сети"));
+        app.connection.insert(me.clone(), "в сети".into());
 
         // Gone: off the list.
         app.presence(&me, client("bob@home.org", "gajim.1", "Gajim", None), 2);
@@ -2854,7 +2855,7 @@ mod tests {
             app.chats[server]
                 .lines
                 .iter()
-                .any(|l| l.text.contains("свой клиент: Gajim (gajim.3) в сети"))
+                .any(|l| l.text.contains("ваш Gajim (gajim.3) подключился"))
         );
         app.select(server);
         let text = screen(&mut app, 120, 24);

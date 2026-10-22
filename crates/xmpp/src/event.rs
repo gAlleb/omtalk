@@ -17,6 +17,9 @@ pub enum Event {
         jid: FullJid,
         resumed: bool,
     },
+    /// The server answers again after [`Event::Disconnected`] said it did not, on the
+    /// same connection: online as before, nothing to redo.
+    Reachable,
     /// The server refused the password (or the account). The account has stopped: fix
     /// the credentials and add it again.
     AuthFailed {

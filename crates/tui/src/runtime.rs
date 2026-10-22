@@ -203,10 +203,12 @@ enum Msg {
         account: BareJid,
         online: omtalk_xmpp::presence::Online,
     },
-    /// The resource this program got on the account.
+    /// The resource this program got on the account; `fresh` for a new session (not
+    /// one resumed), whose server tells all presences again.
     Bound {
         account: BareJid,
         resource: String,
+        fresh: bool,
     },
     /// News for the account's server channel, not shown below.
     Log {
@@ -512,7 +514,17 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         }
         Msg::Online { account, online } => app.presence(&account, online, now()),
         Msg::Log { account, text } => app.server_log(&account, text, now()),
-        Msg::Bound { account, resource } => drop(app.own_resource.insert(account, resource)),
+        Msg::Bound {
+            account,
+            resource,
+            fresh,
+        } => {
+            // A new session hears every presence again; what was known is stale.
+            if fresh {
+                app.online.retain(|(a, _), _| *a != account);
+            }
+            app.own_resource.insert(account, resource);
+        }
         Msg::Listed { jid, node, listing } => {
             if let Some(services) = app.services.as_mut() {
                 services.listed(&jid, &node, listing);
@@ -538,10 +550,6 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             text,
         } => app.server_notice(&account, text, now()),
         Msg::Connection { account, state } => {
-            // Offline, nobody is known to be online: the server tells again on return.
-            if state != "в сети" {
-                app.online.retain(|(a, _), _| *a != account);
-            }
             let index = app.server_chat(&account);
             if app.connection.get(&account) != Some(&state) {
                 app.notice(Some(index), state.clone(), now());
@@ -602,6 +610,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 tell(Msg::Bound {
                     account: account.clone(),
                     resource: jid.resource().to_string(),
+                    fresh: !*resumed,
                 });
                 tell(Msg::Connection {
                     account: account.clone(),
@@ -610,9 +619,9 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 tell(Msg::Log {
                     account: account.clone(),
                     text: if *resumed {
-                        format!("сессия {jid} восстановлена (XEP-0198): пропущенное придёт само")
+                        "связь восстановлена".to_owned()
                     } else {
-                        format!("вошли как {jid}")
+                        format!("вход: {jid}")
                     },
                 });
                 if !resumed {
@@ -624,6 +633,10 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     ));
                 }
             }
+            Event::Reachable => tell(Msg::Connection {
+                account: account.clone(),
+                state: "в сети".into(),
+            }),
             Event::Disconnected { reason } => tell(Msg::Connection {
                 account: account.clone(),
                 state: format!("переподключение ({reason})"),
@@ -746,10 +759,7 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             let fingerprint = omtalk_omemo::fingerprint(&omemo.identity_key().await);
             tell(Msg::Log {
                 account: account.clone(),
-                text: format!(
-                    "OMEMO: это устройство {}, отпечаток {fingerprint}",
-                    omemo.device_id()
-                ),
+                text: format!("OMEMO: устройство {}, отпечаток {fingerprint}", omemo.device_id()),
             });
         }
         Err(e) => tell(Msg::Notice {
@@ -764,18 +774,18 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             if got > 0 || caught.unreadable > 0 {
                 let unreadable = match caught.unreadable {
                     0 => String::new(),
-                    n => format!(", не для этого устройства: {n}"),
+                    n => format!(", не прочитать: {n}"),
                 };
                 tell(Msg::Log {
                     account: account.clone(),
-                    text: format!("из архива за время отсутствия: {got} сообщ.{unreadable}"),
+                    text: format!("пропущенных сообщений: {got}{unreadable}"),
                 });
             }
             if caught.position_lost {
                 tell(Msg::Notice {
                     account: account.clone(),
                     chat: None,
-                    text: "часть сообщений за время отсутствия недоступна: сервер их уже не хранит".into(),
+                    text: "часть пропущенных сообщений сервер уже удалил".into(),
                 });
             }
             for message in caught.messages {
@@ -819,7 +829,7 @@ async fn join(
             let _ = shared.store.remember_room(account, &room, &nick);
             tell(Msg::Log {
                 account: account.clone(),
-                text: format!("в комнате {room} как {nick}"),
+                text: format!("вход в {room} как {nick}"),
             });
             // A room new to the account goes into its bookmarks, as Gajim does, so its
             // other clients know it and the nick.
@@ -845,7 +855,7 @@ async fn join(
                         tell(Msg::Notice {
                             account: account.clone(),
                             chat: Some(room.clone()),
-                            text: "часть сообщений комнаты за время отсутствия недоступна: сервер их уже не хранит".into(),
+                            text: "часть пропущенных сообщений комнаты сервер уже удалил".into(),
                         });
                     }
                     if caught.unreadable > 0 {
@@ -916,7 +926,7 @@ async fn upload(
         .upload_service()
         .await
         .map_err(|e| e.to_string())?
-        .ok_or("у сервера нет службы загрузки файлов (XEP-0363)")?;
+        .ok_or("сервер не принимает файлы")?;
     let (body, secret) = if encrypted {
         let sealed = omtalk_media::encrypt(&data);
         (sealed.data, Some((sealed.iv, sealed.key)))

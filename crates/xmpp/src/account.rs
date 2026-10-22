@@ -236,7 +236,11 @@ async fn supervise(
         // tokio-xmpp keeps trying from here, with growing pauses.
         Login::Unreachable(reason) => emit(Event::Disconnected { reason }),
     }
-    if let Ended::Lost = run(connect(&config), &account, &mut commands, &emit).await {
+    let liveness = Liveness {
+        quiet: config.keepalive,
+        answer: config.keepalive_answer,
+    };
+    if let Ended::Lost = run(connect(&config), &account, &mut commands, &emit, liveness).await {
         emit(Event::Disconnected {
             reason: "the connection task ended".into(),
         });
@@ -250,12 +254,40 @@ enum Ended {
     Lost,
 }
 
+/// How the connection's life is checked. tokio-xmpp notices a dead connection and comes
+/// back on its own, but says nothing of it: the "suspended" state of its stream never
+/// reaches a Client's user. So omtalk asks the server itself when it has been quiet.
+#[derive(Clone, Copy)]
+struct Liveness {
+    /// Quiet this long, the server is pinged (XEP-0199).
+    quiet: Duration,
+    /// Unanswered this long, the connection counts as lost until the server speaks again.
+    answer: Duration,
+}
+
 async fn run(
     mut client: Client,
     own: &BareJid,
     commands: &mut mpsc::Receiver<Command>,
     emit: &impl Fn(Event),
+    liveness: Liveness,
 ) -> Ended {
+    // When the server last said anything, and whether it answers now.
+    let mut heard = tokio::time::Instant::now();
+    let mut lost = false;
+    // When the session last began. A ping sent while tokio-xmpp is still settling a new
+    // or resumed stream upsets that stream (the server then answered nothing more), so
+    // none goes out until it has stood a while.
+    let mut settled = tokio::time::Instant::now();
+    let mut pinging = false;
+    let (alive_tx, mut alive) = mpsc::unbounded_channel::<bool>();
+    let mut check = tokio::time::interval(
+        liveness
+            .quiet
+            .min(Duration::from_secs(5))
+            .max(Duration::from_millis(500)),
+    );
+    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut queries: HashMap<String, Collecting> = HashMap::new();
     // Rooms being entered, until the room confirms or refuses.
     let mut joins: HashMap<BareJid, oneshot::Sender<Result<(), Error>>> = HashMap::new();
@@ -266,8 +298,22 @@ async fn run(
         tokio::select! {
             biased;
             event = client.next() => match event {
-                Some(ClientEvent::Stanza(Stanza::Message(message))) if collect(&mut queries, &message) => {}
                 Some(event) => {
+                    heard = tokio::time::Instant::now();
+                    if let ClientEvent::Online { .. } = &event {
+                        lost = false;
+                        settled = tokio::time::Instant::now();
+                    } else if lost {
+                        // The server speaks again on the same connection: online as before,
+                        // nothing to redo, so not an Online.
+                        lost = false;
+                        emit(Event::Reachable);
+                    }
+                    if let ClientEvent::Stanza(Stanza::Message(message)) = &event
+                        && collect(&mut queries, message)
+                    {
+                        continue;
+                    }
                     if let ClientEvent::Stanza(Stanza::Presence(presence)) = &event
                         && let Some((room, outcome)) = muc::join_outcome(presence)
                         && let Some(reply) = joins.remove(&room)
@@ -281,6 +327,28 @@ async fn run(
                 // The client's worker is gone; `send_end` would panic now.
                 None => return Ended::Lost,
             },
+            _ = check.tick() => {
+                if !pinging && heard.elapsed() >= liveness.quiet && settled.elapsed() >= liveness.quiet * 2 {
+                    pinging = true;
+                    let server: Jid = own.domain().as_str().parse().expect("a domain is a JID");
+                    let token = client.send_iq(Some(server), IqRequest::Get(xmpp_parsers::ping::Ping.into())).await;
+                    let alive_tx = alive_tx.clone();
+                    let wait = liveness.answer;
+                    tokio::spawn(async move {
+                        let answered = tokio::time::timeout(wait, token).await.is_ok_and(|a| a.is_ok());
+                        let _ = alive_tx.send(answered);
+                    });
+                }
+            }
+            Some(answered) = alive.recv() => {
+                pinging = false;
+                if answered {
+                    heard = tokio::time::Instant::now();
+                } else if !lost {
+                    lost = true;
+                    emit(Event::Disconnected { reason: "сервер не отвечает".into() });
+                }
+            }
             Some((queryid, answer)) = finished.recv() => {
                 if let Some(query) = queries.remove(&queryid) {
                     let _ = query.reply.send(answer.and_then(|answer| mam::page(query.messages, answer)));
