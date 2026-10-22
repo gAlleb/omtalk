@@ -263,6 +263,15 @@ struct Shared {
     tx: mpsc::UnboundedSender<Msg>,
 }
 
+/// Writes a terminal event to the journal, if there is one, and hands it on.
+fn log_event<T: std::fmt::Debug>(journal: &Option<std::fs::File>, event: T) -> T {
+    if let Some(mut file) = journal.as_ref() {
+        use std::io::Write;
+        let _ = writeln!(file, "{} {event:?}", chrono::Utc::now().format("%H:%M:%S%.3f"));
+    }
+    event
+}
+
 /// How long a message stays in the status line.
 const STATUS_FADE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -353,6 +362,15 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut input = EventStream::new();
     // A message in the status line fades after a while; a new one starts the clock again.
     let mut status = (String::new(), tokio::time::Instant::now());
+    // OMTALK_LOG=file: every event the terminal sends, as omtalk reads it, for finding
+    // out what a terminal does (a dropped file, a key that does nothing).
+    let journal = std::env::var_os("OMTALK_LOG").and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
     // The terminal starts with the mouse captured (main.rs).
     let mut mouse_captured = true;
     loop {
@@ -386,7 +404,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 app.status.clear();
                 Vec::new()
             }
-            event = input.next() => match event {
+            event = input.next() => match log_event(&journal, event) {
                 Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Some(Ok(TermEvent::Mouse(mouse))) => app.on_mouse(mouse),
                 Some(Ok(TermEvent::FocusGained)) => app.on_focus(true),
@@ -1444,7 +1462,22 @@ async fn fetch_media(link: String, shared: Shared) {
     let Some(media) = omtalk_media::Media::from_text(&link) else {
         return;
     };
-    let state = match media.fetch(&shared.cache).await {
+    let (tx, url) = (shared.tx.clone(), media.url().to_owned());
+    let last = std::sync::atomic::AtomicU8::new(0);
+    let progress = move |got: u64, total: Option<u64>| {
+        let Some(total) = total.filter(|t| *t > 0) else {
+            return;
+        };
+        let percent = (got * 100 / total).min(99) as u8;
+        // Only when the number changes: a hundred redraws at most.
+        if last.swap(percent, std::sync::atomic::Ordering::Relaxed) != percent {
+            let _ = tx.send(Msg::Media {
+                url: url.clone(),
+                state: MediaState::Downloading(percent),
+            });
+        }
+    };
+    let state = match media.fetch_with(&shared.cache, progress).await {
         Ok(path) => MediaState::Ready(path),
         Err(e) => MediaState::Failed(e.to_string()),
     };

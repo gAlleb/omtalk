@@ -867,6 +867,11 @@ pub fn message_rows(
                     "скачать".to_owned(),
                     theme::accent(),
                 ),
+                MediaState::Downloading(percent) => (
+                    if slot.image { icons.picture } else { icons.file },
+                    format!("загружается {percent}%"),
+                    theme::dim(),
+                ),
                 MediaState::Loading => (
                     if slot.image { icons.picture } else { icons.file },
                     "загружается…".to_owned(),
@@ -3017,6 +3022,14 @@ mod tests {
         app.input.clear();
         app.on_paste("просто текст");
         assert_eq!(app.input, "просто текст");
+        // A terminal that types the dropped path in, key by key: the same offer.
+        app.input.clear();
+        app.cursor = 0;
+        app.focus = Focus::Input;
+        for c in file.display().to_string().chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.input, format!("/upload {}", file.display()));
 
         // The paperclip starts the command.
         app.input.clear();

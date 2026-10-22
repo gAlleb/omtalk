@@ -79,6 +79,8 @@ pub enum MediaState {
     /// Not fetched by itself (auto_download = false): a click fetches it.
     Offered,
     Loading,
+    /// Coming down, this far (percent).
+    Downloading(u8),
     Ready(PathBuf),
     Failed(String),
 }
@@ -626,6 +628,16 @@ impl App {
     /// stopped, once per change of state. Commands are not typing.
     fn after_edit(&mut self) -> Vec<Action> {
         self.typed_at = chrono::Utc::now().timestamp();
+        // Some terminals type a dropped file's path in, key by key, instead of pasting
+        // it: once the line is just that, it is the same offer.
+        if !self.input.starts_with("/upload")
+            && let Some(file) = dropped_file(&self.input)
+        {
+            self.input = format!("/upload {}", file.display());
+            self.cursor = self.input.chars().count();
+            self.status = "Enter — отправить этот файл".into();
+            return Vec::new();
+        }
         let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
             return Vec::new();
         };

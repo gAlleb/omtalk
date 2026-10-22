@@ -139,11 +139,20 @@ impl Media {
 
     /// The file on disk, fetched and decrypted if it is not there yet.
     pub async fn fetch(&self, cache_dir: &Path) -> Result<PathBuf, Error> {
+        self.fetch_with(cache_dir, |_, _| {}).await
+    }
+
+    /// [`Media::fetch`], telling `progress` how much came of how much (if the server says).
+    pub async fn fetch_with(
+        &self,
+        cache_dir: &Path,
+        progress: impl Fn(u64, Option<u64>),
+    ) -> Result<PathBuf, Error> {
         let path = self.cache_path(cache_dir);
         if tokio::fs::try_exists(&path).await? {
             return Ok(path);
         }
-        let mut data = download(self.url()).await?;
+        let mut data = download(self.url(), progress).await?;
         if let Media::Encrypted { iv, key, .. } = self {
             data = decrypt(&data, iv, key)?;
         }
@@ -156,7 +165,7 @@ impl Media {
     }
 }
 
-async fn download(url: &str) -> Result<Vec<u8>, Error> {
+async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<u8>, Error> {
     // ring, like the XMPP connection; the call fails harmlessly once it is installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
@@ -169,7 +178,8 @@ async fn download(url: &str) -> Result<Vec<u8>, Error> {
         .await
         .and_then(|r| r.error_for_status())
         .map_err(|e| Error::Download(e.to_string()))?;
-    if response.content_length().is_some_and(|len| len > MAX_SIZE) {
+    let total = response.content_length();
+    if total.is_some_and(|len| len > MAX_SIZE) {
         return Err(Error::TooLarge);
     }
     let mut data = Vec::new();
@@ -179,6 +189,7 @@ async fn download(url: &str) -> Result<Vec<u8>, Error> {
         .map_err(|e| Error::Download(e.to_string()))?
     {
         data.extend_from_slice(&chunk);
+        progress(data.len() as u64, total);
         // The announced length can lie; count what actually arrives.
         if data.len() as u64 > MAX_SIZE {
             return Err(Error::TooLarge);
@@ -420,5 +431,23 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG fake");
         // The server is gone; a second fetch must come from the cache.
         assert_eq!(media.fetch(dir.path()).await.unwrap(), path);
+    }
+
+    #[tokio::test]
+    async fn a_fetch_tells_how_far_it_came() {
+        let body: Vec<u8> = (0..400_000u32).map(|i| i as u8).collect();
+        let addr = serve_once(body.clone()).await;
+        let media = Media::Plain {
+            url: format!("http://{addr}/x/big.bin"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        media
+            .fetch_with(dir.path(), |got, total| seen.lock().unwrap().push((got, total)))
+            .await
+            .unwrap();
+        let seen = seen.into_inner().unwrap();
+        assert!(seen.len() > 1, "in steps: {seen:?}");
+        assert_eq!(seen.last(), Some(&(body.len() as u64, Some(body.len() as u64))));
     }
 }
