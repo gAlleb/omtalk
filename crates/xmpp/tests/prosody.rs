@@ -616,3 +616,24 @@ async fn what_one_client_read_the_others_learn() {
     assert_eq!(stanza_id.attr("id"), Some("archive-7"));
     assert_eq!(stanza_id.attr("by"), Some("u06@localhost"));
 }
+
+#[tokio::test]
+async fn a_message_to_a_server_that_is_not_there_comes_back_with_why() {
+    use omtalk_xmpp::receipts;
+    use xmpp_parsers::message::{Lang, Message};
+    let (mut accounts, mut events) = Accounts::new();
+    let alice = accounts.add(config("u07")).await;
+    online(&mut events, &[&alice]).await;
+
+    let mut message =
+        Message::chat(Some("bob@nowhere.invalid".parse().unwrap())).with_body(Lang::default(), "эй".into());
+    receipts::mark_outgoing(&mut message, "lost-1");
+    alice.send(message).await.unwrap();
+    let (id, reason) = wait_for(&mut events, |e| match &e.event {
+        Event::Message(m) => receipts::bounce(m),
+        _ => None,
+    })
+    .await;
+    assert_eq!(id, "lost-1");
+    assert!(reason.contains("сервер получателя"), "{reason}");
+}

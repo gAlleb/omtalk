@@ -569,6 +569,14 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         state,
                     });
                 }
+                // One's message came back: the recipient's server (or one's own) refused it.
+                if let Some((id, reason)) = receipts::bounce(message) {
+                    tell(Msg::Delivery {
+                        account: account.clone(),
+                        id,
+                        state: Delivery::Failed(reason),
+                    });
+                }
                 if let Some(receipt) = receipts::answer(&account, message) {
                     let _ = xmpp.send(receipt).await;
                 }

@@ -805,7 +805,10 @@ pub fn message_rows(
             if last.text.width() + mark.width() < body_width + 2 {
                 last.text.spans.push(Span::styled(format!(" {mark}"), style));
             } else {
-                rows.push(TextLine::from(vec![Span::raw("  "), Span::styled(mark, style)]).into());
+                // A long one (a failure's reason) wraps like the message.
+                for part in wrap(&mark, body_width.max(1)) {
+                    rows.push(TextLine::from(vec![Span::raw("  "), Span::styled(part, style)]).into());
+                }
             }
         }
     }
@@ -2410,6 +2413,10 @@ mod tests {
         assert_eq!(state(&app), Some(Delivery::Read));
         app.delivery(&me, id, Delivery::Failed("сервер недоступен".into()));
         assert!(screen(&mut app, 100, 20).contains("✗ не отправлено: сервер недоступен"));
+        // A reason longer than the chat is wide wraps, all of it in sight.
+        app.delivery(&me, id, Delivery::Failed("сервер получателя не принимает такие сообщения (policy-violation): Server does not accept other servers".into()));
+        let text = screen(&mut app, 70, 20);
+        assert!(text.contains("other servers"), "{text}");
 
         // In a room, the room's copy of one's message is the same message: not shown twice.
         let room = app.chat(

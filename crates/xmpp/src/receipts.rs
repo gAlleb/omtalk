@@ -105,6 +105,39 @@ pub fn marks(message: &Message) -> Vec<Mark> {
     found
 }
 
+/// A message of one's that came back as an error: its id, and why, in words. The
+/// reason the server gives (for example "server does not accept other servers") follows
+/// what the condition means.
+pub fn bounce(message: &Message) -> Option<(String, String)> {
+    use xmpp_parsers::stanza_error::{DefinedCondition as C, StanzaError};
+    if message.type_ != MessageType::Error {
+        return None;
+    }
+    let id = message.id.as_ref()?.0.clone();
+    let error = message
+        .payloads
+        .iter()
+        .find_map(|p| StanzaError::try_from(p.clone()).ok())?;
+    let what = match error.defined_condition {
+        C::PolicyViolation => "сервер получателя не принимает такие сообщения (policy-violation)",
+        C::RemoteServerNotFound => "сервер получателя не найден",
+        C::RemoteServerTimeout => "сервер получателя не отвечает",
+        C::ServiceUnavailable => "получатель не принимает сообщения",
+        C::ItemNotFound => "такого адреса нет",
+        C::Forbidden | C::NotAllowed | C::NotAuthorized => "отказано",
+        C::NotAcceptable => "сообщение не принято",
+        C::ResourceConstraint => "у получателя не хватает места",
+        C::RecipientUnavailable => "получатель недоступен",
+        C::JidMalformed => "неверный адрес",
+        _ => "ошибка",
+    };
+    let reason = match error.texts.values().next() {
+        Some(text) if !text.trim().is_empty() => format!("{what}: {}", text.trim()),
+        _ => what.to_owned(),
+    };
+    Some((id, reason))
+}
+
 /// Whether the sender asked for a receipt (only chats; never for an error).
 pub fn wants_receipt(message: &Message) -> bool {
     message.type_ == MessageType::Chat && message.payloads.iter().any(|p| p.is("request", ns::RECEIPTS))
@@ -205,5 +238,19 @@ mod tests {
             answer(&own, &empty).is_none(),
             "nothing in it, nothing to confirm"
         );
+
+        // An error back for one's message names it and says why, the server's words too.
+        let error: Element = r#"<message xmlns="jabber:client" type="error" id="q1" from="bob@far.example">
+            <error type="cancel"><policy-violation xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/>
+              <text xmlns="urn:ietf:params:xml:ns:xmpp-stanzas">Server does not accept other servers</text></error></message>"#
+            .parse()
+            .unwrap();
+        let (id, reason) = bounce(&Message::try_from(error).unwrap()).unwrap();
+        assert_eq!(id, "q1");
+        assert!(
+            reason.contains("не принимает") && reason.contains("does not accept"),
+            "{reason}"
+        );
+        assert!(bounce(&asked).is_none());
     }
 }
