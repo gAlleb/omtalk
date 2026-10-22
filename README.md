@@ -278,7 +278,8 @@ opens a form (XEP-0004): text, password (hidden), checkbox, choice from a list, 
 values. Keys: `Enter` opens or goes to the next step, `←`/`Backspace` goes back, `Tab`
 goes to the next field, `Space` toggles a checkbox or choice, `Esc` cancels the command on
 the server and closes. Rows, fields and buttons work with the mouse. An administrator of
-their own server can manage it from here: users, passwords, modules, statistics.
+their own server can manage it from here: users, passwords, modules, statistics. A result
+with several items (XEP-0004 `<reported>`) is a table; the arrows scroll a long one.
 
 ## Testing against other clients: omtalk-cli
 

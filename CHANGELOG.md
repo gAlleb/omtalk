@@ -11,7 +11,7 @@
 - **Room participants can be picked with the keyboard** (Tab after the input line).
 - **Leaving is clean** on a closed terminal window (SIGHUP) or SIGTERM, and each device keeps one resource: omtalk no longer lingers online for contacts.
 - **A password changed elsewhere stops the account and says so**, instead of reconnecting forever.
-- **The services window wraps** long rows, values and notes; results show each value on its own row.
+- **The services window wraps** long rows, values and notes; results show each value on its own row, and a result with several items (XEP-0004 `<reported>`) is a table that scrolls. Such results were not shown at all before.
 - Notifications: history loaded from the archive no longer notifies; a mention in a room sounds again; a room is named by its title.
 
 ## 0.1.0 — 2026-10-22

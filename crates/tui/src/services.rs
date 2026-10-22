@@ -69,6 +69,8 @@ pub struct FormState {
     pub fields: Vec<FieldState>,
     /// Which field has the cursor, among the editable ones' indexes.
     pub focus: usize,
+    /// How far a result (a long table, say) is scrolled down, in rows.
+    pub scroll: usize,
 }
 
 impl FormState {
@@ -152,6 +154,7 @@ impl Services {
                     title,
                     fields,
                     focus,
+                    scroll: 0,
                 });
                 self.problem = None;
             }
@@ -270,9 +273,16 @@ impl Services {
     fn form_key(&mut self, key: KeyEvent) -> Outcome {
         let form = self.form.as_mut().expect("checked");
         if form.finished() {
-            // A result: any of these leaves it for the listing.
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace) {
-                self.form = None;
+            // A result: scrolled through, and any of Esc, Enter, Backspace leaves it for
+            // the listing.
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => self.form = None,
+                KeyCode::Up | KeyCode::Char('k') => form.scroll = form.scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => form.scroll += 1,
+                KeyCode::PageUp => form.scroll = form.scroll.saturating_sub(10),
+                KeyCode::PageDown => form.scroll += 10,
+                KeyCode::Home => form.scroll = 0,
+                _ => {}
             }
             return Outcome::Stay;
         }
@@ -501,6 +511,7 @@ mod tests {
             status,
             form,
             notes: Vec::new(),
+            table: None,
             actions: vec![CommandAction::Complete],
             default_action: Some(CommandAction::Complete),
         }

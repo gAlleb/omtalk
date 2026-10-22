@@ -2431,11 +2431,27 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                     lines.push((TextLine::from(Span::styled(label, label_style)), Some(index)));
                 }
             }
-            let focus_line = lines
-                .iter()
-                .rposition(|(_, r)| *r == Some(form.focus))
-                .unwrap_or(0);
-            let skip = focus_line.saturating_sub(body.height as usize - 1);
+            if let Some(table) = &form.step.table {
+                if !lines.is_empty() {
+                    lines.push((TextLine::default(), None));
+                }
+                lines.extend(
+                    table_lines(table, body.width as usize)
+                        .into_iter()
+                        .map(|l| (l, None)),
+                );
+            }
+            // Filling in: the focused field kept in sight. A result: scrolled by the keys,
+            // never past its end.
+            let skip = if running {
+                let focus_line = lines
+                    .iter()
+                    .rposition(|(_, r)| *r == Some(form.focus))
+                    .unwrap_or(0);
+                focus_line.saturating_sub(body.height as usize - 1)
+            } else {
+                form.scroll.min(lines.len().saturating_sub(body.height as usize))
+            };
             for (at, (line, field)) in lines
                 .into_iter()
                 .enumerate()
@@ -2486,8 +2502,8 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                     (tr!("Close", "Закрыть").into(), ServiceButton::Close, false),
                 ];
                 hint_text = tr!(
-                    "Enter back to the list · Esc closes",
-                    "Enter к списку · Esc закрыть"
+                    "↑↓ scroll · Enter back to the list · Esc closes",
+                    "↑↓ листать · Enter к списку · Esc закрыть"
                 )
                 .into();
             }
@@ -2531,6 +2547,76 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     app.areas.service_rows = row_areas;
     app.areas.service_fields = field_areas;
     app.areas.service_buttons = button_areas;
+}
+
+/// A result's table: a header, a rule, a row an item. Each column as wide as its widest
+/// cell, the wide ones shrunk (cut with …) until the table fits `width`.
+fn table_lines(table: &omtalk_xmpp::services::Table, width: usize) -> Vec<TextLine<'static>> {
+    const GAP: usize = 2;
+    let columns = table.columns.len();
+    if columns == 0 {
+        return Vec::new();
+    }
+    let mut widths: Vec<usize> = (0..columns)
+        .map(|c| {
+            table
+                .rows
+                .iter()
+                .filter_map(|r| r.get(c))
+                .map(|v| v.width())
+                .chain([table.columns[c].width()])
+                .max()
+                .unwrap_or(0)
+                .max(1)
+        })
+        .collect();
+    // The widest gives way first, a cell at a time, down to a few cells each.
+    let room = width.saturating_sub(GAP * (columns - 1));
+    while widths.iter().sum::<usize>() > room {
+        let (widest, w) = widths
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, w)| **w)
+            .map(|(i, w)| (i, *w))
+            .unwrap();
+        if w <= 4 {
+            break;
+        }
+        widths[widest] -= 1;
+    }
+    let row = |cells: Vec<String>, style: Style| {
+        let mut spans = Vec::new();
+        for (c, cell) in cells.into_iter().enumerate() {
+            let w = widths[c];
+            let text = truncate(&cell, w);
+            let pad = w.saturating_sub(text.width()) + if c + 1 < columns { GAP } else { 0 };
+            spans.push(Span::styled(format!("{text}{}", " ".repeat(pad)), style));
+        }
+        TextLine::from(spans)
+    };
+    let mut lines = vec![
+        row(
+            table.columns.clone(),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+        ),
+        TextLine::styled(
+            "─".repeat((widths.iter().sum::<usize>() + GAP * (columns - 1)).min(width)),
+            Style::default().fg(theme::border_colour()),
+        ),
+    ];
+    for cells in &table.rows {
+        let cells = (0..columns)
+            .map(|c| cells.get(c).cloned().unwrap_or_default())
+            .collect();
+        lines.push(row(cells, Style::default()));
+    }
+    if table.rows.is_empty() {
+        lines.push(TextLine::styled(
+            tr!("nothing", "пусто"),
+            Style::default().fg(theme::dim()),
+        ));
+    }
+    lines
 }
 
 /// A field's value as rows: a multi-line text by its lines, addresses and chosen options
@@ -2828,6 +2914,7 @@ mod tests {
             status: omtalk_xmpp::services::CommandStatus::Executing,
             form: Some(form.try_into().unwrap()),
             notes: Vec::new(),
+            table: None,
             actions: vec![CommandAction::Complete],
             default_action: Some(CommandAction::Complete),
         };
@@ -4898,6 +4985,7 @@ mod tests {
             status: CommandStatus::Completed,
             form: Some(result.try_into().unwrap()),
             notes: Vec::new(),
+            table: None,
             actions: Vec::new(),
             default_action: None,
         };
@@ -4929,6 +5017,7 @@ mod tests {
             status: CommandStatus::Executing,
             form: Some(form.try_into().unwrap()),
             notes: Vec::new(),
+            table: None,
             actions: vec![CommandAction::Complete],
             default_action: Some(CommandAction::Complete),
         };
@@ -5148,10 +5237,60 @@ mod tests {
             status: CommandStatus::Executing,
             form: Some(form.try_into().unwrap()),
             notes: Vec::new(),
+            table: None,
             actions: vec![CommandAction::Complete],
             default_action: Some(CommandAction::Complete),
         };
         app.services.as_mut().unwrap().stepped(host, "X".into(), Ok(step));
         check(&mut app, "a form");
+    }
+
+    #[test]
+    fn a_result_with_items_is_drawn_as_a_table_that_scrolls() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        use omtalk_xmpp::services::{CommandStatus, CommandStep, Table};
+        let mut app = app_with_chat();
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let server: omtalk_xmpp::Jid = "example.org".parse().unwrap();
+        let mut rows: Vec<Vec<String>> = (0..40)
+            .map(|i| vec![format!("user{i:02}@example.org"), "pc".into()])
+            .collect();
+        rows[0][1] = "a resource name far too long to fit beside the address in this window".into();
+        let done = CommandStep {
+            node: "list".into(),
+            session: None,
+            status: CommandStatus::Completed,
+            form: None,
+            notes: Vec::new(),
+            table: Some(Table {
+                columns: vec!["Address".into(), "Resources".into()],
+                rows,
+            }),
+            actions: Vec::new(),
+            default_action: None,
+        };
+        app.services
+            .as_mut()
+            .unwrap()
+            .stepped(server, "Online".into(), Ok(done));
+        let text = screen(&mut app, 90, 30);
+        let header = text.lines().find(|l| l.contains("Address")).expect("a header");
+        assert!(header.contains("Resources"), "{text}");
+        let first = text
+            .lines()
+            .find(|l| l.contains("user00@"))
+            .expect("the first row");
+        assert!(
+            first.contains("a resource") && first.contains('…'),
+            "cut to fit: {text}"
+        );
+        assert!(!text.contains("user39@"), "not all in sight: {text}");
+
+        // Scrolled to the end, and no further.
+        for _ in 0..10 {
+            app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let text = screen(&mut app, 90, 30);
+        assert!(text.contains("user39@") && !text.contains("user00@"), "{text}");
     }
 }

@@ -91,6 +91,58 @@ pub struct Note {
     pub text: String,
 }
 
+/// A table in a result: its columns (labelled, or by their var), a row an item, the
+/// values of a field with several joined by ", ".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Table {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// The table of a form, if it has one. xmpp-parsers knows no `<reported>`, and refuses
+/// a form with one; the rest of the form is read without them.
+fn table_of(form: &Element) -> Option<Table> {
+    let ns = xmpp_parsers::ns::DATA_FORMS;
+    let reported = form.get_child("reported", ns)?;
+    let vars: Vec<(String, String)> = reported
+        .children()
+        .filter(|f| f.is("field", ns))
+        .filter_map(|f| {
+            let var = f.attr(xml_ncname!("var"))?.to_owned();
+            let label = f.attr(xml_ncname!("label")).unwrap_or(&var).to_owned();
+            Some((var, label))
+        })
+        .collect();
+    let rows = form
+        .children()
+        .filter(|c| c.is("item", ns))
+        .map(|item| {
+            vars.iter()
+                .map(|(var, _)| {
+                    item.children()
+                        .filter(|f| f.is("field", ns) && f.attr(xml_ncname!("var")) == Some(var.as_str()))
+                        .flat_map(|f| f.children().filter(|v| v.is("value", ns)).map(|v| v.text()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .collect()
+        })
+        .collect();
+    Some(Table {
+        columns: vars.into_iter().map(|(_, label)| label).collect(),
+        rows,
+    })
+}
+
+/// The form without its table, which xmpp-parsers would refuse.
+fn without_table(form: &Element) -> Element {
+    let ns = xmpp_parsers::ns::DATA_FORMS;
+    let mut bare = form.clone();
+    while bare.remove_child("reported", ns).is_some() {}
+    while bare.remove_child("item", ns).is_some() {}
+    bare
+}
+
 /// Where a command stands after a step.
 #[derive(Debug, Clone)]
 pub struct CommandStep {
@@ -101,6 +153,8 @@ pub struct CommandStep {
     /// The form to fill (while executing) or the result to show (once completed).
     pub form: Option<DataForm>,
     pub notes: Vec<Note>,
+    /// A result with several items (XEP-0004 `<reported>` and `<item>`): a table.
+    pub table: Option<Table>,
     /// The steps offered now, besides cancelling.
     pub actions: Vec<CommandAction>,
     /// The step Enter means.
@@ -209,6 +263,7 @@ pub(crate) fn step(node: &str, answer: &Element) -> Result<CommandStep, Error> {
         status,
         form: None,
         notes: Vec::new(),
+        table: None,
         actions: Vec::new(),
         default_action: None,
     };
@@ -230,7 +285,8 @@ pub(crate) fn step(node: &str, answer: &Element) -> Result<CommandStep, Error> {
                 text: child.text(),
             });
         } else if child.is("x", xmpp_parsers::ns::DATA_FORMS) {
-            step.form = DataForm::try_from(child.clone()).ok();
+            step.table = table_of(child);
+            step.form = DataForm::try_from(without_table(child)).ok();
         }
     }
     // A form to fill with no actions listed still has the one step: completing it.
@@ -247,6 +303,34 @@ pub(crate) fn step(node: &str, answer: &Element) -> Result<CommandStep, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_result_with_items_is_a_table_and_the_rest_of_its_form_stays() {
+        let answer: Element = r#"<command xmlns="http://jabber.org/protocol/commands" node="list" status="completed">
+            <x xmlns="jabber:x:data" type="result"><title>Online</title>
+              <field var="total" type="text-single" label="Total"><value>2</value></field>
+              <reported><field var="jid" label="Address"/><field var="res" label="Resources"/></reported>
+              <item><field var="jid"><value>a@x</value></field><field var="res"><value>pc</value><value>phone</value></field></item>
+              <item><field var="res"><value>web</value></field><field var="jid"><value>b@x</value></field></item>
+            </x></command>"#
+            .parse()
+            .unwrap();
+        let step = step("list", &answer).unwrap();
+        assert_eq!(
+            step.table,
+            Some(Table {
+                columns: vec!["Address".into(), "Resources".into()],
+                rows: vec![
+                    vec!["a@x".into(), "pc, phone".into()],
+                    vec!["b@x".into(), "web".into()]
+                ],
+            }),
+            "columns as reported, whatever order an item gives them in"
+        );
+        let form = step.form.expect("the form without its table is read still");
+        assert_eq!(form.title.as_deref(), Some("Online"));
+        assert_eq!(form.fields[0].values, ["2"]);
+    }
 
     #[test]
     fn a_step_with_a_form_actions_and_a_note_is_read() {
