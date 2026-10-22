@@ -440,6 +440,11 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 let y = top + offset as u16;
                 let mut text = row.text.clone();
                 let plain: String = row.text.spans.iter().map(|s| s.content.as_ref()).collect();
+                if let Some(line) = row.line {
+                    app.areas
+                        .message_lines
+                        .push((Rect::new(inner.x, y, inner.width, 1), line));
+                }
                 app.areas
                     .message_rows
                     .push((Rect::new(inner.x, y, inner.width, 1), plain));
@@ -493,6 +498,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     }
     highlight_selection(frame, app);
     input_box(frame, app, input);
+    replying(frame, app, input);
     suggestions(frame, app, input, messages);
     leader_keys(frame, app, input);
 }
@@ -548,6 +554,32 @@ fn clear(frame: &mut Frame, area: Rect) {
         Block::default().style(Style::default().fg(theme::text()).bg(theme::background())),
         area,
     );
+}
+
+/// Just above the input, the message a reply answers, while it is written.
+fn replying(frame: &mut Frame, app: &App, input: Rect) {
+    let Some(reply) = &app.replying else { return };
+    if input.y == 0 {
+        return;
+    }
+    let place = Rect::new(input.x + 1, input.y - 1, input.width.saturating_sub(2), 1);
+    let quote = reply.quote.lines().next().unwrap_or_default();
+    let line = TextLine::from(vec![
+        Span::styled(
+            format!("↩ {}: ", reply.who),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate(
+                quote,
+                (place.width as usize).saturating_sub(reply.who.width() + 16),
+            ),
+            Style::default().fg(theme::dim()),
+        ),
+        Span::styled("  Esc — отменить", Style::default().fg(theme::dim())),
+    ]);
+    clear(frame, place);
+    frame.render_widget(Paragraph::new(line), place);
 }
 
 /// The leader key's name, as "Ctrl+X".
@@ -742,6 +774,8 @@ pub struct Row {
     pub who: Option<(String, u16)>,
     /// A file not fetched yet: a click on this row fetches it, from this link.
     pub fetch: Option<String>,
+    /// Which message (its index among the chat's lines) this row belongs to.
+    pub line: Option<usize>,
 }
 
 /// One of the rows a picture covers.
@@ -761,6 +795,7 @@ impl From<TextLine<'static>> for Row {
             picture: None,
             who: None,
             fetch: None,
+            line: None,
         }
     }
 }
@@ -775,6 +810,8 @@ pub fn message_rows(
     let mut last_day = None;
     let mut last_who: Option<(&str, bool, i64)> = None;
     let body_width = width.saturating_sub(2).max(1);
+    // Where each message's rows begin, to tell afterwards which rows are whose.
+    let mut starts = Vec::with_capacity(lines.len());
     for line in lines {
         let time = Local.timestamp_opt(line.at, 0).single();
         let day = time.map(|t| t.date_naive());
@@ -797,6 +834,7 @@ pub fn message_rows(
             last_day = day;
             last_who = None;
         }
+        starts.push(rows.len());
         let clock = time.map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
         if line.notice {
             for text in wrap(&line.text, width.saturating_sub(4).max(1)) {
@@ -857,6 +895,7 @@ pub fn message_rows(
                         }),
                         who: None,
                         fetch: None,
+                        line: None,
                     });
                 }
                 push_delivery(&mut rows, line, body_width, true);
@@ -897,6 +936,7 @@ pub fn message_rows(
                 picture: None,
                 who: None,
                 fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
+                line: None,
             });
             push_delivery(&mut rows, line, body_width, false);
             continue;
@@ -907,7 +947,38 @@ pub fn message_rows(
         } else {
             body_width.saturating_sub(marker.width()).max(1)
         };
-        for text in wrap(&line.text, text_width) {
+        // A reply: whom it answers, if that message is here, then its quote as a block.
+        if let Some(answered) = &line.reply_to
+            && let Some(original) = lines
+                .iter()
+                .find(|l| l.id.as_ref() == Some(answered) || l.archive_id.as_ref() == Some(answered))
+        {
+            rows.push(
+                TextLine::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("↩ {}", original.who),
+                        Style::default().fg(theme::accent()),
+                    ),
+                ])
+                .into(),
+            );
+        }
+        let (quote, said) = split_quote(&line.text);
+        for text in quote
+            .iter()
+            .flat_map(|q| wrap(q, text_width.saturating_sub(2).max(1)))
+        {
+            rows.push(
+                TextLine::from(vec![
+                    Span::raw("  "),
+                    Span::styled("▎ ", Style::default().fg(theme::accent())),
+                    Span::styled(text, Style::default().fg(theme::dim())),
+                ])
+                .into(),
+            );
+        }
+        for text in wrap(said, text_width) {
             let mut spans = vec![Span::raw("  ")];
             if !line.encrypted && first {
                 spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
@@ -927,7 +998,39 @@ pub fn message_rows(
         }
         push_delivery(&mut rows, line, body_width, false);
     }
+    // Every row of a message knows which message it is.
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(rows.len());
+        for row in &mut rows[*start..end] {
+            row.line = Some(index);
+        }
+    }
     rows
+}
+
+/// [`split_quote`] for the app: a reply does not quote a quote.
+pub fn split_quote_pub(text: &str) -> (Vec<&str>, &str) {
+    split_quote(text)
+}
+
+/// A message's leading "> " lines (a quote, as replies begin) apart from the rest.
+fn split_quote(text: &str) -> (Vec<&str>, &str) {
+    let mut quote = Vec::new();
+    let mut rest = text;
+    while let Some(line) = rest.split_inclusive('\n').next() {
+        let Some(quoted) = line
+            .strip_prefix("> ")
+            .or_else(|| (line.trim_end() == ">").then_some(""))
+        else {
+            break;
+        };
+        if !line.ends_with('\n') {
+            break;
+        }
+        quote.push(quoted.trim_end_matches('\n'));
+        rest = &rest[line.len()..];
+    }
+    (quote, rest)
 }
 
 /// How far one's message got, after its last word, or below where it does not fit (and
@@ -2731,6 +2834,7 @@ mod tests {
             markable: false,
             archive_id: None,
             untrusted: false,
+            reply_to: None,
         };
         app.on_incoming(&me, &missed, 1);
         app.on_incoming(&me, &missed, 2);
@@ -2843,6 +2947,7 @@ mod tests {
             markable: false,
             archive_id: None,
             untrusted: false,
+            reply_to: None,
         };
         app.on_incoming(&me, &echo, 5);
         let lines = &app.chats[room].lines;
@@ -2864,6 +2969,7 @@ mod tests {
             markable: true,
             archive_id: Some("a1".into()),
             untrusted: false,
+            reply_to: None,
         };
         assert!(
             app.on_incoming(&me, &from_bob, 6).is_empty(),
@@ -3328,6 +3434,7 @@ mod tests {
             markable: false,
             archive_id: None,
             untrusted: false,
+            reply_to: None,
         };
         app.on_incoming(&me, &from_bob, 1);
         assert!(!screen(&mut app, 100, 20).contains("печатает"));
@@ -3383,6 +3490,7 @@ mod tests {
             markable: true,
             archive_id: Some(format!("a-{id}")),
             untrusted: false,
+            reply_to: None,
         };
         assert_eq!(
             app.alert_for(&me, &from_bob("1")),
@@ -3603,5 +3711,135 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(app.current().unwrap().jid, jid("carl@work.org"));
+    }
+
+    #[test]
+    fn a_reply_quotes_what_it_answers_and_shows_as_a_block() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        use omtalk_xmpp::replies::ReplyTo;
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        let mut from_bob = Line::message(1_700_000_000, "bob".into(), "как дела?".into(), true, false);
+        from_bob.id = Some("b1".into());
+        app.push(bob, from_bob);
+        screen(&mut app, 100, 20);
+
+        // A double click on his message: the reply begins, shown above the input.
+        let (row, _) = *app
+            .areas
+            .message_lines
+            .iter()
+            .find(|(r, _)| {
+                app.areas
+                    .message_rows
+                    .iter()
+                    .any(|(m, t)| m == r && t.contains("как дела?"))
+            })
+            .unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 3,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        };
+        app.on_mouse(click);
+        app.on_mouse(up);
+        app.on_mouse(click);
+        let reply = app.replying.clone().expect("replying");
+        assert_eq!((reply.who.as_str(), reply.quote.as_str()), ("bob", "как дела?"));
+        assert_eq!(
+            reply.to,
+            Some(ReplyTo {
+                id: "b1".into(),
+                to: None
+            })
+        );
+        assert!(screen(&mut app, 100, 20).contains("↩ bob: как дела?"));
+
+        // Sent: the quote first, the reply named; shown as a block under whom it answers.
+        "отлично"
+            .chars()
+            .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+        let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let [
+            Action::Send {
+                text,
+                reply: Some((to, length)),
+                ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(text, "> как дела?\nотлично");
+        assert_eq!((to.id.as_str(), *length), ("b1", "> как дела?\n".chars().count()));
+        assert!(app.replying.is_none());
+        let text = screen(&mut app, 100, 20);
+        assert!(
+            text.contains("↩ bob") && text.contains("▎ как дела?") && text.contains("отлично"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("> как дела?"),
+            "the quote is drawn, not its marks: {text}"
+        );
+
+        // Esc drops a reply before it is sent.
+        app.reply_here();
+        assert!(app.replying.is_some());
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.replying.is_none());
+
+        // In a room the reply names the room's id for the message and who wrote it.
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        let mut said = Line::message(
+            1_700_000_100,
+            "Алиса".into(),
+            "встреча в пять, не опаздывать".into(),
+            true,
+            false,
+        );
+        said.id = Some("a-own".into());
+        said.archive_id = Some("r-9".into());
+        app.push(room, said);
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let reply = app.replying.clone().unwrap();
+        assert_eq!(
+            reply.to,
+            Some(ReplyTo {
+                id: "r-9".into(),
+                to: Some("team@muc.home.org/Алиса".parse().unwrap())
+            })
+        );
+
+        // A selected piece is what is quoted.
+        app.replying = None;
+        screen(&mut app, 100, 20);
+        let (row, text) = app
+            .areas
+            .message_rows
+            .iter()
+            .find(|(_, t)| t.contains("встреча"))
+            .cloned()
+            .unwrap();
+        let start = row.x + text.find("встреча").map(|b| text[..b].chars().count()).unwrap() as u16;
+        app.selection = Some((
+            (start, row.y),
+            (start + "встреча в пять".chars().count() as u16 - 1, row.y),
+        ));
+        app.reply_here();
+        assert_eq!(app.replying.unwrap().quote, "встреча в пять");
     }
 }

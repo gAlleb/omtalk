@@ -57,6 +57,10 @@ pub struct Line {
     pub notice: bool,
     /// Written on a device refused or not decided on.
     pub untrusted: bool,
+    /// The id of the message this one answers (XEP-0461).
+    pub reply_to: Option<String>,
+    /// The id the archive gave it (a room's, in a room): replies in rooms name that.
+    pub archive_id: Option<String>,
     /// The message's id, as sent: receipts and markers refer to it.
     pub id: Option<String>,
     /// For one's own messages sent from here: how far it has got.
@@ -105,6 +109,8 @@ impl Line {
             outgoing,
             notice: false,
             untrusted: false,
+            reply_to: None,
+            archive_id: None,
             media,
             id: None,
             delivery: None,
@@ -244,6 +250,8 @@ pub struct Areas {
     pub fetches: Vec<(Rect, String)>,
     /// The conversation's rows on screen and their text, for selecting it.
     pub message_rows: Vec<(Rect, String)>,
+    /// The same rows and the message (index among the chat's lines) each belongs to.
+    pub message_lines: Vec<(Rect, usize)>,
     /// Senders' names in a room and its participants: a click opens a chat with them.
     pub nicks: Vec<(Rect, String)>,
     /// The keys window and what is clickable in it.
@@ -271,6 +279,8 @@ pub enum Action {
         encrypted: bool,
         /// The message's id; its line, already shown as being sent, carries it too.
         id: String,
+        /// A reply: what it answers, and how long the quote at the start of `text` is.
+        reply: Option<(omtalk_xmpp::replies::ReplyTo, usize)>,
     },
     Join {
         account: BareJid,
@@ -422,11 +432,23 @@ fn columns(text: &str, from: usize, to: usize) -> String {
     out
 }
 
+/// A reply being written: in which chat, to whom, the quote, and what it answers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replying {
+    pub account: BareJid,
+    pub chat: BareJid,
+    pub who: String,
+    pub quote: String,
+    /// `None` when the message has no id to name: the quote goes alone.
+    pub to: Option<omtalk_xmpp::replies::ReplyTo>,
+}
+
 pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("o", "OMEMO в этом чате вкл/выкл"),
     ("s", "сервисы сервера"),
     ("b", "список чатов скрыть/показать"),
     ("r", "правую панель скрыть/показать"),
+    ("a", "ответить (на выделенное или последнее)"),
     ("e", "ключи OMEMO: отпечатки, доверие"),
     ("w", "закрыть чат (комнату — покинуть)"),
     ("z", "только текущий аккаунт / все"),
@@ -460,6 +482,10 @@ pub struct App {
     pub dragging_chat: Option<usize>,
     /// A Tab completion being cycled through in the input line.
     pub completion: Option<Completion>,
+    /// The message being answered by what is typed now.
+    pub replying: Option<Replying>,
+    /// The last click in the conversation, to tell a double one.
+    pub last_click: Option<(std::time::Instant, u16, u16)>,
     /// What Ctrl+W/U/K cut last, for Ctrl+Y.
     pub killed: String,
     /// Whether peers learn that their messages were read here.
@@ -539,6 +565,8 @@ impl App {
             services: None,
             keys: None,
             completion: None,
+            replying: None,
+            last_click: None,
             killed: String::new(),
             read_markers: true,
             send_typing: true,
@@ -1023,6 +1051,11 @@ impl App {
             message.direction == Direction::Outgoing,
         );
         line.untrusted = message.untrusted;
+        line.reply_to = message.reply_to.clone();
+        line.archive_id = message.archive_id.clone();
+        if message.direction == Direction::Incoming {
+            line.id = message.id.clone();
+        }
         self.push(index, line);
         if message.direction == Direction::Incoming {
             let chat = &mut self.chats[index];
@@ -1086,6 +1119,8 @@ impl App {
                     outgoing: false,
                     notice: true,
                     untrusted: false,
+                    reply_to: None,
+                    archive_id: None,
                     media: None,
                     id: None,
                     delivery: None,
@@ -1192,6 +1227,7 @@ impl App {
             }
             KeyCode::Char('s') => self.open_services(None),
             KeyCode::Char('e') => self.open_keys(None),
+            KeyCode::Char('a') => self.reply_here(),
             KeyCode::Char('w') => match self.selected {
                 Some(index) => self.close_chat(index),
                 None => Vec::new(),
@@ -1270,8 +1306,73 @@ impl App {
                 self.focus = Focus::Input;
                 Vec::new()
             }
+            KeyCode::Char('r') => self.reply_here(),
             _ => Vec::new(),
         }
+    }
+
+    /// Starts a reply: to the message under the selection (quoting what is selected),
+    /// else to the last message from someone in the open chat.
+    pub fn reply_here(&mut self) -> Vec<Action> {
+        let Some(chat) = self.selected else {
+            return Vec::new();
+        };
+        let selected = self.selected_text();
+        let under = self.selection.and_then(|(a, _)| {
+            self.areas
+                .message_lines
+                .iter()
+                .find(|(r, _)| r.y == a.1)
+                .map(|&(_, line)| line)
+        });
+        let line = under.or_else(|| {
+            self.chats[chat]
+                .lines
+                .iter()
+                .rposition(|l| !l.notice && !l.outgoing)
+        });
+        match line {
+            Some(line) => self.reply_to(chat, line, (!selected.trim().is_empty()).then_some(selected)),
+            None => self.say("не на что отвечать"),
+        }
+    }
+
+    /// Starts a reply to message `line` of chat `chat`, quoting `quote` or all of it.
+    pub fn reply_to(&mut self, chat: usize, line: usize, quote: Option<String>) -> Vec<Action> {
+        let Some(original) = self.chats.get(chat).and_then(|c| c.lines.get(line)) else {
+            return Vec::new();
+        };
+        let chat_ref = &self.chats[chat];
+        // Its own quote is not quoted again.
+        let quote = quote.unwrap_or_else(|| {
+            let (_, said) = crate::view::split_quote_pub(&original.text);
+            said.to_owned()
+        });
+        let quote: String = quote.lines().take(4).collect::<Vec<_>>().join("\n");
+        // A room names the message by the room's archive id and the occupant who wrote
+        // it; a chat by the sender's own id.
+        let id = if chat_ref.is_room() {
+            original.archive_id.clone().or(original.id.clone())
+        } else {
+            original.id.clone()
+        };
+        let to = id.map(|id| omtalk_xmpp::replies::ReplyTo {
+            id,
+            to: match &chat_ref.kind {
+                ChatKind::Room { .. } => format!("{}/{}", chat_ref.jid, original.who).parse().ok(),
+                _ => None,
+            },
+        });
+        self.replying = Some(Replying {
+            account: chat_ref.account.clone(),
+            chat: chat_ref.jid.clone(),
+            who: original.who.clone(),
+            quote,
+            to,
+        });
+        self.selection = None;
+        self.focus = Focus::Input;
+        Vec::new()
     }
 
     fn input_key(&mut self, code: KeyCode) -> Vec<Action> {
@@ -1297,6 +1398,8 @@ impl App {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(len),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = len,
+            // Esc drops the reply first, then the line.
+            KeyCode::Esc if self.replying.is_some() => self.replying = None,
             KeyCode::Esc => {
                 self.input.clear();
                 self.cursor = 0;
@@ -1392,6 +1495,18 @@ impl App {
         let id = omtalk_xmpp::receipts::new_id();
         // The message itself says "active" now.
         self.typing_out = None;
+        // A reply to a message of this chat: the quote goes first.
+        let replying = self
+            .replying
+            .take()
+            .filter(|r| r.account == chat.account && r.chat == chat.jid);
+        let (text, reply) = match &replying {
+            Some(r) => {
+                let (body, length) = omtalk_xmpp::replies::body(&r.quote, &text);
+                (body, r.to.clone().map(|to| (to, length)))
+            }
+            None => (text, None),
+        };
         let action = Action::Send {
             account: chat.account.clone(),
             to: chat.jid.clone(),
@@ -1399,9 +1514,15 @@ impl App {
             text: text.clone(),
             encrypted: chat.omemo,
             id: id.clone(),
+            reply: reply.clone(),
         };
         let encrypted = chat.omemo;
         self.sending(index, &text, encrypted, &id, chrono::Utc::now().timestamp());
+        if let Some((to, _)) = reply
+            && let Some(line) = self.chats[index].lines.last_mut()
+        {
+            line.reply_to = Some(to.id);
+        }
         vec![action]
     }
 
@@ -1508,6 +1629,7 @@ impl App {
                 };
                 return self.open_keys(peer);
             }
+            ("/reply", _) => return self.reply_here(),
             ("/close", _) => match self.selected {
                 Some(index) => return self.close_chat(index),
                 None => Err("нет открытого чата".to_owned()),
@@ -2171,6 +2293,21 @@ impl App {
             || self.areas.fetches.iter().any(|(r, _)| inside(*r));
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if inside(self.areas.messages) && !on_link => {
+                // A double click on a message answers it.
+                let now = std::time::Instant::now();
+                let double = self.last_click.is_some_and(|(at, cx, cy)| {
+                    now.duration_since(at).as_millis() < 400 && cy == y && cx.abs_diff(x) <= 2
+                });
+                self.last_click = Some((now, x, y));
+                if double
+                    && let (Some(chat), Some(&(_, line))) = (
+                        self.selected,
+                        self.areas.message_lines.iter().find(|(r, _)| inside(*r)),
+                    )
+                {
+                    self.selecting = false;
+                    return self.reply_to(chat, line, None);
+                }
                 self.focus = Focus::Messages;
                 self.selection = Some(((x, y), (x, y)));
                 self.selecting = true;
@@ -2382,6 +2519,7 @@ mod tests {
                 text: "привет, Боб".into(),
                 encrypted: true,
                 id: id.clone(),
+                reply: None,
             }]
         );
         // Shown at once, as being sent, under the same id.
@@ -2480,6 +2618,7 @@ mod tests {
             markable: false,
             archive_id: None,
             untrusted: false,
+            reply_to: None,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);
         app.on_incoming(&me, &incoming("carol@example.org"), 0);

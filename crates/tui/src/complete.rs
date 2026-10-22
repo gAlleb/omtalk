@@ -70,6 +70,11 @@ pub const COMMANDS: &[Command] = &[
         about: "отправить файл или картинку",
     },
     Command {
+        name: "/reply",
+        args: "",
+        about: "ответить на выделенное или последнее сообщение",
+    },
+    Command {
         name: "/keys",
         args: "[АДРЕС]",
         about: "ключи OMEMO: отпечатки, доверие, старые устройства",
@@ -246,7 +251,10 @@ mod tests {
     #[test]
     fn commands_complete_and_are_listed_while_typed() {
         assert_eq!(complete("/se"), Some((0, vec!["/services ".into()])));
-        assert_eq!(complete("/re").unwrap().1, ["/refuse ", "/rename-folder "]);
+        assert_eq!(
+            complete("/re").unwrap().1,
+            ["/refuse ", "/rename-folder ", "/reply "]
+        );
         assert_eq!(
             commands_for("/f").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/folder"]

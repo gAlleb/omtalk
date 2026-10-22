@@ -69,6 +69,8 @@ pub struct Incoming {
     pub archive_id: Option<String>,
     /// Written on a device the user refused or has not decided on: worth a mark.
     pub untrusted: bool,
+    /// The id of the message this one answers (XEP-0461), if it is a reply.
+    pub reply_to: Option<String>,
 }
 
 /// One published device of an account, as [`Omemo::devices`] reports it.
@@ -276,6 +278,7 @@ impl Omemo {
                     markable: envelope.meta.markable,
                     archive_id: None,
                     untrusted: false,
+                    reply_to: envelope.meta.reply_to,
                 }));
             }
             Content::Omemo(_) if self.has_no_key(&envelope) => {
@@ -293,6 +296,7 @@ impl Omemo {
                     markable: envelope.meta.markable,
                     archive_id: None,
                     untrusted: false,
+                    reply_to: envelope.meta.reply_to,
                 }));
             }
             Content::Omemo(encrypted) => encrypted,
@@ -370,6 +374,7 @@ impl Omemo {
             markable: envelope.meta.markable,
             archive_id: None,
             untrusted,
+            reply_to: envelope.meta.reply_to,
         })
     }
 
@@ -529,6 +534,18 @@ impl Omemo {
     /// [`Omemo::send`] under the message id `id`, to which receipts and read markers
     /// will refer.
     pub async fn send_with_id(&self, to: &BareJid, text: &str, id: &str) -> Result<SendReport, Error> {
+        self.send_with(to, text, id, Vec::new()).await
+    }
+
+    /// [`Omemo::send_with_id`] with more elements beside the encrypted one, outside it:
+    /// a reply's (XEP-0461), for instance.
+    pub async fn send_with(
+        &self,
+        to: &BareJid,
+        text: &str,
+        id: &str,
+        extra: Vec<Element>,
+    ) -> Result<SendReport, Error> {
         let mut state = self.state.lock().await;
         let mut report = SendReport::default();
         let targets = self
@@ -542,7 +559,10 @@ impl Omemo {
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
         self.account
-            .send(stanza(MessageType::Chat, to.clone(), encrypted, Some(id)))
+            .send(with(
+                stanza(MessageType::Chat, to.clone(), encrypted, Some(id)),
+                extra,
+            ))
             .await?;
         report.devices = targets;
         Ok(report)
@@ -563,6 +583,17 @@ impl Omemo {
         text: &str,
         id: &str,
     ) -> Result<SendReport, Error> {
+        self.send_group_with(room, text, id, Vec::new()).await
+    }
+
+    /// [`Omemo::send_group_with_id`] with more elements beside the encrypted one.
+    pub async fn send_group_with(
+        &self,
+        room: &BareJid,
+        text: &str,
+        id: &str,
+        extra: Vec<Element>,
+    ) -> Result<SendReport, Error> {
         let mut members = BTreeSet::new();
         for affiliation in [Affiliation::Owner, Affiliation::Admin, Affiliation::Member] {
             members.extend(self.account.affiliated(room, affiliation).await?);
@@ -581,7 +612,10 @@ impl Omemo {
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
         self.account
-            .send(stanza(MessageType::Groupchat, room.clone(), encrypted, Some(id)))
+            .send(with(
+                stanza(MessageType::Groupchat, room.clone(), encrypted, Some(id)),
+                extra,
+            ))
             .await?;
         report.devices = targets;
         Ok(report)
@@ -816,6 +850,11 @@ fn parse_device_list(items: &[PepItem]) -> BTreeSet<DeviceId> {
         .and_then(|item| xml::DeviceList::try_from(item.payload.clone()).ok())
         .map(|list| device_list::from_xml(&list))
         .unwrap_or_default()
+}
+
+fn with(mut message: Message, extra: Vec<Element>) -> Message {
+    message.payloads.extend(extra);
+    message
 }
 
 /// An OMEMO message. One with content (text, under the id given) says so twice for clients that cannot

@@ -18,6 +18,7 @@ pub mod muc;
 pub mod pep;
 pub mod presence;
 pub mod receipts;
+pub mod replies;
 pub mod roster;
 pub mod services;
 pub mod upload;

@@ -40,6 +40,8 @@ pub struct Meta {
     pub id: Option<String>,
     /// The sender would like to know when it is read (XEP-0333).
     pub markable: bool,
+    /// The id of the message this one answers (XEP-0461).
+    pub reply_to: Option<String>,
 }
 
 pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
@@ -193,6 +195,7 @@ fn content_of(mut message: Message) -> Option<(Content, Meta)> {
             .payloads
             .iter()
             .any(|p| p.is("markable", xmpp_parsers::ns::DISPLAYED_MARKERS)),
+        reply_to: omtalk_xmpp::replies::reply_of(&message).map(|r| r.id),
     };
     if let Ok(Some(encrypted)) = message.extract_payload::<xml::Encrypted>() {
         return Some((Content::Omemo(encrypted), meta));

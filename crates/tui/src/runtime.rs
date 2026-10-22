@@ -1150,11 +1150,16 @@ async fn perform(action: Action, shared: Shared) {
             text,
             encrypted,
             id,
+            reply,
         } => {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
             fetch_if_media(&text, &shared);
+            // A reply names what it answers, beside the body (outside the encryption).
+            let extra = reply
+                .map(|(to, length)| omtalk_xmpp::replies::elements(&to, length))
+                .unwrap_or_default();
             let delivery = |state| {
                 tell(Msg::Delivery {
                     account: account.clone(),
@@ -1164,9 +1169,9 @@ async fn perform(action: Action, shared: Shared) {
             };
             if encrypted {
                 let sent = if room {
-                    omemo.send_group_with_id(&to, &text, &id).await
+                    omemo.send_group_with(&to, &text, &id, extra).await
                 } else {
-                    omemo.send_with_id(&to, &text, &id).await
+                    omemo.send_with(&to, &text, &id, extra).await
                 };
                 match sent {
                     Ok(report) => {
@@ -1207,6 +1212,7 @@ async fn perform(action: Action, shared: Shared) {
                     Message::chat(Some(to.clone().into()))
                 }
                 .with_body(Lang::default(), text.clone());
+                message.payloads.extend(extra);
                 receipts::mark_outgoing(&mut message, &id);
                 match xmpp.send(message).await {
                     Ok(()) => {
