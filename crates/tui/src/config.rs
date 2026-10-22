@@ -22,6 +22,7 @@
 //! read_markers = true   # let senders see that their messages were read
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! typing = true         # let chats see that one is typing
+//! bell = true           # ring the bell for a message while the window is behind
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -144,6 +145,8 @@ pub struct Ui {
     pub mouse: bool,
     /// Tell chats that one is typing (XEP-0085).
     pub typing: bool,
+    /// Ring the terminal's bell for a message while the window is not in front.
+    pub bell: bool,
 }
 
 impl Default for Ui {
@@ -158,6 +161,7 @@ impl Default for Ui {
             read_markers: true,
             mouse: true,
             typing: true,
+            bell: true,
         }
     }
 }

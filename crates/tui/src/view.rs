@@ -3117,4 +3117,51 @@ mod tests {
         );
         assert_eq!(app.typing_now(&me, &app.chats[room].jid.clone(), 6), ["Алиса"]);
     }
+
+    #[test]
+    fn a_window_behind_reads_nothing_and_rings_and_reads_on_return() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        let from_bob = |id: &str| omtalk_omemo::Incoming {
+            peer: jid("bob@home.org"),
+            sender: jid("bob@home.org"),
+            nick: None,
+            device: Some(1),
+            direction: omtalk_omemo::Direction::Incoming,
+            encrypted: true,
+            text: Some("ты тут?".into()),
+            at: None,
+            not_for_this_device: false,
+            id: Some(id.into()),
+            markable: true,
+            archive_id: Some(format!("a-{id}")),
+        };
+        assert!(!app.rings(&from_bob("1")), "in front: no bell");
+
+        assert!(app.on_focus(false).is_empty());
+        assert!(app.rings(&from_bob("2")));
+        assert!(
+            app.on_incoming(&me, &from_bob("2"), 1).is_empty(),
+            "behind: not marked read"
+        );
+        assert_eq!(app.chats[bob].unread, 1, "unread though the chat is open");
+
+        let back = app.on_focus(true);
+        assert_eq!(
+            back,
+            [Action::Displayed {
+                account: me.clone(),
+                to: jid("bob@home.org"),
+                room: false,
+                marker: Some("2".into()),
+                archive_id: Some("a-2".into()),
+            }]
+        );
+        assert_eq!(app.chats[bob].unread, 0);
+        app.bell = false;
+        app.on_focus(false);
+        assert!(!app.rings(&from_bob("3")), "turned off");
+    }
 }

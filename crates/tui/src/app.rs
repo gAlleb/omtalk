@@ -435,6 +435,10 @@ pub struct App {
     pub read_markers: bool,
     /// Whether chats learn that one is typing.
     pub send_typing: bool,
+    /// The terminal window is in front (as the terminal says; without its word, it is).
+    pub focused: bool,
+    /// Ring the terminal's bell for a message that comes while it is not in front.
+    pub bell: bool,
     /// The typing state last told, and to which chat.
     pub typing_out: Option<((BareJid, BareJid), ChatState)>,
     /// When the input last changed (Unix seconds): typing pauses after a while.
@@ -504,6 +508,8 @@ impl App {
             killed: String::new(),
             read_markers: true,
             send_typing: true,
+            focused: true,
+            bell: true,
             typing_out: None,
             typed_at: 0,
             typing_in: BTreeMap::new(),
@@ -641,6 +647,23 @@ impl App {
             room,
             state,
         }]
+    }
+
+    /// The window came to the front or went behind. Back in front, the open chat is read.
+    pub fn on_focus(&mut self, focused: bool) -> Vec<Action> {
+        self.focused = focused;
+        match self.selected {
+            Some(index) if focused => {
+                self.chats[index].unread = 0;
+                self.mark_read(index)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether a message from someone, coming now, should ring the bell.
+    pub fn rings(&self, message: &Incoming) -> bool {
+        self.bell && !self.focused && message.direction == Direction::Incoming && message.text.is_some()
     }
 
     /// Called now and then: typing that stopped for 10 s is "paused", as clients do.
@@ -789,6 +812,10 @@ impl App {
     /// What is owed now that chat `index` is in sight: the sender's read marker (if
     /// those are on), and one's own other clients' note of it, which is always kept.
     fn mark_read(&mut self, index: usize) -> Vec<Action> {
+        // Not in front, not read: it waits until the window is back.
+        if !self.focused {
+            return Vec::new();
+        }
         let chat = &mut self.chats[index];
         let marker = chat
             .markable
@@ -858,9 +885,10 @@ impl App {
     }
 
     pub fn push(&mut self, index: usize, line: Line) {
-        let selected = self.selected == Some(index);
+        // In the open chat but with the window behind, it is still unread.
+        let seen = self.selected == Some(index) && self.focused;
         let chat = &mut self.chats[index];
-        if !selected && !line.notice && !line.outgoing {
+        if !seen && !line.notice && !line.outgoing {
             chat.unread += 1;
         }
         chat.lines.push(line);

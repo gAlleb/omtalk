@@ -298,6 +298,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
     app.send_typing = ui.typing;
+    app.bell = ui.bell;
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -385,6 +386,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             event = input.next() => match event {
                 Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Some(Ok(TermEvent::Mouse(mouse))) => app.on_mouse(mouse),
+                Some(Ok(TermEvent::FocusGained)) => app.on_focus(true),
+                Some(Ok(TermEvent::FocusLost)) => app.on_focus(false),
                 // Pasted text arrives whole (bracketed paste), line breaks and all,
                 // instead of as keys where each break would send.
                 Some(Ok(TermEvent::Paste(text))) => app.on_paste(&text),
@@ -465,6 +468,12 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
         Msg::Incoming { account, message, at } => {
+            // The terminal's bell: the terminal or the window manager marks the window.
+            if app.rings(&message) {
+                use std::io::Write;
+                let mut out = io::stdout();
+                let _ = out.write_all(b"\x07").and_then(|_| out.flush());
+            }
             for action in app.on_incoming(&account, &message, at) {
                 tokio::spawn(perform(action, shared.clone()));
             }
