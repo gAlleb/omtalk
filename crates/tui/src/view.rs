@@ -1049,17 +1049,23 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(theme::DIM),
             )));
             rows.push(TextLine::default());
-            for hint in [
-                "здесь — что говорит",
-                "сервер и что omtalk",
-                "знает об аккаунте",
-                "",
-                "/services — что умеет",
-                "сервер, его команды",
-            ] {
+            let chats = app.chats.iter().filter(|c| c.account == chat.account);
+            let rooms = chats.clone().filter(|c| c.is_room()).count();
+            let direct = chats.filter(|c| c.kind == ChatKind::Direct).count();
+            let label = |name: &str, value: String| {
+                TextLine::from(vec![
+                    Span::styled(format!("{name:<8}"), Style::default().fg(theme::DIM)),
+                    Span::raw(value),
+                ])
+            };
+            rows.push(label("сервер", chat.account.domain().to_string()));
+            rows.push(label("чаты", direct.to_string()));
+            rows.push(label("комнаты", rooms.to_string()));
+            rows.push(TextLine::default());
+            for command in ["/services", "/add адрес", "/join комната"] {
                 rows.push(TextLine::from(Span::styled(
-                    hint,
-                    Style::default().fg(theme::DIM),
+                    command,
+                    Style::default().fg(theme::ACCENT),
                 )));
             }
         }

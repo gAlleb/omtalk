@@ -772,9 +772,9 @@ impl App {
             KeyCode::Char('m') => {
                 self.mouse = !self.mouse;
                 self.status = if self.mouse {
-                    "мышь у omtalk: клики, панели; протянуть по сообщениям — скопировать".into()
+                    "мышь у omtalk".into()
                 } else {
-                    "мышь у терминала: выделение и вставка как в любой программе; префикс+m — вернуть".into()
+                    "мышь у терминала (префикс+m — вернуть)".into()
                 };
                 Vec::new()
             }
