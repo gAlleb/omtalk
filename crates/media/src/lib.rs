@@ -9,6 +9,16 @@ use aes_gcm::aead::consts::{U12, U16};
 use aes_gcm::{AesGcm, KeyInit, aes::Aes256};
 use sha2::{Digest, Sha256};
 
+/// The extensions of files shared in chats, as opposed to pages.
+const FILE_KINDS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "avif", "svg", //
+    "mp4", "webm", "mov", "mkv", "3gp", //
+    "ogg", "opus", "oga", "mp3", "m4a", "aac", "wav", "flac", //
+    "pdf", "txt", "md", "doc", "docx", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "rtf",
+    "csv", //
+    "zip", "tar", "gz", "xz", "zst", "7z", "rar", "apk", "deb", "iso",
+];
+
 /// Files larger than this are not fetched: a chat is no place for them, and a link from a
 /// stranger should not fill the disk.
 pub const MAX_SIZE: u64 = 50 * 1024 * 1024;
@@ -57,8 +67,11 @@ impl Media {
                 key: key.try_into().ok()?,
             });
         }
+        // An address of a page is a link to follow, not a file to fetch: only one that
+        // ends in a file's name of a known kind is shared as a file.
         if text.starts_with("https://") && text.len() > "https://".len() {
-            return Some(Media::Plain { url: text.to_owned() });
+            let media = Media::Plain { url: text.to_owned() };
+            return media.is_file().then_some(media);
         }
         None
     }
@@ -81,6 +94,16 @@ impl Media {
             .filter(|n| !n.is_empty())
             .unwrap_or("file")
             .to_owned()
+    }
+
+    /// Whether the name is of a kind of file people share: a picture, sound, film,
+    /// document, archive.
+    pub fn is_file(&self) -> bool {
+        let name = self.name().to_ascii_lowercase();
+        let Some((_, extension)) = name.rsplit_once('.') else {
+            return false;
+        };
+        FILE_KINDS.contains(&extension)
     }
 
     /// Whether the name looks like a picture worth showing inline.
@@ -309,6 +332,13 @@ mod tests {
                 url: "https://example.org/a.jpg".into()
             })
         );
+        assert_eq!(
+            Media::from_text("https://example.org/news/2026/10/22/"),
+            None,
+            "a page is a link, not a file"
+        );
+        assert_eq!(Media::from_text("https://www.youtube.com/watch?v=abc"), None);
+        assert!(Media::from_text("https://up.example.org/x/report.PDF").is_some());
         assert_eq!(
             Media::from_text("посмотри https://example.org/a.jpg"),
             None,
