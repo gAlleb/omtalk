@@ -240,12 +240,15 @@ async fn supervise(
         quiet: config.keepalive,
         answer: config.keepalive_answer,
     };
-    if let Ended::Lost = run(connect(&config), &account, &mut commands, &emit, liveness).await {
+    if let Ended::Lost = run(connect(&config), &config, &mut commands, &emit, liveness).await {
         emit(Event::Disconnected {
             reason: "the connection task ended".into(),
         });
     }
 }
+
+/// How often the password is tried again while the server does not answer.
+const LOGIN_RECHECK: Duration = Duration::from_secs(60);
 
 enum Ended {
     /// Asked to stop, or every handle is gone.
@@ -267,11 +270,17 @@ struct Liveness {
 
 async fn run(
     mut client: Client,
-    own: &BareJid,
+    config: &AccountConfig,
     commands: &mut mpsc::Receiver<Command>,
     emit: &impl Fn(Event),
     liveness: Liveness,
 ) -> Ended {
+    let own = &config.jid;
+    // While the server does not answer, whether the password still works: tokio-xmpp
+    // retries a refused login forever without a word, so a password changed elsewhere
+    // (and the session closed by the server) would look like an endless "connecting".
+    let (login_tx, mut login) = mpsc::unbounded_channel::<login::Login>();
+    let mut login_asked: Option<tokio::time::Instant> = None;
     // When the server last said anything, and whether it answers now.
     let mut heard = tokio::time::Instant::now();
     let mut lost = false;
@@ -347,6 +356,20 @@ async fn run(
                 } else if !lost {
                     lost = true;
                     emit(Event::Disconnected { reason: "сервер не отвечает".into() });
+                }
+                // Lost: try the password once, and again each minute while it lasts.
+                if lost && login_asked.is_none_or(|at| at.elapsed() >= LOGIN_RECHECK) {
+                    login_asked = Some(tokio::time::Instant::now());
+                    let (config, login_tx) = (config.clone(), login_tx.clone());
+                    tokio::spawn(async move {
+                        let _ = login_tx.send(login::check(&config).await);
+                    });
+                }
+            }
+            Some(outcome) = login.recv() => {
+                if let login::Login::Refused(reason) = outcome {
+                    emit(Event::AuthFailed { reason });
+                    return Ended::Stopped;
                 }
             }
             Some((queryid, answer)) = finished.recv() => {

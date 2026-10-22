@@ -802,3 +802,93 @@ async fn a_chats_history_is_read_from_the_archive_by_who_it_was_with() {
         "only bob's, oldest first"
     );
 }
+
+/// Runs an administration command of the test server as `admin`: the form filled with
+/// `values` (by field var), sent, done.
+async fn administer(admin: &omtalk_xmpp::Account, suffix: &str, values: &[(&str, &[&str])]) {
+    use omtalk_xmpp::services::{CommandAction, CommandStatus};
+    let server: omtalk_xmpp::Jid = "localhost".parse().unwrap();
+    let node = admin
+        .commands(&server)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|c| c.node)
+        .find(|n| n.ends_with(suffix))
+        .unwrap_or_else(|| panic!("no command {suffix}"));
+    let first = admin
+        .execute(&server, &node, None, CommandAction::Execute, None)
+        .await
+        .unwrap();
+    let mut form = first.form.expect("a form to fill");
+    for (var, value) in values {
+        let field = form
+            .fields
+            .iter_mut()
+            .find(|f| f.var.as_deref() == Some(*var))
+            .unwrap_or_else(|| panic!("no field {var}"));
+        field.values = value.iter().map(|v| v.to_string()).collect();
+    }
+    form.type_ = xmpp_parsers::data_forms::DataFormType::Submit;
+    let done = admin
+        .execute(
+            &server,
+            &node,
+            first.session.as_deref(),
+            CommandAction::Complete,
+            Some(form),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        done.status,
+        CommandStatus::Completed,
+        "{suffix}: {:?}",
+        done.notes
+    );
+}
+
+#[tokio::test]
+async fn a_password_changed_elsewhere_stops_the_account_with_why() {
+    let (mut accounts, mut events) = Accounts::new();
+    let mut user_config = config("u21");
+    user_config.keepalive = Duration::from_secs(1);
+    user_config.keepalive_answer = Duration::from_secs(1);
+    let user = accounts.add(user_config).await;
+    let admin = accounts.add(config("admin")).await;
+    online(&mut events, &[&user, &admin]).await;
+
+    administer(
+        &admin,
+        "#change-user-password",
+        &[("accountjid", &["u21@localhost"]), ("password", &["changed"])],
+    )
+    .await;
+    administer(
+        &admin,
+        "#end-user-session",
+        &[("accountjids", &["u21@localhost"])],
+    )
+    .await;
+    // Not wait_for, which gives up by panicking: the password must be put back first.
+    let user_jid = user.jid().clone();
+    let refused = timeout(Duration::from_secs(20), async {
+        while let Some(e) = events.recv().await {
+            if let Event::AuthFailed { reason } = &e.event
+                && e.account == user_jid
+            {
+                return reason.clone();
+            }
+        }
+        String::new()
+    })
+    .await;
+    // Put back for the next run, whatever happened.
+    administer(
+        &admin,
+        "#change-user-password",
+        &[("accountjid", &["u21@localhost"]), ("password", &["test"])],
+    )
+    .await;
+    refused.expect("the refused password is said, not retried forever in silence");
+}
