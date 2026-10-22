@@ -20,7 +20,9 @@ mise run test
 
 ## Запуск
 
-Для 64-битного ARM (Raspberry Pi 4/5 и т.п.): `mise run build-arm`. Получится один
+Файлы для раздачи: `mise run dist` кладёт в `dist/` статические `omtalk-x86_64` и
+`omtalk-aarch64`, они запускаются на любом Linux без библиотек. Только для ARM
+(Raspberry Pi 4/5 и т.п.): `mise run build-arm`. Получится один
 статический файл `target/aarch64-unknown-linux-musl/release/omtalk`, который работает на
 любом Linux для aarch64 без библиотек. Компилятор C для этой сборки — zig из `mise.toml`,
 в систему ничего не ставится.

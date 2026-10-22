@@ -22,3 +22,14 @@ run = "cargo test --workspace"
 [tasks.build-arm]
 description = "Собрать omtalk для 64-битного ARM (Raspberry Pi 4/5 и т.п.): один статический файл"
 run = "rustup target add aarch64-unknown-linux-musl && cargo zigbuild --release -p omtalk --target aarch64-unknown-linux-musl && ls -l target/aarch64-unknown-linux-musl/release/omtalk"
+
+[tasks.dist]
+description = "Собрать omtalk для раздачи: статические файлы для x86_64 и aarch64 в dist/"
+run = """
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+cargo zigbuild --release -p omtalk --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+mkdir -p dist
+cp target/x86_64-unknown-linux-musl/release/omtalk dist/omtalk-x86_64
+cp target/aarch64-unknown-linux-musl/release/omtalk dist/omtalk-aarch64
+ls -l dist
+"""

@@ -1,4 +1,4 @@
 /target
 .venv/
 __pycache__/
-/omtalk-aarch64
+/dist
