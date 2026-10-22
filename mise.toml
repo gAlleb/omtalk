@@ -11,8 +11,14 @@ description = "Подтянуть эталон python-omemo для тестов-
 run = "uv sync --project tests/oracle --frozen"
 
 [tasks.prosody]
-description = "Поднять тестовый Prosody (127.0.0.1:15222, всё в памяти)"
-run = "docker compose -f tests/prosody/compose.yml down -v && docker compose -f tests/prosody/compose.yml up -d"
+description = "Поднять тестовый Prosody (127.0.0.1:15222, с пустыми данными) и дождаться готовности"
+# Ready only once the accounts are registered and Prosody listens: tests that start
+# earlier fail on "no answer in time".
+run = """
+docker compose -f tests/prosody/compose.yml down -v
+docker compose -f tests/prosody/compose.yml up -d
+timeout 120 sh -c 'until docker logs omtalk-test-prosody 2>&1 | grep -q "Activated service .c2s. on"; do sleep 0.5; done'
+"""
 
 [tasks.test]
 description = "Все тесты: сверка с python-omemo и интеграция с Prosody"

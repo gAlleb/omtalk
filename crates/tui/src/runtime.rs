@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use xmpp_parsers::message::{Lang, Message};
 
 use crate::app::{Action, App, ChatKind, Delivery, DeviceRow, Line, MediaState};
+use crate::clipboard;
 use crate::config::{self, AccountEntry, Config};
 use crate::services::{Listing, Request};
 use crate::view::{self, Pictures};
@@ -190,6 +191,8 @@ enum Msg {
     },
     /// A line for the status bar, about no account in particular.
     Status(String),
+    /// Text from a clipboard, for the input.
+    Paste(String),
     /// Another of one's clients read `chat`.
     ReadElsewhere {
         account: BareJid,
@@ -261,6 +264,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
     app.read_markers = ui.read_markers;
+    app.mouse = ui.mouse;
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -308,10 +312,23 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut input = EventStream::new();
     // A message in the status line fades after a while; a new one starts the clock again.
     let mut status = (String::new(), tokio::time::Instant::now());
+    // The terminal starts with the mouse captured (main.rs).
+    let mut mouse_captured = true;
     loop {
         terminal
             .draw(|frame| view::draw(frame, &mut app, &mut pictures))
             .map_err(|e| e.to_string())?;
+        // Handing the mouse to the terminal and back, as asked.
+        if app.mouse != mouse_captured {
+            let toggled = if app.mouse {
+                crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)
+            } else {
+                crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
+            };
+            if toggled.is_ok() {
+                mouse_captured = app.mouse;
+            }
+        }
         if app.status != status.0 {
             status = (app.status.clone(), tokio::time::Instant::now());
         }
@@ -427,6 +444,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::Paste(text) => drop(app.on_paste(&text)),
         Msg::Listed { jid, node, listing } => {
             if let Some(services) = app.services.as_mut() {
                 services.listed(&jid, &node, listing);
@@ -768,6 +786,10 @@ fn service_error(error: &omtalk_xmpp::Error) -> String {
     }
 }
 
+fn action_is_primary(action: &Action) -> bool {
+    matches!(action, Action::PastePrimary)
+}
+
 async fn perform(action: Action, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
@@ -995,6 +1017,36 @@ async fn perform(action: Action, shared: Shared) {
                         });
                     }
                 }
+            }
+        }
+        Action::Copy(text) => {
+            // wl-copy is quick; OSC 52 writes to the terminal, which the drawing also does,
+            // but one whole sequence between frames is harmless.
+            let lines = text.lines().count();
+            match clipboard::copy(&text) {
+                Ok(how) => tell(Msg::Status(format!("скопировано ({lines} стр., {how})"))),
+                Err(e) => tell(Msg::Status(format!("не скопировалось: {e}"))),
+            }
+        }
+        Action::PastePrimary | Action::PasteClipboard => {
+            let primary = action_is_primary(&action);
+            let pasted = tokio::task::spawn_blocking(move || {
+                if !primary && clipboard::holds_image() {
+                    return Err(
+                        "в буфере картинка: отправка картинок будет вместе с отправкой файлов".to_owned(),
+                    );
+                }
+                if primary {
+                    clipboard::primary()
+                } else {
+                    clipboard::clipboard()
+                }
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            match pasted {
+                Ok(text) => tell(Msg::Paste(text)),
+                Err(e) => tell(Msg::Status(e)),
             }
         }
         Action::Open(path) => {

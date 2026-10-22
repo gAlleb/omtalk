@@ -223,6 +223,8 @@ pub struct Areas {
     pub group_rows: Vec<(Rect, Group)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
+    /// The conversation's rows on screen and their text, for selecting it.
+    pub message_rows: Vec<(Rect, String)>,
     /// Senders' names in a room and its participants: a click opens a chat with them.
     pub nicks: Vec<(Rect, String)>,
     /// The services window and what is clickable in it.
@@ -289,18 +291,39 @@ pub enum Action {
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
+    /// Put text into the clipboards (ordinary and primary).
+    Copy(String),
+    /// Paste what is selected elsewhere on the desktop (primary).
+    PastePrimary,
+    /// Paste the ordinary clipboard (its text).
+    PasteClipboard,
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
     Quit,
 }
 
 /// The keys after the leader, as the list shows them; [`App::shortcut`] does them.
+/// The part of `text` between display columns `from` and `to`.
+fn columns(text: &str, from: usize, to: usize) -> String {
+    let mut col = 0;
+    let mut out = String::new();
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if col >= from && col < to {
+            out.push(c);
+        }
+        col += w;
+    }
+    out
+}
+
 pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("o", "OMEMO в этом чате вкл/выкл"),
     ("s", "сервисы сервера"),
     ("b", "список чатов скрыть/показать"),
     ("r", "правую панель скрыть/показать"),
     ("z", "только текущий аккаунт / все"),
+    ("m", "мышь: omtalk / терминал (выделение tmux)"),
     ("↑ ↓ / k j", "предыдущий / следующий чат"),
     ("← →", "уже / шире список чатов"),
     ("q", "выход"),
@@ -334,6 +357,14 @@ pub struct App {
     pub killed: String,
     /// Whether peers learn that their messages were read here.
     pub read_markers: bool,
+    /// The mouse is omtalk's (clicks, dragging, its own selection); off, the terminal
+    /// and tmux select and paste as for any program.
+    pub mouse: bool,
+    /// Text being selected in the conversation: where the drag began and where it is,
+    /// as screen cells.
+    pub selection: Option<((u16, u16), (u16, u16))>,
+    /// The selection is being dragged now.
+    pub selecting: bool,
     /// The prefix key; after it, one letter from [`LEADER_KEYS`].
     pub leader: (KeyCode, KeyModifiers),
     /// The prefix was pressed: the next key is a shortcut.
@@ -384,6 +415,9 @@ impl App {
             completion: None,
             killed: String::new(),
             read_markers: true,
+            mouse: true,
+            selection: None,
+            selecting: false,
             leader: (KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_pending: false,
             collapsed: BTreeSet::new(),
@@ -676,6 +710,12 @@ impl App {
         {
             return self.on_paste("\n");
         }
+        if self.focus == Focus::Input
+            && key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return vec![Action::PasteClipboard];
+        }
         if self.focus == Focus::Input && self.edit_key(key) {
             return Vec::new();
         }
@@ -727,6 +767,15 @@ impl App {
             KeyCode::Char('s') => self.open_services(None),
             KeyCode::Char('z') => {
                 self.focus_group();
+                Vec::new()
+            }
+            KeyCode::Char('m') => {
+                self.mouse = !self.mouse;
+                self.status = if self.mouse {
+                    "мышь у omtalk: клики, панели; протянуть по сообщениям — скопировать".into()
+                } else {
+                    "мышь у терминала: выделение и вставка как в любой программе; префикс+m — вернуть".into()
+                };
                 Vec::new()
             }
             KeyCode::Char('b') => {
@@ -1024,6 +1073,38 @@ impl App {
         self.input.insert_str(at, &text);
         self.cursor += text.chars().count();
         Vec::new()
+    }
+
+    /// The text under the selection, row by row as shown.
+    pub fn selected_text(&self) -> String {
+        let Some((a, b)) = self.selection else {
+            return String::new();
+        };
+        let ((sx, sy), (ex, ey)) = if (a.1, a.0) <= (b.1, b.0) { (a, b) } else { (b, a) };
+        let mut rows: Vec<&(Rect, String)> = self
+            .areas
+            .message_rows
+            .iter()
+            .filter(|(r, _)| r.y >= sy && r.y <= ey)
+            .collect();
+        rows.sort_by_key(|(r, _)| r.y);
+        let mut out = Vec::new();
+        for (rect, text) in rows {
+            let from = if rect.y == sy {
+                sx.saturating_sub(rect.x) as usize
+            } else {
+                0
+            };
+            let to = if rect.y == ey {
+                (ex.saturating_sub(rect.x) as usize) + 1
+            } else {
+                usize::MAX
+            };
+            let piece = columns(text, from, to);
+            // The conversation's own indent is not part of what was said.
+            out.push(piece.strip_prefix("  ").unwrap_or(&piece).trim_end().to_owned());
+        }
+        out.join("\n").trim_matches('\n').to_owned()
     }
 
     /// Line editing as in a shell (readline): Ctrl+W/U/K cut a word, to the start, to the
@@ -1500,6 +1581,43 @@ impl App {
         let inside_opt = |r: Option<Rect>| r.is_some_and(inside);
         if self.services.is_some() {
             return self.services_mouse(mouse);
+        }
+        // Selecting text in the conversation: a drag from a place that is not a link.
+        let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
+            || self.areas.files.iter().any(|(r, _)| inside(*r));
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if inside(self.areas.messages) && !on_link => {
+                self.focus = Focus::Messages;
+                self.selection = Some(((x, y), (x, y)));
+                self.selecting = true;
+                return Vec::new();
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.selecting => {
+                if let Some((anchor, _)) = self.selection {
+                    let messages = self.areas.messages;
+                    let x = x.clamp(messages.x, messages.right().saturating_sub(1));
+                    let y = y.clamp(messages.y, messages.bottom().saturating_sub(1));
+                    self.selection = Some((anchor, (x, y)));
+                }
+                return Vec::new();
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.selecting => {
+                self.selecting = false;
+                let text = self.selected_text();
+                let moved = self.selection.is_some_and(|(a, b)| a != b);
+                if !moved || text.trim().is_empty() {
+                    self.selection = None;
+                    return Vec::new();
+                }
+                return vec![Action::Copy(text)];
+            }
+            // The middle button pastes what is selected anywhere, as everywhere.
+            MouseEventKind::Down(MouseButton::Middle) => {
+                self.focus = Focus::Input;
+                return vec![Action::PastePrimary];
+            }
+            MouseEventKind::Down(_) => self.selection = None,
+            _ => {}
         }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {

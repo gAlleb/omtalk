@@ -374,6 +374,10 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             for (offset, row) in shown.iter().enumerate() {
                 let y = top + offset as u16;
                 let mut text = row.text.clone();
+                let plain: String = row.text.spans.iter().map(|s| s.content.as_ref()).collect();
+                app.areas
+                    .message_rows
+                    .push((Rect::new(inner.x, y, inner.width, 1), plain));
                 if let Some(picture) = &row.picture {
                     // A picture is drawn whole from its first row, or not at all: when
                     // scrolled half out of sight, its first visible row names it.
@@ -418,9 +422,32 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         }
         None => empty_state(frame, inner),
     }
+    highlight_selection(frame, app);
     input_box(frame, app, input);
     suggestions(frame, app, input, messages);
     leader_keys(frame, app, input);
+}
+
+/// The selected text in the conversation, in the terminal's own colours swapped.
+fn highlight_selection(frame: &mut Frame, app: &App) {
+    let Some((a, b)) = app.selection else { return };
+    let ((sx, sy), (ex, ey)) = if (a.1, a.0) <= (b.1, b.0) { (a, b) } else { (b, a) };
+    let buffer = frame.buffer_mut();
+    for (rect, _) in &app.areas.message_rows {
+        if rect.y < sy || rect.y > ey {
+            continue;
+        }
+        let from = if rect.y == sy { sx } else { rect.x };
+        let to = if rect.y == ey {
+            ex
+        } else {
+            rect.right().saturating_sub(1)
+        };
+        for x in from.max(rect.x)..=to.min(rect.right().saturating_sub(1)) {
+            let cell = &mut buffer[(x, rect.y)];
+            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+        }
+    }
 }
 
 /// The leader key's name, as "Ctrl+X".
@@ -2513,5 +2540,88 @@ mod tests {
             app.move_to_folder(server, Some("Папка")).is_empty(),
             "it stays at the top"
         );
+    }
+
+    #[test]
+    fn dragging_over_the_conversation_copies_its_text_only() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.push(
+            bob,
+            Line::message(1_700_000_000, "bob".into(), "первая строка".into(), true, false),
+        );
+        app.push(
+            bob,
+            Line::message(1_700_000_010, "bob".into(), "вторая строка".into(), true, false),
+        );
+        screen(&mut app, 100, 20);
+        let row_of = |app: &App, text: &str| {
+            app.areas
+                .message_rows
+                .iter()
+                .find(|(_, t)| t.contains(text))
+                .unwrap()
+                .0
+        };
+        let first = row_of(&app, "первая");
+        let second = row_of(&app, "вторая");
+        let mouse = |kind, x, y| MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // From "строка" of the first through "вторая" of the second.
+        let start = first.x + 2 + "первая ".chars().count() as u16;
+        let end = second.x + 2 + "вторая".chars().count() as u16 - 1;
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, first.y));
+        app.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end, second.y));
+        let copied = app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end, second.y));
+        assert_eq!(copied, [Action::Copy("строка\nвторая".into())]);
+
+        // What is selected shows so.
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut pictures = Pictures::new();
+        terminal.draw(|f| draw(f, &mut app, &mut pictures)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer[(start, first.y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        assert!(
+            !buffer[(start - 2, first.y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+
+        // A click, not a drag, copies nothing and clears the selection.
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, first.y));
+        assert!(
+            app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), start, first.y))
+                .is_empty()
+        );
+        assert!(app.selection.is_none());
+
+        // The middle button and Ctrl+V paste from the desktop's clipboards.
+        assert_eq!(
+            app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Middle), start, first.y)),
+            [Action::PastePrimary]
+        );
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            [Action::PasteClipboard]
+        );
+
+        // The leader and m give the mouse to the terminal, and back.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert!(!app.mouse && app.status.contains("терминал"));
     }
 }
