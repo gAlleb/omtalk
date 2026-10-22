@@ -388,6 +388,26 @@ async fn contacts_ask_accept_and_then_see_each_other() {
     .await
     .expect("the roster shows a mutual subscription");
     assert_eq!(contact.name.as_deref(), Some("Bob"));
+
+    // Leaving: the contact sees it at once, not when the server gives up on the session.
+    let left = std::time::Instant::now();
+    bob.stop().await;
+    timeout(
+        Duration::from_secs(3),
+        wait_for(&mut events, |e| match &e.event {
+            Event::Presence(p)
+                if e.account == *alice.jid()
+                    && p.type_ == xmpp_parsers::presence::Type::Unavailable
+                    && p.from.as_ref().is_some_and(|f| f.to_bare() == *bob.jid()) =>
+            {
+                Some(())
+            }
+            _ => None,
+        }),
+    )
+    .await
+    .expect("gone at once");
+    assert!(left.elapsed() < Duration::from_secs(3));
 }
 
 #[tokio::test]

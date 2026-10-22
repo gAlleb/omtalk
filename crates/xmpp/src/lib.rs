@@ -29,7 +29,7 @@ pub use roster::Contact;
 
 pub use account::Account;
 pub use accounts::Accounts;
-pub use config::{AccountConfig, Server};
+pub use config::{AccountConfig, Server, device_resource};
 pub use error::Error;
 pub use event::{AccountEvent, Event, PepItem};
 pub use xmpp_parsers::jid::{self, BareJid, FullJid, Jid};

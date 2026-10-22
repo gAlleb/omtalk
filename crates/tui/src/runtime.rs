@@ -340,12 +340,13 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         tx,
     };
     let mut jids = Vec::new();
-    for config in configs {
+    for mut config in configs {
         let jid = config.jid.clone();
         let state = match store.load_omemo(&jid).map_err(|e| e.to_string())? {
             Some(state) => state,
             None => State::new(OwnKeys::generate(now() as u64).map_err(|e| e.to_string())?),
         };
+        config.resource = omtalk_xmpp::device_resource(state.keys.device_id);
         let account = accounts.add(config).await;
         let omemo = Arc::new(Omemo::persisting(account.clone(), state, store.omemo(&jid)));
         shared.accounts.insert(jid.clone(), (account, omemo));
@@ -427,6 +428,11 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             .open(path)
             .ok()
     });
+    // A closed terminal window (SIGHUP) or a plain kill (SIGTERM) leaves as cleanly as
+    // quitting: else the server keeps showing this client online for minutes.
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut hangup = signal(SignalKind::hangup()).map_err(|e| e.to_string())?;
+    let mut terminate = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     // The terminal starts with the mouse captured (main.rs).
     let mut mouse_captured = true;
     loop {
@@ -495,6 +501,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 Vec::new()
             }
             _ = tokio::signal::ctrl_c() => break,
+            _ = hangup.recv() => break,
+            _ = terminate.recv() => break,
         };
         for action in actions {
             if action == Action::Quit {

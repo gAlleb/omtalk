@@ -103,6 +103,7 @@ async fn main() {
 
     let mut config = AccountConfig::new(options.jid.clone(), password());
     config.server = options.server;
+    config.resource = omtalk_xmpp::device_resource(state.keys.device_id);
     let (mut accounts, mut events) = Accounts::new();
     let account = accounts.add(config).await;
     let omemo = Arc::new(Omemo::persisting(

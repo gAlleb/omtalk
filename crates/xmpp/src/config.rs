@@ -22,6 +22,13 @@ pub struct AccountConfig {
     pub keepalive_answer: Duration,
 }
 
+/// The resource of one device: the same on every start, so a new session replaces one the
+/// server still keeps from a start that did not end cleanly (XEP-0198 keeps it for
+/// minutes), instead of showing beside it as a second client.
+pub fn device_resource(device: u32) -> String {
+    format!("omtalk.{device:08x}")
+}
+
 impl AccountConfig {
     pub fn new(jid: BareJid, password: impl Into<String>) -> Self {
         let suffix: [u8; 4] = random();
