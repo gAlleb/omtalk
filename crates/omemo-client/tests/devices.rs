@@ -53,7 +53,7 @@ async fn three_own_devices_and_two_peer_devices_all_read_everything() {
         let got = own.next_text().await;
         assert_eq!(
             (text(&got), got.direction, got.device),
-            ("ответ", Direction::Incoming, bob2.omemo.device_id())
+            ("ответ", Direction::Incoming, Some(bob2.omemo.device_id()))
         );
     }
     assert_eq!(text(&bob1.next_text().await), "ответ");

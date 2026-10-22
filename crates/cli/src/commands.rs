@@ -10,6 +10,10 @@ pub const HELP: &str = "\
 /join ROOM [NICK]    enter a group chat and read what it said meanwhile
 /say ROOM TEXT       send an OMEMO message to a group chat
 /devices JID         devices of an account, with fingerprints (yours too)
+/contacts            your contact list, and who sees whose status
+/add JID [NAME]      add a contact and ask to see their status
+/accept JID          let JID see your status (and ask to see theirs)
+/refuse JID          do not let JID see your status
 /help                this list
 /quit                leave";
 
@@ -19,6 +23,10 @@ pub enum Command {
     Join { room: BareJid, nick: Option<String> },
     Say { room: BareJid, text: String },
     Devices { jid: BareJid },
+    Contacts,
+    Add { jid: BareJid, name: Option<String> },
+    Accept { jid: BareJid },
+    Refuse { jid: BareJid },
     Help,
     Quit,
 }
@@ -47,6 +55,17 @@ pub fn parse(line: &str) -> Result<Command, String> {
             })
         }
         "/devices" => Ok(Command::Devices { jid: jid(rest)? }),
+        "/contacts" => Ok(Command::Contacts),
+        "/add" => {
+            let (who, name) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let name = name.trim();
+            Ok(Command::Add {
+                jid: jid(who)?,
+                name: (!name.is_empty()).then(|| name.to_owned()),
+            })
+        }
+        "/accept" => Ok(Command::Accept { jid: jid(rest)? }),
+        "/refuse" => Ok(Command::Refuse { jid: jid(rest)? }),
         "/help" => Ok(Command::Help),
         "/quit" => Ok(Command::Quit),
         "" => Err("type /help for commands".into()),
@@ -62,13 +81,32 @@ pub async fn run(omemo: &Omemo, account: &Account, command: Command) {
             let nick =
                 nick.unwrap_or_else(|| account.jid().node().map(|n| n.to_string()).unwrap_or_default());
             match account.join(&room, &nick).await {
-                Ok(()) => show::caught_up(room.as_str(), omemo.catch_up_room(&room).await),
-                Err(e) => show::error(&format!("joining {room} failed: {e}")),
+                Ok(()) => {
+                    show::info(&format!("in {room} as {nick}"));
+                    show::caught_up(room.as_str(), omemo.catch_up_room(&room).await)
+                }
+                Err(e) => show::error(&format!("cannot enter {room}: {}", show::refusal(&e))),
             }
         }
         Command::Devices { jid } => match omemo.devices(&jid).await {
             Ok(devices) => show::devices(&jid, &devices),
             Err(e) => show::error(&format!("reading the devices of {jid} failed: {e}")),
+        },
+        Command::Contacts => match account.roster().await {
+            Ok(contacts) => show::contacts(&contacts),
+            Err(e) => show::error(&format!("reading the contact list failed: {e}")),
+        },
+        Command::Add { jid, name } => match account.add_contact(&jid, name.as_deref()).await {
+            Ok(()) => show::info(&format!("added {jid}; asked to see their status")),
+            Err(e) => show::error(&format!("adding {jid} failed: {e}")),
+        },
+        Command::Accept { jid } => match account.accept_contact(&jid).await {
+            Ok(()) => show::info(&format!("{jid} may see your status now")),
+            Err(e) => show::error(&format!("accepting {jid} failed: {e}")),
+        },
+        Command::Refuse { jid } => match account.refuse_contact(&jid).await {
+            Ok(()) => show::info(&format!("{jid} may not see your status")),
+            Err(e) => show::error(&format!("refusing {jid} failed: {e}")),
         },
         Command::Help => println!("{HELP}"),
         Command::Quit => {}
@@ -107,6 +145,19 @@ mod tests {
         assert!(
             parse("hello").is_err(),
             "plain text is not sent anywhere by accident"
+        );
+        assert_eq!(
+            parse("/add bob@example.org Bob Smith").unwrap(),
+            Command::Add {
+                jid: "bob@example.org".parse().unwrap(),
+                name: Some("Bob Smith".into())
+            }
+        );
+        assert_eq!(
+            parse("/accept bob@example.org").unwrap(),
+            Command::Accept {
+                jid: "bob@example.org".parse().unwrap()
+            }
         );
     }
 }

@@ -28,6 +28,12 @@ pub enum Event {
         reason: String,
     },
     Message(Box<Message>),
+    /// The contact list changed on the server (from this or another client).
+    Roster(Vec<crate::roster::Contact>),
+    /// Someone asks to see our status: answer with `accept_contact` or `refuse_contact`.
+    SubscriptionRequest {
+        from: BareJid,
+    },
     Presence(Box<Presence>),
     /// A PEP node of `from` changed (published or retracted items).
     Pep {

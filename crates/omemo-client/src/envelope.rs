@@ -1,9 +1,10 @@
-//! Finds the OMEMO element in a message, unwrapping carbon copies (XEP-0280).
+//! What a message carries and between whom: unwraps carbon copies (XEP-0280), names
+//! group senders, and tells OMEMO from plain text.
 
 use omemo_xml::xml;
 use omtalk_xmpp::BareJid;
 use xmpp_parsers::carbons::{Received, Sent};
-use xmpp_parsers::message::Message;
+use xmpp_parsers::message::{Message, MessageType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -13,13 +14,22 @@ pub enum Direction {
     Outgoing,
 }
 
+pub(crate) enum Content {
+    Omemo(xml::Encrypted),
+    /// Sent without encryption. Shown, marked as such, whatever the chat's setting.
+    Plain(String),
+}
+
 pub(crate) struct Envelope {
-    /// The other side of the conversation.
+    /// The other side of the conversation: the peer, or the room.
     pub peer: BareJid,
-    /// The account whose device encrypted the message.
+    /// The account that sent it. In a group chat whose sender the room does not reveal
+    /// (plain text in an anonymous room), the room itself.
     pub sender: BareJid,
+    /// The sender's nick, in a group chat.
+    pub nick: Option<String>,
     pub direction: Direction,
-    pub encrypted: xml::Encrypted,
+    pub content: Content,
 }
 
 pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
@@ -31,11 +41,12 @@ pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
         if let Ok(Some(sent)) = message.extract_payload::<Sent>() {
             let inner = sent.forwarded.message;
             let peer = inner.to.as_ref()?.to_bare();
-            return encrypted_in(inner).map(|encrypted| Envelope {
+            return content_of(inner).map(|content| Envelope {
                 peer,
                 sender: own.clone(),
+                nick: None,
                 direction: Direction::Outgoing,
-                encrypted,
+                content,
             });
         }
         if let Ok(Some(received)) = message.extract_payload::<Received>() {
@@ -44,16 +55,18 @@ pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
     }
 
     let sender = message.from.as_ref()?.to_bare();
-    encrypted_in(message).map(|encrypted| Envelope {
+    content_of(message).map(|content| Envelope {
         peer: sender.clone(),
         sender,
+        nick: None,
         direction: Direction::Incoming,
-        encrypted,
+        content,
     })
 }
 
 /// Opens a group message, whose sender is known by nick only: `resolve` maps it to the
-/// real account. A sender that cannot be resolved is an error, not a silent drop.
+/// real account. An OMEMO message whose sender cannot be resolved is an error, not a
+/// silent drop: its keys belong to an account we do not know.
 pub(crate) fn open_group(
     own: &BareJid,
     message: Message,
@@ -62,26 +75,10 @@ pub(crate) fn open_group(
     let Some(from) = message.from.as_ref().and_then(|f| f.try_as_full().ok()).cloned() else {
         return Ok(None);
     };
-    let Some(encrypted) = encrypted_in(message) else {
-        return Ok(None);
-    };
     let room = from.to_bare();
     let nick = from.resource().to_string();
-    let sender = resolve(&room, &nick).ok_or(crate::Error::UnknownOccupant {
-        room: room.clone(),
-        nick,
-    })?;
-    let direction = if &sender == own {
-        Direction::Outgoing
-    } else {
-        Direction::Incoming
-    };
-    Ok(Some(Envelope {
-        peer: room,
-        sender,
-        direction,
-        encrypted,
-    }))
+    let real = resolve(&room, &nick);
+    room_envelope(own, &room, nick, real, message)
 }
 
 /// Opens a message from the own archive. It is stored as sent, not as a carbon: from
@@ -93,11 +90,12 @@ pub(crate) fn open_archived(own: &BareJid, message: Message) -> Option<Envelope>
     } else {
         (sender.clone(), Direction::Incoming)
     };
-    encrypted_in(message).map(|encrypted| Envelope {
+    content_of(message).map(|content| Envelope {
         peer,
         sender,
+        nick: None,
         direction,
-        encrypted,
+        content,
     })
 }
 
@@ -124,13 +122,29 @@ pub(crate) fn open_room_archived(
         .and_then(|item| item.attr(xmpp_parsers::minidom::rxml::xml_ncname!("jid")))
         .and_then(|jid| jid.parse::<omtalk_xmpp::Jid>().ok())
         .map(|jid| jid.to_bare());
-    let Some(encrypted) = encrypted_in(message) else {
+    room_envelope(own, room, nick, real, message)
+}
+
+fn room_envelope(
+    own: &BareJid,
+    room: &BareJid,
+    nick: String,
+    real: Option<BareJid>,
+    message: Message,
+) -> Result<Option<Envelope>, crate::Error> {
+    let Some(content) = content_of(message) else {
         return Ok(None);
     };
-    let sender = real.ok_or(crate::Error::UnknownOccupant {
-        room: room.clone(),
-        nick,
-    })?;
+    let sender = match (real, &content) {
+        (Some(real), _) => real,
+        (None, Content::Plain(_)) => room.clone(),
+        (None, Content::Omemo(_)) => {
+            return Err(crate::Error::UnknownOccupant {
+                room: room.clone(),
+                nick,
+            });
+        }
+    };
     let direction = if &sender == own {
         Direction::Outgoing
     } else {
@@ -139,9 +153,24 @@ pub(crate) fn open_room_archived(
     Ok(Some(Envelope {
         peer: room.clone(),
         sender,
+        nick: Some(nick),
         direction,
-        encrypted,
+        content,
     }))
+}
+
+/// OMEMO if the message has it (its body is then only the fallback text), else the
+/// plain body. Errors and messages without either carry nothing to show.
+fn content_of(mut message: Message) -> Option<Content> {
+    if message.type_ == MessageType::Error {
+        return None;
+    }
+    if let Ok(Some(encrypted)) = message.extract_payload::<xml::Encrypted>() {
+        return Some(Content::Omemo(encrypted));
+    }
+    message
+        .get_best_body_cloned(vec![])
+        .map(|(_, body)| Content::Plain(body))
 }
 
 /// The id `archive` gave this live message (XEP-0359), if it gave one. `archive` is the
@@ -166,15 +195,12 @@ pub(crate) fn archive_id(archive: &BareJid, message: &Message) -> Option<String>
     })
 }
 
-fn encrypted_in(mut message: Message) -> Option<xml::Encrypted> {
-    message.extract_payload::<xml::Encrypted>().ok().flatten()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use omemo::{OwnKeys, Session};
     use omtalk_xmpp::Element;
+    use xmpp_parsers::message::Lang;
 
     fn encrypted() -> xml::Encrypted {
         let alice = OwnKeys::generate(0).unwrap();
@@ -199,18 +225,63 @@ mod tests {
         outer
     }
 
+    fn own() -> BareJid {
+        "me@example.org".parse().unwrap()
+    }
+
     #[test]
     fn genuine_sent_carbon_is_our_outgoing_message() {
-        let own: BareJid = "me@example.org".parse().unwrap();
-        let envelope = open(&own, sent_carbon("me@example.org")).unwrap();
+        let envelope = open(&own(), sent_carbon("me@example.org")).unwrap();
         assert_eq!(envelope.direction, Direction::Outgoing);
         assert_eq!(envelope.peer.as_str(), "peer@example.org");
+        assert!(matches!(envelope.content, Content::Omemo(_)));
     }
 
     #[test]
     fn carbon_from_someone_else_is_ignored() {
         // Mallory wraps a message in a carbon to make it look like one we sent.
-        let own: BareJid = "me@example.org".parse().unwrap();
-        assert!(open(&own, sent_carbon("mallory@evil.example")).is_none());
+        assert!(open(&own(), sent_carbon("mallory@evil.example")).is_none());
+    }
+
+    #[test]
+    fn plain_text_is_kept_and_omemo_fallback_text_is_not() {
+        let mut plain = Message::chat(Some(own().into())).with_body(Lang::default(), "hi".into());
+        plain.from = Some("peer@example.org/pc".parse().unwrap());
+        assert!(matches!(open(&own(), plain).unwrap().content, Content::Plain(ref t) if t == "hi"));
+
+        // An OMEMO message's body is the "cannot decrypt" fallback: never shown as text.
+        let mut omemo = Message::chat(Some(own().into()))
+            .with_body(Lang::default(), "This message is OMEMO encrypted".into())
+            .with_payload(encrypted());
+        omemo.from = Some("peer@example.org/pc".parse().unwrap());
+        assert!(matches!(open(&own(), omemo).unwrap().content, Content::Omemo(_)));
+
+        let mut error = Message::error(Some(own().into())).with_body(Lang::default(), "bounce".into());
+        error.from = Some("peer@example.org/pc".parse().unwrap());
+        assert!(open(&own(), error).is_none(), "an error is not a message to show");
+    }
+
+    #[test]
+    fn group_plain_text_from_unknown_nick_still_shows_but_omemo_does_not() {
+        let room: BareJid = "room@muc.example.org".parse().unwrap();
+        let from = |m: Message| {
+            let mut m = m;
+            m.from = Some("room@muc.example.org/stranger".parse().unwrap());
+            m
+        };
+        let unknown = |_: &BareJid, _: &str| None;
+        let plain =
+            from(Message::groupchat(Some(room.clone().into())).with_body(Lang::default(), "hi".into()));
+        let envelope = open_group(&own(), plain, unknown).unwrap().unwrap();
+        assert_eq!(
+            (&envelope.sender, envelope.nick.as_deref()),
+            (&room, Some("stranger"))
+        );
+
+        let omemo = from(Message::groupchat(Some(room.clone().into())).with_payload(encrypted()));
+        assert!(matches!(
+            open_group(&own(), omemo, unknown),
+            Err(crate::Error::UnknownOccupant { .. })
+        ));
     }
 }

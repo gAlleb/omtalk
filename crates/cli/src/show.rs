@@ -2,7 +2,7 @@
 //! one terminal, so every line says what it is.
 
 use omtalk_omemo::{CatchUp, DeviceInfo, Direction, Error, Incoming, SendReport, fingerprint};
-use omtalk_xmpp::BareJid;
+use omtalk_xmpp::{BareJid, Contact};
 
 pub fn info(text: &str) {
     println!("-- {text}");
@@ -19,10 +19,16 @@ pub fn incoming(message: &Incoming) {
         // Sent from another device of this account.
         Direction::Outgoing => "->",
     };
-    println!(
-        "[{}] {arrow} {} (device {}): {text}",
-        message.peer, message.sender, message.device
-    );
+    let who = match &message.nick {
+        Some(nick) if message.sender == message.peer => nick.clone(),
+        Some(nick) => format!("{nick} ({})", message.sender),
+        None => message.sender.to_string(),
+    };
+    let how = match message.device {
+        Some(device) => format!("device {device}"),
+        None => "WITHOUT ENCRYPTION".into(),
+    };
+    println!("[{}] {arrow} {who} ({how}): {text}", message.peer);
 }
 
 pub fn caught_up(archive: &str, result: Result<CatchUp, Error>) {
@@ -82,5 +88,50 @@ pub fn devices(jid: &BareJid, devices: &[DeviceInfo]) {
             format!("  [{}]", notes.join(", "))
         };
         println!("{jid} {:>10}  {key}{notes}", device.device);
+    }
+}
+
+pub fn contacts(contacts: &[Contact]) {
+    if contacts.is_empty() {
+        info("no contacts");
+    }
+    for contact in contacts {
+        println!("{}", contact_line(contact));
+    }
+}
+
+pub fn contact_line(contact: &Contact) -> String {
+    if contact.removed {
+        return format!("{} removed", contact.jid);
+    }
+    let name = contact
+        .name
+        .as_deref()
+        .map(|n| format!(" ({n})"))
+        .unwrap_or_default();
+    let status = match (contact.we_see_them, contact.they_see_us) {
+        (true, true) => "you see each other's status",
+        (true, false) => "you see their status",
+        (false, true) => "they see your status",
+        (false, false) if contact.asked => "asked to see their status, no answer yet",
+        (false, false) => "no status either way",
+    };
+    format!("{}{name}: {status}", contact.jid)
+}
+
+/// Why a room did not let us in, in words.
+pub fn refusal(error: &omtalk_xmpp::Error) -> String {
+    use omtalk_xmpp::stanza_error::DefinedCondition as C;
+    match error {
+        omtalk_xmpp::Error::Stanza(e) => match e.defined_condition {
+            C::RegistrationRequired => "members only; you need an invitation".into(),
+            C::Conflict => "that nick is taken; try another".into(),
+            C::Forbidden => "you are banned from it".into(),
+            C::ServiceUnavailable => "it is full".into(),
+            C::ItemNotFound => "it does not exist and cannot be created".into(),
+            C::NotAuthorized => "it needs a password".into(),
+            ref other => format!("{other:?}"),
+        },
+        other => other.to_string(),
     }
 }

@@ -136,6 +136,14 @@ async fn main() {
                 Event::Disconnected { reason } => {
                     show::info(&format!("disconnected: {reason}; reconnecting"))
                 }
+                Event::SubscriptionRequest { from } => show::info(&format!(
+                    "{from} wants to see your status: /accept {from} or /refuse {from}"
+                )),
+                Event::Roster(contacts) => {
+                    for contact in contacts {
+                        show::info(&format!("contact list: {}", show::contact_line(contact)));
+                    }
+                }
                 Event::AuthFailed { reason } => {
                     show::error(&format!("login refused: {reason}"));
                     std::process::exit(1);

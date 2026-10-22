@@ -8,7 +8,7 @@ use std::time::Duration;
 use omemo::OwnKeys;
 use omemo_xml::{DEVICE_LIST_NODE, bundle, bundle_node, device_list, xml};
 use omtalk_xmpp::{
-    Access, Account, AccountConfig, AccountEvent, Accounts, BareJid, Element, Event, Jid, Server,
+    Access, Account, AccountConfig, AccountEvent, Accounts, Affiliation, BareJid, Element, Event, Jid, Server,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
@@ -323,4 +323,94 @@ async fn node_created_with_other_access_is_reconfigured_on_publish() {
         .unwrap();
     let items = stranger.items(owner.jid(), &node).await.unwrap();
     assert_eq!(items.len(), 1);
+}
+
+#[tokio::test]
+async fn contacts_ask_accept_and_then_see_each_other() {
+    let (mut accounts, mut events) = Accounts::new();
+    let alice = accounts.add(config("u28")).await;
+    let bob = accounts.add(config("u29")).await;
+    online(&mut events, &[&alice, &bob]).await;
+    // The server keeps rosters across runs; start as strangers.
+    let _ = alice.remove_contact(bob.jid()).await;
+    let _ = bob.remove_contact(alice.jid()).await;
+
+    alice.add_contact(bob.jid(), Some("Bob")).await.unwrap();
+    // The server pushes the new item to Alice's clients; this one acknowledges it.
+    wait_for(&mut events, |e| match &e.event {
+        Event::Roster(contacts) if e.account == *alice.jid() => contacts
+            .iter()
+            .find(|c| c.jid == *bob.jid() && !c.removed)
+            .map(|_| ()),
+        _ => None,
+    })
+    .await;
+    let asker = wait_for(&mut events, |e| match &e.event {
+        Event::SubscriptionRequest { from } if e.account == *bob.jid() => Some(from.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(asker, *alice.jid());
+
+    // Accepting also asks back, so Alice is asked in turn.
+    bob.accept_contact(alice.jid()).await.unwrap();
+    wait_for(&mut events, |e| match &e.event {
+        Event::SubscriptionRequest { from } if e.account == *alice.jid() && from == bob.jid() => Some(()),
+        _ => None,
+    })
+    .await;
+    alice.accept_contact(bob.jid()).await.unwrap();
+
+    // Each now sees the other online, which is what made Gajim show omtalk grey before.
+    wait_for(&mut events, |e| match &e.event {
+        Event::Presence(p)
+            if e.account == *alice.jid()
+                && p.type_ == xmpp_parsers::presence::Type::None
+                && p.from.as_ref().is_some_and(|f| f.to_bare() == *bob.jid()) =>
+        {
+            Some(())
+        }
+        _ => None,
+    })
+    .await;
+    let contact = timeout(Duration::from_secs(10), async {
+        loop {
+            let roster = alice.roster().await.unwrap();
+            if let Some(c) = roster
+                .into_iter()
+                .find(|c| c.jid == *bob.jid() && c.we_see_them && c.they_see_us)
+            {
+                return c;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the roster shows a mutual subscription");
+    assert_eq!(contact.name.as_deref(), Some("Bob"));
+}
+
+#[tokio::test]
+async fn members_only_room_refuses_strangers_and_admits_members() {
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u27")).await;
+    let guest = accounts.add(config("u26")).await;
+    online(&mut events, &[&owner, &guest]).await;
+    let room: BareJid = format!("closed-{}@muc.localhost", rand_suffix()).parse().unwrap();
+    owner.join(&room, "owner").await.unwrap();
+    owner.make_private(&room).await.unwrap();
+
+    match guest.join(&room, "guest").await {
+        Err(omtalk_xmpp::Error::Stanza(error)) => assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::RegistrationRequired,
+            "refused as a non-member, and told so"
+        ),
+        other => panic!("a stranger got in or no answer: {other:?}"),
+    }
+    owner
+        .set_affiliation(&room, guest.jid(), Affiliation::Member)
+        .await
+        .unwrap();
+    guest.join(&room, "guest").await.unwrap();
 }

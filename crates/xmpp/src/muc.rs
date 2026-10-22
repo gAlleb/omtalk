@@ -52,15 +52,33 @@ pub fn occupant(presence: &Presence) -> Option<Occupant> {
     })
 }
 
+/// Whether a presence from a room answers our entering it: our own presence back (status
+/// 110) lets us in, an error presence refuses.
+pub(crate) fn join_outcome(presence: &Presence) -> Option<(BareJid, Result<(), Error>)> {
+    let room = presence.from.as_ref()?.to_bare();
+    if presence.type_ == PresenceType::Error {
+        let error = presence
+            .payloads
+            .iter()
+            .find_map(|p| xmpp_parsers::stanza_error::StanzaError::try_from(p.clone()).ok())?;
+        return Some((room, Err(Error::Stanza(Box::new(error)))));
+    }
+    let entered = occupant(presence).is_some_and(|o| o.is_self && o.present);
+    entered.then_some((room, Ok(())))
+}
+
 impl Account {
-    /// Enters a room under `nick`, without the room's history. Creates the room if it
-    /// does not exist yet; configure it with [`Account::make_private`] right after.
+    /// Enters a room under `nick`, without the room's history (the archive has it), and
+    /// returns once the room has let us in. A refusal comes back as `Error::Stanza`:
+    /// `registration-required` for a members-only room without an invitation,
+    /// `conflict` for a nick in use, `forbidden` for a ban. Creates the room if it does
+    /// not exist yet; configure it with [`Account::make_private`] right after.
     pub async fn join(&self, room: &BareJid, nick: &str) -> Result<(), Error> {
         let to = room
             .with_resource_str(nick)
             .map_err(|e| Error::Unexpected(e.to_string()))?;
         let muc = Muc::new().with_history(History::new().with_maxstanzas(0));
-        self.send(Presence::available().with_to(to).with_payload(muc))
+        self.join_room(room.clone(), Presence::available().with_to(to).with_payload(muc))
             .await
     }
 

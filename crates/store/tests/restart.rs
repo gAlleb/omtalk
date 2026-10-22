@@ -48,7 +48,7 @@ async fn restarted_client_is_the_same_device_and_keeps_its_sessions() {
     let got = alice.next_text().await;
     assert_eq!(
         (text(&got), got.device),
-        ("пока тебя не было", bob.omemo.device_id())
+        ("пока тебя не было", Some(bob.omemo.device_id()))
     );
 
     alice.omemo.send(&bob.jid, "я вернулась").await.unwrap();

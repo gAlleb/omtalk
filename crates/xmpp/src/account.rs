@@ -7,6 +7,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::connect::DnsConfig;
 use tokio_xmpp::{Client, Event as ClientEvent, IqRequest, IqResponse, Stanza};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jid::{BareJid, Jid};
 use xmpp_parsers::message::Message;
 use xmpp_parsers::minidom::Element;
@@ -15,6 +16,7 @@ use crate::login::{self, Login};
 use crate::mam::{self, Archived, Page};
 use crate::pep::{self, Access};
 use crate::{AccountConfig, AccountEvent, Error, Event, PepItem, Server, disco};
+use crate::{muc, roster};
 
 enum Command {
     Send(Box<Stanza>, oneshot::Sender<Result<(), Error>>),
@@ -22,6 +24,12 @@ enum Command {
         to: Option<Jid>,
         request: IqRequest,
         reply: oneshot::Sender<Result<Option<Element>, Error>>,
+    },
+    /// Entering a room: done when the room sends our own presence back, or an error.
+    Join {
+        room: BareJid,
+        presence: Box<xmpp_parsers::presence::Presence>,
+        reply: oneshot::Sender<Result<(), Error>>,
     },
     /// A message archive query: its results arrive as messages before the answer.
     Archive {
@@ -130,6 +138,24 @@ impl Account {
         }
     }
 
+    pub(crate) async fn join_room(
+        &self,
+        room: BareJid,
+        presence: xmpp_parsers::presence::Presence,
+    ) -> Result<(), Error> {
+        let (reply, answer) = oneshot::channel();
+        self.command(Command::Join {
+            room,
+            presence: Box::new(presence),
+            reply,
+        })
+        .await?;
+        match tokio::time::timeout(self.iq_timeout, answer).await {
+            Ok(answer) => answer.map_err(|_| Error::Stopped)?,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
     pub(crate) async fn archive_query(
         &self,
         to: Option<Jid>,
@@ -203,7 +229,7 @@ async fn supervise(
         // tokio-xmpp keeps trying from here, with growing pauses.
         Login::Unreachable(reason) => emit(Event::Disconnected { reason }),
     }
-    if let Ended::Lost = run(connect(&config), &mut commands, &emit).await {
+    if let Ended::Lost = run(connect(&config), &account, &mut commands, &emit).await {
         emit(Event::Disconnected {
             reason: "the connection task ended".into(),
         });
@@ -217,8 +243,15 @@ enum Ended {
     Lost,
 }
 
-async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &impl Fn(Event)) -> Ended {
+async fn run(
+    mut client: Client,
+    own: &BareJid,
+    commands: &mut mpsc::Receiver<Command>,
+    emit: &impl Fn(Event),
+) -> Ended {
     let mut queries: HashMap<String, Collecting> = HashMap::new();
+    // Rooms being entered, until the room confirms or refuses.
+    let mut joins: HashMap<BareJid, oneshot::Sender<Result<(), Error>>> = HashMap::new();
     let (finished_tx, mut finished) = mpsc::unbounded_channel::<(String, Result<Option<Element>, Error>)>();
     loop {
         // Biased: a query's results come before its answer on the stream, but tokio-xmpp
@@ -228,7 +261,13 @@ async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &
             event = client.next() => match event {
                 Some(ClientEvent::Stanza(Stanza::Message(message))) if collect(&mut queries, &message) => {}
                 Some(event) => {
-                    if let Some(event) = handle(&mut client, event).await {
+                    if let ClientEvent::Stanza(Stanza::Presence(presence)) = &event
+                        && let Some((room, outcome)) = muc::join_outcome(presence)
+                        && let Some(reply) = joins.remove(&room)
+                    {
+                        let _ = reply.send(outcome);
+                    }
+                    if let Some(event) = handle(&mut client, own, event).await {
                         emit(event);
                     }
                 }
@@ -241,6 +280,12 @@ async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &
                 }
             }
             command = commands.recv() => match command {
+                Some(Command::Join { room, presence, reply }) => {
+                    match client.send_stanza((*presence).into()).await {
+                        Ok(_) => drop(joins.insert(room, reply)),
+                        Err(e) => drop(reply.send(Err(Error::Send(e.to_string())))),
+                    }
+                }
                 Some(Command::Archive { to, archive, queryid, query, reply }) => {
                     let own = to.is_none();
                     let token = client.send_iq(to, IqRequest::Set(query)).await;
@@ -311,19 +356,27 @@ async fn execute(client: &mut Client, command: Command) -> Option<Option<oneshot
                 let _ = reply.send(iq_answer(token.await));
             });
         }
-        Command::Archive { .. } => unreachable!("run() handles archive queries itself"),
+        Command::Archive { .. } | Command::Join { .. } => unreachable!("run() handles these itself"),
         Command::Stop(done) => return Some(Some(done)),
     }
     None
 }
 
 /// Answers what the protocol requires and turns the rest into an [`Event`].
-async fn handle(client: &mut Client, event: ClientEvent) -> Option<Event> {
+async fn handle(client: &mut Client, own: &BareJid, event: ClientEvent) -> Option<Event> {
     match event {
         ClientEvent::Online {
             bound_jid, resumed, ..
         } => {
             if !resumed {
+                // Asking for the roster first makes this an interested resource (RFC 6121,
+                // 2.1.6): without it, the server sends no roster pushes here. The answer
+                // itself is not needed; `Account::roster` reads the list when wanted.
+                let query = xmpp_parsers::roster::Roster {
+                    ver: None,
+                    items: Vec::new(),
+                };
+                drop(client.send_iq(None, IqRequest::Get(query.into())).await);
                 let _ = client.send_stanza(disco::presence().into()).await;
             }
             Some(Event::Online {
@@ -335,13 +388,22 @@ async fn handle(client: &mut Client, event: ClientEvent) -> Option<Event> {
             reason: error.to_string(),
         }),
         ClientEvent::Stanza(Stanza::Iq(iq)) => {
+            if let Some(contacts) = roster::push(&iq, own) {
+                // Acknowledged, as RFC 6121 requires; refusing it was a protocol error.
+                let ack = Iq::empty_result(iq.from().cloned().unwrap_or_else(|| own.clone().into()), iq.id());
+                let _ = client.send_stanza(ack.into()).await;
+                return Some(Event::Roster(contacts));
+            }
             if let Some(answer) = disco::answer(iq) {
                 let _ = client.send_stanza(answer.into()).await;
             }
             None
         }
         ClientEvent::Stanza(Stanza::Message(message)) => Some(message_event(message)),
-        ClientEvent::Stanza(Stanza::Presence(presence)) => Some(Event::Presence(Box::new(presence))),
+        ClientEvent::Stanza(Stanza::Presence(presence)) => match roster::subscription_request(&presence) {
+            Some(from) => Some(Event::SubscriptionRequest { from }),
+            None => Some(Event::Presence(Box::new(presence))),
+        },
     }
 }
 

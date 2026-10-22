@@ -14,8 +14,10 @@ mod login;
 pub mod mam;
 pub mod muc;
 pub mod pep;
+pub mod roster;
 
 pub use pep::Access;
+pub use roster::Contact;
 
 pub use account::Account;
 pub use accounts::Accounts;
@@ -25,3 +27,4 @@ pub use event::{AccountEvent, Event, PepItem};
 pub use xmpp_parsers::jid::{self, BareJid, FullJid, Jid};
 pub use xmpp_parsers::minidom::Element;
 pub use xmpp_parsers::muc::user::{Affiliation, Role};
+pub use xmpp_parsers::stanza_error;

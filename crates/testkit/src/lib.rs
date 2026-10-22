@@ -52,7 +52,12 @@ impl Device {
 
         let omemo = Arc::new(Omemo::persisting(account.clone(), state, persist));
         let started = std::time::Instant::now();
-        omemo.announce().await.unwrap();
+        if let Err(e) = omemo.announce().await {
+            panic!(
+                "announcing a device of {jid} failed after {:?}: {e}",
+                started.elapsed()
+            );
+        }
         if started.elapsed() > Duration::from_secs(1) {
             // Shown only when a test fails; a slow server explains timeouts.
             eprintln!("{} announced in {:?}", jid, started.elapsed());

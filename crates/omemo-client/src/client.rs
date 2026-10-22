@@ -9,7 +9,7 @@ use xmpp_parsers::carbons;
 use xmpp_parsers::eme::ExplicitMessageEncryption;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
-use crate::envelope::{self, Direction};
+use crate::envelope::{self, Content, Direction};
 use crate::state::Identity;
 use crate::{Ephemeral, Error, Persist, State};
 
@@ -37,13 +37,18 @@ pub struct Omemo {
     occupants: Mutex<HashMap<BareJid, HashMap<String, BareJid>>>,
 }
 
-/// A decrypted chat message.
+/// A chat message to show: decrypted, or sent without encryption.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Incoming {
     pub peer: BareJid,
     pub sender: BareJid,
-    pub device: DeviceId,
+    /// The sender's nick, in a group chat.
+    pub nick: Option<String>,
+    /// The sending device; `None` for plain text, which names none.
+    pub device: Option<DeviceId>,
     pub direction: Direction,
+    /// `false` for plain text: show it, marked as unencrypted.
+    pub encrypted: bool,
     /// `None` for a message without content (a handshake answer or a heartbeat).
     pub text: Option<String>,
 }
@@ -69,6 +74,14 @@ pub fn fingerprint(identity_key: &[u8; 32]) -> String {
         .map(|c| std::str::from_utf8(c).unwrap())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Who an OMEMO message is from and about, once its envelope is open.
+struct Received {
+    peer: BareJid,
+    sender: BareJid,
+    nick: Option<String>,
+    direction: Direction,
 }
 
 /// What [`Omemo::catch_up`] found in the archive, oldest first.
@@ -190,20 +203,13 @@ impl Omemo {
                     self.live_archive_position(&room, &id).await?;
                 }
                 match envelope::open_group(self.account.jid(), (**message).clone(), resolve)? {
-                    // Our own message, reflected by the room: there is no key for us in it.
-                    Some(envelope)
-                        if envelope.sender == *self.account.jid()
-                            && envelope.encrypted.header.sid == self.device_id =>
-                    {
-                        Ok(None)
-                    }
-                    Some(envelope) => ignorable(self.receive(envelope).await),
+                    Some(envelope) => self.open_envelope(envelope).await,
                     None => Ok(None),
                 }
             }
             Event::Message(message) => {
                 let incoming = match envelope::open(self.account.jid(), (**message).clone()) {
-                    Some(envelope) => ignorable(self.receive(envelope).await)?,
+                    Some(envelope) => self.open_envelope(envelope).await?,
                     None => None,
                 };
                 let own = self.account.jid().clone();
@@ -216,11 +222,42 @@ impl Omemo {
         }
     }
 
-    async fn receive(&self, envelope: envelope::Envelope) -> Result<Incoming, Error> {
-        let device = envelope.encrypted.header.sid;
+    /// What to show for a message: plain text as it is, OMEMO decrypted. `None` for
+    /// what is not meant to be shown here (see [`ignorable`]).
+    async fn open_envelope(&self, envelope: envelope::Envelope) -> Result<Option<Incoming>, Error> {
+        let encrypted = match envelope.content {
+            Content::Plain(text) => {
+                return Ok(Some(Incoming {
+                    peer: envelope.peer,
+                    sender: envelope.sender,
+                    nick: envelope.nick,
+                    device: None,
+                    direction: envelope.direction,
+                    encrypted: false,
+                    text: Some(text),
+                }));
+            }
+            Content::Omemo(encrypted) => encrypted,
+        };
+        // This device's own message, reflected by a room or kept in an archive: it holds
+        // no key for the device that wrote it.
+        if envelope.sender == *self.account.jid() && encrypted.header.sid == self.device_id {
+            return Ok(None);
+        }
+        let parts = Received {
+            peer: envelope.peer,
+            sender: envelope.sender,
+            nick: envelope.nick,
+            direction: envelope.direction,
+        };
+        ignorable(self.receive(parts, encrypted).await)
+    }
+
+    async fn receive(&self, envelope: Received, encrypted: xml::Encrypted) -> Result<Incoming, Error> {
+        let device = encrypted.header.sid;
         let mut state = self.state.lock().await;
         let key = (envelope.sender.clone(), device);
-        let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &envelope.encrypted)?;
+        let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &encrypted)?;
 
         let identity = *decrypted.received.session.their_identity();
         self.record_identity(&mut state, &envelope.sender, device, &identity)?;
@@ -260,8 +297,10 @@ impl Omemo {
         Ok(Incoming {
             peer: envelope.peer,
             sender: envelope.sender,
-            device,
+            nick: envelope.nick,
+            device: Some(device),
             direction: envelope.direction,
+            encrypted: true,
             text: decrypted
                 .plaintext
                 .map(|p| String::from_utf8_lossy(&p).into_owned()),
@@ -307,13 +346,7 @@ impl Omemo {
                     Some(room) => envelope::open_room_archived(&own, room, archived.message),
                 };
                 let result = match envelope {
-                    // This device's own message: it holds no key for itself.
-                    Ok(Some(envelope))
-                        if envelope.sender == own && envelope.encrypted.header.sid == self.device_id =>
-                    {
-                        Ok(None)
-                    }
-                    Ok(Some(envelope)) => ignorable(self.receive(envelope).await),
+                    Ok(Some(envelope)) => self.open_envelope(envelope).await,
                     Ok(None) => Ok(None),
                     Err(error) => Err(error),
                 };
