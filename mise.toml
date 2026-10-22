@@ -1,6 +1,10 @@
 [tools]
 rust = "1.99.1"
 uv = "0.13.4"
+# Only for building for other machines (`mise run build-arm`): zig is the C compiler and
+# linker for the C parts (ring, SQLite), so no cross toolchain is installed system-wide.
+zig = "0.15.2"
+"github:rust-cross/cargo-zigbuild" = "0.23.4"
 
 [tasks.setup]
 description = "Подтянуть эталон python-omemo для тестов-сверки"
@@ -14,3 +18,7 @@ run = "docker compose -f tests/prosody/compose.yml down -v && docker compose -f 
 description = "Все тесты: сверка с python-omemo и интеграция с Prosody"
 depends = ["setup", "prosody"]
 run = "cargo test --workspace"
+
+[tasks.build-arm]
+description = "Собрать omtalk для 64-битного ARM (Raspberry Pi 4/5 и т.п.): один статический файл"
+run = "rustup target add aarch64-unknown-linux-musl && cargo zigbuild --release -p omtalk --target aarch64-unknown-linux-musl && ls -l target/aarch64-unknown-linux-musl/release/omtalk"
