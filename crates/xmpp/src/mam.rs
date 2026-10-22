@@ -50,14 +50,19 @@ impl Account {
 
     /// The id of the newest archived message, if any: where to start reading from now on.
     pub async fn archive_newest(&self, room: Option<&BareJid>) -> Result<Option<String>, Error> {
+        Ok(self.archive_last(room, 1).await?.last)
+    }
+
+    /// The newest `max` messages, oldest first.
+    pub async fn archive_last(&self, room: Option<&BareJid>, max: usize) -> Result<Page, Error> {
         // An empty `before` asks for the last page.
         let set = SetQuery {
-            max: Some(1),
+            max: Some(max),
             after: None,
             before: Some(String::new()),
             index: None,
         };
-        Ok(self.archive(room, set).await?.last)
+        self.archive(room, set).await
     }
 
     async fn archive(&self, room: Option<&BareJid>, set: SetQuery) -> Result<Page, Error> {

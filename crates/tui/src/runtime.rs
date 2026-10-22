@@ -512,7 +512,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
 
 /// Saves a message to the history and shows it.
 fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
-    let at = now();
+    let at = message.at.unwrap_or_else(now);
     if let Some(text) = &message.text {
         let _ = shared.store.save_message(
             account,
@@ -592,6 +592,17 @@ async fn join(
                             account: account.clone(),
                             chat: Some(room.clone()),
                             text: "часть сообщений комнаты за время отсутствия недоступна: сервер их уже не хранит".into(),
+                        });
+                    }
+                    if caught.unreadable > 0 {
+                        tell(Msg::Notice {
+                            account: account.clone(),
+                            chat: Some(room.clone()),
+                            text: format!(
+                                "{} зашифр. сообщений из архива не прочитать: они написаны до появления \
+                                 этого устройства или не для него",
+                                caught.unreadable
+                            ),
                         });
                     }
                     for message in caught.messages {

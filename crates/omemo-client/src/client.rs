@@ -19,6 +19,8 @@ const STALE_CHAIN: u32 = 53;
 
 /// Archived messages read per request while catching up.
 const ARCHIVE_PAGE: usize = 50;
+/// How much of a room's past the first entry shows, as Gajim does.
+const ROOM_HISTORY: usize = 50;
 
 /// The body other clients show when they cannot decrypt.
 const FALLBACK_BODY: &str = "This message is OMEMO encrypted, and your client cannot decrypt it.";
@@ -51,6 +53,9 @@ pub struct Incoming {
     pub encrypted: bool,
     /// `None` for a message without content (a handshake answer or a heartbeat).
     pub text: Option<String>,
+    /// When the server got it (Unix seconds), for a message read from an archive;
+    /// `None` for one that arrives live, which is now.
+    pub at: Option<i64>,
 }
 
 /// One published device of an account, as [`Omemo::devices`] reports it.
@@ -93,6 +98,9 @@ pub struct CatchUp {
     /// Where this device stopped is no longer in the archive (expired, or the server
     /// lost it): messages from then until now could not be read.
     pub position_lost: bool,
+    /// Encrypted messages with no key for this device: written before it existed, or by
+    /// a client that did not know it yet. Nobody can read them here.
+    pub unreadable: usize,
 }
 
 /// Which devices a message reached.
@@ -238,6 +246,7 @@ impl Omemo {
                     direction: envelope.direction,
                     encrypted: false,
                     text: Some(text),
+                    at: None,
                 }));
             }
             Content::Omemo(encrypted) => encrypted,
@@ -307,6 +316,7 @@ impl Omemo {
             text: decrypted
                 .plaintext
                 .map(|p| String::from_utf8_lossy(&p).into_owned()),
+            at: None,
         })
     }
 
@@ -321,7 +331,8 @@ impl Omemo {
 
     /// The same for a group chat's archive: what the room got while this device was not
     /// in it. Call it after joining. The room must be non-anonymous; its archive names
-    /// each sender's account.
+    /// each sender's account. The first time in a room there is no position yet, and its
+    /// last [`ROOM_HISTORY`] messages are read instead.
     pub async fn catch_up_room(&self, room: &BareJid) -> Result<CatchUp, Error> {
         self.catch_up_archive(Some(room)).await
     }
@@ -332,8 +343,18 @@ impl Omemo {
         let mut after = self.state.lock().await.archive_positions.get(&archive).cloned();
         let mut caught = CatchUp::default();
         if after.is_none() {
-            if let Some(newest) = self.account.archive_newest(room).await? {
-                self.set_archive_position(&archive, &newest).await?;
+            match room {
+                Some(_) => {
+                    let page = self.account.archive_last(room, ROOM_HISTORY).await?;
+                    for archived in page.messages {
+                        self.take_archived(room, archived, &mut caught).await?;
+                    }
+                }
+                None => {
+                    if let Some(newest) = self.account.archive_newest(room).await? {
+                        self.set_archive_position(&archive, &newest).await?;
+                    }
+                }
             }
             self.caught_up.lock().await.insert(archive);
             return Ok(caught);
@@ -364,23 +385,8 @@ impl Omemo {
                 Err(e) => return Err(e.into()),
             };
             for archived in page.messages {
-                let envelope = match room {
-                    None => Ok(envelope::open_archived(&own, archived.message)),
-                    Some(room) => envelope::open_room_archived(&own, room, archived.message),
-                };
-                let result = match envelope {
-                    Ok(Some(envelope)) => self.open_envelope(envelope).await,
-                    Ok(None) => Ok(None),
-                    Err(error) => Err(error),
-                };
-                match result {
-                    Ok(Some(incoming)) => caught.messages.push(incoming),
-                    Ok(None) => {}
-                    // One message that does not decrypt must not hold up the rest.
-                    Err(error) => caught.failed.push((archived.id.clone(), error)),
-                }
-                self.set_archive_position(&archive, &archived.id).await?;
-                after = Some(archived.id);
+                after = Some(archived.id.clone());
+                self.take_archived(room, archived, &mut caught).await?;
             }
             if page.complete || page.last.is_none() {
                 break;
@@ -389,6 +395,51 @@ impl Omemo {
         }
         self.caught_up.lock().await.insert(archive);
         Ok(caught)
+    }
+
+    /// One archived message: opened, counted, and the archive's position moved past it.
+    async fn take_archived(
+        &self,
+        room: Option<&BareJid>,
+        archived: omtalk_xmpp::mam::Archived,
+        caught: &mut CatchUp,
+    ) -> Result<(), Error> {
+        let own = self.account.jid().clone();
+        let archive = room.cloned().unwrap_or_else(|| own.clone());
+        let at = archived.stamp.as_ref().map(|s| s.0.timestamp());
+        let envelope = match room {
+            None => Ok(envelope::open_archived(&own, archived.message)),
+            Some(room) => envelope::open_room_archived(&own, room, archived.message),
+        };
+        let result = match envelope {
+            Ok(Some(envelope)) if self.has_no_key(&envelope) => {
+                caught.unreadable += 1;
+                Ok(None)
+            }
+            Ok(Some(envelope)) => self.open_envelope(envelope).await,
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(Some(incoming)) => caught.messages.push(Incoming { at, ..incoming }),
+            Ok(None) => {}
+            // One message that does not decrypt must not hold up the rest.
+            Err(error) => caught.failed.push((archived.id.clone(), error)),
+        }
+        self.set_archive_position(&archive, &archived.id).await
+    }
+
+    /// An encrypted message with text that names no key for this device. Not this
+    /// device's own (it holds no key for itself either, and is simply not shown), and
+    /// not a key exchange or heartbeat, which carry no text.
+    fn has_no_key(&self, envelope: &envelope::Envelope) -> bool {
+        let Content::Omemo(encrypted) = &envelope.content else {
+            return false;
+        };
+        let own_device = envelope.sender == *self.account.jid() && encrypted.header.sid == self.device_id;
+        encrypted.payload.is_some()
+            && !own_device
+            && !encrypted.header.keys.iter().any(|k| k.rid == self.device_id)
     }
 
     /// Moves an archive's position to a live message, but only once that archive was

@@ -244,6 +244,10 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                         }
                         _ => {}
                     }
+                } else if let Some((nick, width)) = &row.who {
+                    app.areas
+                        .nicks
+                        .push((Rect::new(inner.x, y, *width, 1), nick.clone()));
                 } else if let Some(path) = &row.open {
                     app.areas
                         .files
@@ -306,6 +310,8 @@ pub struct Row {
     /// A fetched file a click on this row opens.
     pub open: Option<PathBuf>,
     pub picture: Option<PictureRow>,
+    /// A sender's name heading this row, and its width: a click on it opens a chat.
+    pub who: Option<(String, u16)>,
 }
 
 /// One of the rows a picture covers.
@@ -323,6 +329,7 @@ impl From<TextLine<'static>> for Row {
             text,
             open: None,
             picture: None,
+            who: None,
         }
     }
 }
@@ -382,7 +389,7 @@ pub fn message_rows(
             } else {
                 theme::nick(&line.who)
             };
-            rows.push(Row::from(TextLine::from(vec![
+            let mut header = Row::from(TextLine::from(vec![
                 Span::styled(
                     if line.who.is_empty() {
                         "?".to_owned()
@@ -392,7 +399,11 @@ pub fn message_rows(
                     who_style,
                 ),
                 Span::styled(format!("  {clock}"), Style::default().fg(theme::DIM)),
-            ])));
+            ]));
+            if !line.outgoing && !line.who.is_empty() {
+                header.who = Some((line.who.clone(), line.who.width() as u16));
+            }
+            rows.push(header);
         }
         last_who = Some((&line.who, line.outgoing, line.at));
         let marker = icons.plain_mark;
@@ -411,6 +422,7 @@ pub fn message_rows(
                             name: slot.name.clone(),
                             row,
                         }),
+                        who: None,
                     });
                 }
                 continue;
@@ -440,6 +452,7 @@ pub fn message_rows(
                 text: TextLine::from(spans),
                 open: path,
                 picture: None,
+                who: None,
             });
             continue;
         }
@@ -594,9 +607,14 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let Some(chat) = app.current() else { return };
     let mut rows: Vec<TextLine> = Vec::new();
+    let mut nicks = Vec::new();
     match &chat.kind {
         ChatKind::Room { .. } => {
             for (nick, real) in &chat.occupants {
+                let y = inner.y + rows.len() as u16;
+                if y < inner.bottom() {
+                    nicks.push((Rect::new(inner.x, y, inner.width, 1), nick.clone()));
+                }
                 let mut spans = vec![
                     Span::styled("● ", Style::default().fg(theme::OK)),
                     Span::styled(nick.clone(), theme::nick(nick)),
@@ -659,6 +677,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     frame.render_widget(Paragraph::new(rows), inner);
+    app.areas.nicks.extend(nicks);
 }
 
 fn status_line(frame: &mut Frame, app: &App, area: Rect) {
@@ -1356,5 +1375,56 @@ mod tests {
             "{actions:?}"
         );
         assert!(app.services.is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_room_participant_opens_a_chat_with_them() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = App::new(vec![jid("me@example.org")], Modifier::Ctrl, 26, 30);
+        let me = jid("me@example.org");
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        let chat = &mut app.chats[room];
+        chat.occupants.insert("bob".into(), Some(jid("bob@example.org")));
+        chat.occupants.insert("ghost".into(), None);
+        chat.occupants.insert("me".into(), Some(me.clone()));
+        app.push(
+            room,
+            Line::message(1_700_000_000, "bob".into(), "привет".into(), true, false),
+        );
+        screen(&mut app, 120, 20);
+        let click = |area: Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let at = |app: &App, nick: &str, left: bool| {
+            let right = app.areas.right.unwrap().x;
+            app.areas
+                .nicks
+                .iter()
+                .find(|(r, n)| n == nick && (r.x < right) == left)
+                .map(|(r, _)| *r)
+        };
+
+        // The sender's name in the chat.
+        let name = at(&app, "bob", true).expect("bob's name in the chat is clickable");
+        let actions = app.on_mouse(click(name));
+        assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
+        assert!(matches!(&actions[..], [Action::Devices { .. }]));
+
+        // The participants pane; one whose address the room hides says so.
+        app.select(room);
+        screen(&mut app, 120, 20);
+        app.on_mouse(click(at(&app, "ghost", false).unwrap()));
+        assert_eq!(app.current().unwrap().jid, jid("room@muc.example.org"));
+        assert!(app.status.contains("не показывает"), "{}", app.status);
+        app.on_mouse(click(at(&app, "bob", false).unwrap()));
+        assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
     }
 }

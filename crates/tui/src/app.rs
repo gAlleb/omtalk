@@ -168,6 +168,8 @@ pub struct Areas {
     pub chat_rows: Vec<(Rect, usize)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
+    /// Senders' names in a room and its participants: a click opens a chat with them.
+    pub nicks: Vec<(Rect, String)>,
     /// The services window and what is clickable in it.
     pub service_window: Rect,
     pub service_rows: Vec<(Rect, usize)>,
@@ -561,7 +563,24 @@ impl App {
         let result = match (name, jid(0)) {
             ("/msg", Some(jid)) => {
                 let index = self.chat(&account, &jid, ChatKind::Direct);
-                return self.select(index);
+                let mut actions = self.select(index);
+                // `/msg JID text` also sends the text, as in other clients.
+                let text = line[name.len()..]
+                    .trim_start()
+                    .split_once(char::is_whitespace)
+                    .map(|(_, text)| text.trim())
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    let chat = &self.chats[index];
+                    actions.push(Action::Send {
+                        account: chat.account.clone(),
+                        to: chat.jid.clone(),
+                        room: false,
+                        text: text.to_owned(),
+                        encrypted: chat.omemo,
+                    });
+                }
+                return actions;
             }
             ("/join", Some(room)) => {
                 let nick = args
@@ -610,6 +629,35 @@ impl App {
             Ok(actions) => actions,
             Err(message) => {
                 self.status = message;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Opens a direct chat with a room participant, by nick: the room must show who is
+    /// behind it.
+    pub fn open_private(&mut self, nick: &str) -> Vec<Action> {
+        let Some(chat) = self.current().filter(|c| c.is_room()) else {
+            return Vec::new();
+        };
+        let account = chat.account.clone();
+        match chat.occupants.get(nick) {
+            Some(Some(real)) if *real == account => {
+                self.status = "это вы".into();
+                Vec::new()
+            }
+            Some(Some(real)) => {
+                let real = real.clone();
+                let index = self.chat(&account, &real, ChatKind::Direct);
+                self.focus = Focus::Input;
+                self.select(index)
+            }
+            Some(None) => {
+                self.status = format!("{nick}: комната не показывает адрес участника");
+                Vec::new()
+            }
+            None => {
+                self.status = format!("{nick} сейчас не в комнате, адрес неизвестен");
                 Vec::new()
             }
         }
@@ -761,6 +809,9 @@ impl App {
                     self.show_left = true;
                 } else if inside_opt(self.areas.show_right) {
                     self.show_right = true;
+                } else if let Some((_, nick)) = self.areas.nicks.iter().find(|(r, _)| inside(*r)) {
+                    let nick = nick.clone();
+                    return self.open_private(&nick);
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
@@ -904,6 +955,25 @@ mod tests {
         assert!(app.status.contains("нужен адрес"));
         assert!(type_text(&mut app, "/frobnicate").is_empty());
         assert!(app.status.contains("неизвестная команда"));
+
+        // `/msg JID text` opens the chat and sends the text there, also from a room.
+        let sent = type_text(&mut app, "/msg  xff@example.org  привет, как ты ");
+        assert!(
+            sent.contains(&Action::Send {
+                account: jid("me@example.org"),
+                to: jid("xff@example.org"),
+                room: false,
+                text: "привет, как ты".into(),
+                encrypted: true,
+            }),
+            "{sent:?}"
+        );
+        assert_eq!(app.current().unwrap().jid, jid("xff@example.org"));
+        assert!(
+            !type_text(&mut app, "/msg xff@example.org")
+                .iter()
+                .any(|a| matches!(a, Action::Send { .. }))
+        );
     }
 
     #[test]
@@ -921,6 +991,7 @@ mod tests {
             direction: Direction::Incoming,
             encrypted: true,
             text: Some("hi".into()),
+            at: None,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);
         app.on_incoming(&me, &incoming("carol@example.org"), 0);
