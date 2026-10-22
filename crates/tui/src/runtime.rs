@@ -539,7 +539,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             {
                 let who = message.nick.clone().unwrap_or_else(|| message.sender.to_string());
                 let room = message.nick.as_ref().map(|_| message.peer.to_string());
-                crate::notify::run(&crate::notify::desktop(&who, room.as_deref(), text));
+                crate::notify::run(&crate::notify::desktop(
+                    message.peer.as_str(),
+                    &who,
+                    room.as_deref(),
+                    text,
+                ));
             }
             for action in app.on_incoming(&account, &message, at) {
                 tokio::spawn(perform(action, shared.clone()));

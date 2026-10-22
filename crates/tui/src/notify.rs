@@ -159,8 +159,9 @@ pub fn run(command: &[String]) {
     }
 }
 
-/// The notify-send command for a message from `who` (in `room`, if one).
-pub fn desktop(who: &str, room: Option<&str>, text: &str) -> Vec<String> {
+/// The notify-send command for a message from `who` (in `room`, if one). One chat's
+/// notifications replace each other where the daemon can (dunst's stack tag), not pile up.
+pub fn desktop(chat: &str, who: &str, room: Option<&str>, text: &str) -> Vec<String> {
     let title = match room {
         Some(room) => format!("{who} · {room}"),
         None => who.to_owned(),
@@ -169,6 +170,7 @@ pub fn desktop(who: &str, room: Option<&str>, text: &str) -> Vec<String> {
     vec![
         "notify-send".into(),
         "--app-name=omtalk".into(),
+        format!("--hint=string:x-dunst-stack-tag:omtalk {chat}"),
         "--".into(),
         title,
         body,

@@ -779,12 +779,13 @@ impl App {
     }
 
     /// What a message from someone, coming now, calls for. Nothing while one is looking
-    /// at its chat; else by kind: private, one's nick named in a room, any.
+    /// at its chat, nor for one read from an archive (a room's history on entering, what
+    /// came while away); else by kind: private, one's nick named in a room, any.
     pub fn alert_for(&self, account: &BareJid, message: &Incoming) -> crate::notify::Alert {
         let Some(text) = &message.text else {
             return Default::default();
         };
-        if message.direction != Direction::Incoming {
+        if message.direction != Direction::Incoming || message.at.is_some() {
             return Default::default();
         }
         let chat = self

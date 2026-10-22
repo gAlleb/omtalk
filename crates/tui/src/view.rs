@@ -3587,6 +3587,12 @@ mod tests {
         assert!(chatter.bell && !chatter.sound && !chatter.desktop, "{chatter:?}");
         let named = app.alert_for(&me, &said("me, глянь"));
         assert!(named.bell && named.sound && named.desktop, "{named:?}");
+        // History read from the archive (a room's, on entering): nothing at all.
+        let history = omtalk_omemo::Incoming {
+            at: Some(1),
+            ..said("me, глянь")
+        };
+        assert_eq!(app.alert_for(&me, &history), Default::default());
         let _ = room;
     }
 
