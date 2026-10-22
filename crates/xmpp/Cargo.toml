@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
 futures = "0.3.34"
 getrandom = "0.4"
 sasl = "0.5"
+sha1 = "0.10"
 thiserror = "2.0.21"
 tokio = { version = "1.54.0", features = ["rt", "sync", "macros", "time"] }
 tokio-xmpp = { version = "6.0.0", default-features = false, features = ["starttls", "direct-tls", "ring", "rustls-native-certs"] }

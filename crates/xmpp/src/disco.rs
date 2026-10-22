@@ -26,6 +26,8 @@ const FEATURES: &[&str] = &[
     ns::DISPLAYED_MARKERS,
     "urn:xmpp:mds:displayed:0+notify",
     ns::CHATSTATES,
+    // Avatars: a change is pushed (XEP-0084).
+    "urn:xmpp:avatar:metadata+notify",
 ];
 
 pub fn info() -> DiscoInfoResult {

@@ -210,6 +210,7 @@ impl Settings {
                 "Чем открывать файлы",
                 Value::Text(ui.viewer.clone()),
             ),
+            row("ui", "avatars", "Аватарки", Value::Bool(ui.avatars)),
             row("notify", "sound_on", "Звук", when(&notify.sound_on)),
             row(
                 "notify",

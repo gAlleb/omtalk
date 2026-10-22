@@ -6,6 +6,7 @@
 
 mod account;
 mod accounts;
+pub mod avatar;
 pub mod bookmarks;
 pub mod chatstates;
 mod config;

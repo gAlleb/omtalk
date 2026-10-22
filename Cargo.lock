@@ -2088,12 +2088,14 @@ dependencies = [
 name = "omtalk-xmpp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "getrandom 0.4.3",
  "omemo",
  "omemo-xml",
  "omtalk-xmpp",
  "sasl",
+ "sha1 0.10.7",
  "thiserror 2.0.21",
  "tokio",
  "tokio-xmpp",

@@ -730,3 +730,21 @@ async fn a_nick_change_is_seen_as_the_same_person_renamed() {
     );
     assert_eq!(renamed.real_jid.as_ref(), Some(guest.jid()));
 }
+
+#[tokio::test]
+async fn an_avatar_is_published_and_read_by_another_from_pep_and_vcard() {
+    use omtalk_xmpp::avatar;
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u16")).await;
+    let reader = accounts.add(config("u17")).await;
+    online(&mut events, &[&owner, &reader]).await;
+    let picture = format!("not really a png {}", rand_suffix()).into_bytes();
+    owner.publish_avatar(&picture, 1, 1).await.unwrap();
+
+    let id = reader.avatar_id(owner.jid()).await.unwrap().expect("an avatar");
+    assert_eq!(id, avatar::hash(&picture));
+    assert_eq!(reader.avatar(owner.jid(), &id).await.unwrap(), picture);
+    assert!(reader.avatar(owner.jid(), "0000").await.is_err(), "not that one");
+    // Prosody hands it on as the vCard's photo too, for clients that read only that.
+    assert_eq!(reader.vcard_avatar(owner.jid()).await.unwrap(), Some(picture));
+}

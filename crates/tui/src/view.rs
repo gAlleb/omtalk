@@ -75,7 +75,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     }
     center_pane(frame, app, center, pictures);
     if show_right {
-        side(frame, app, right);
+        side(frame, app, right, pictures);
     } else {
         strip(frame, right, "‹");
         app.areas.show_right = Some(right);
@@ -1263,7 +1263,10 @@ pub fn input_rows(input: &str, cursor: usize, width: usize) -> (Vec<String>, (us
     (rows, place)
 }
 
-fn side(frame: &mut Frame, app: &mut App, area: Rect) {
+/// How wide an avatar is drawn, in cells; half as many rows make it square.
+const AVATAR_WIDTH: u16 = 12;
+
+fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
     let title = match app.current() {
         Some(chat) if chat.is_room() => format!("Участники {}", chat.occupants.len()),
         Some(chat) if chat.kind == ChatKind::Server => "Аккаунт".to_owned(),
@@ -1273,12 +1276,24 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = pane(&title, false).title(
         TextLine::from(Span::styled(" › ", Style::default().fg(theme::dim()))).alignment(Alignment::Right),
     );
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
     app.areas.right = Some(area);
     app.areas.hide_right = Some(Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1));
 
     let Some(chat) = app.current() else { return };
+    // The avatar on top, the rest below it.
+    let avatar = app.avatar_of(&chat.jid).and_then(|key| pictures.get_mut(&key));
+    if let Some(protocol) = avatar {
+        let width = AVATAR_WIDTH.min(inner.width);
+        let height = width / 2;
+        if inner.height > height + 4 {
+            let place = Rect::new(inner.x + (inner.width - width) / 2, inner.y, width, height);
+            frame.render_stateful_widget(StatefulImage::default(), place, protocol);
+            inner.y += height + 1;
+            inner.height -= height + 1;
+        }
+    }
     let mut rows: Vec<TextLine> = Vec::new();
     let mut nicks = Vec::new();
     let mut devices_from = None;
@@ -4296,5 +4311,86 @@ mod tests {
             app.settings.as_ref().unwrap().get("ui", "mouse"),
             Some(&crate::settings::Value::Bool(false))
         );
+    }
+
+    #[test]
+    fn avatars_are_off_unless_turned_on_then_asked_once_and_drawn_on_the_right() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        let asked = |actions: &[Action]| actions.iter().any(|a| matches!(a, Action::Avatar { .. }));
+        assert!(!asked(&app.select(bob)), "off by default: nothing fetched");
+
+        // Turned on in the settings: the open chat's avatar is asked for at once.
+        app.open_settings();
+        let row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.key == "avatars")
+            .unwrap();
+        app.settings.as_mut().unwrap().cursor = row;
+        let actions = app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        assert!(
+            actions.contains(&Action::Avatar {
+                account: me.clone(),
+                jid: jid("bob@home.org"),
+                room: false
+            }),
+            "{actions:?}"
+        );
+        app.settings = None;
+        assert!(!asked(&app.select(bob)), "once");
+        assert!(app.select(room).contains(&Action::Avatar {
+            account: me.clone(),
+            jid: jid("team@muc.home.org"),
+            room: true
+        }));
+
+        // Ready: drawn on top of the right pane, the rest below it.
+        app.select(bob);
+        app.avatars.insert(jid("bob@home.org"), "abc".into());
+        let mut pictures = Pictures::new();
+        pictures.insert(
+            "avatar:abc".into(),
+            ratatui_image::picker::Picker::halfblocks()
+                .new_resize_protocol(image::DynamicImage::new_rgb8(8, 8)),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, &mut pictures)).unwrap();
+        let right = app.areas.right.unwrap();
+        let text: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| row.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let first_words = text
+            .iter()
+            .position(|l| {
+                let pane: String = l.chars().skip(right.x as usize).collect();
+                pane.starts_with("│в сети")
+            })
+            .unwrap();
+        assert!(
+            first_words as u16 > right.y + AVATAR_WIDTH / 2,
+            "below the picture:\n{}",
+            text.join("\n")
+        );
+
+        // Turned off: not drawn.
+        app.show_avatars = false;
+        assert_eq!(app.avatar_of(&jid("bob@home.org")), None);
     }
 }

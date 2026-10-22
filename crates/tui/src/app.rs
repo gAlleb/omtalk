@@ -397,6 +397,12 @@ pub enum Action {
         room: BareJid,
         jid: BareJid,
     },
+    /// Fetch the avatar of a person or a room, unless it is known.
+    Avatar {
+        account: BareJid,
+        jid: BareJid,
+        room: bool,
+    },
     /// Read who belongs to a room, present or not.
     Members {
         account: BareJid,
@@ -574,6 +580,12 @@ pub struct App {
     pub keys: Option<crate::keys::Keys>,
     /// The settings window, likewise.
     pub settings: Option<crate::settings::Settings>,
+    /// Avatars are shown (and fetched).
+    pub show_avatars: bool,
+    /// Whose avatar is ready to draw: jid → its hash (the picture is "avatar:HASH").
+    pub avatars: BTreeMap<BareJid, String>,
+    /// Whose avatars were asked for already, by account.
+    pub avatars_asked: BTreeSet<(BareJid, BareJid)>,
     /// `[ui]` and `[notify]` as last set: the settings window starts from them.
     pub config_ui: crate::config::Ui,
     pub config_notify: crate::notify::NotifyConfig,
@@ -624,6 +636,9 @@ impl App {
             services: None,
             keys: None,
             settings: None,
+            show_avatars: false,
+            avatars: BTreeMap::new(),
+            avatars_asked: BTreeSet::new(),
             config_ui: crate::config::Ui {
                 left,
                 right,
@@ -1102,6 +1117,7 @@ impl App {
         self.selected = Some(index);
         self.active = Some(self.chats[index].account.clone());
         actions.extend(self.mark_read(index));
+        actions.extend(self.ask_avatar(index));
         let chat = &mut self.chats[index];
         chat.unread = 0;
         // A room's pane lists its members who are away: read afresh on opening.
@@ -2205,6 +2221,33 @@ impl App {
         self.keys_outcome(outcome)
     }
 
+    /// The avatar of chat `index`, asked for once while avatars are shown.
+    pub fn ask_avatar(&mut self, index: usize) -> Option<Action> {
+        let chat = self.chats.get(index)?;
+        let room = match chat.kind {
+            ChatKind::Direct => false,
+            ChatKind::Room { .. } => true,
+            ChatKind::Server => return None,
+        };
+        let key = (chat.account.clone(), chat.jid.clone());
+        if !self.show_avatars || !self.avatars_asked.insert(key) {
+            return None;
+        }
+        Some(Action::Avatar {
+            account: chat.account.clone(),
+            jid: chat.jid.clone(),
+            room,
+        })
+    }
+
+    /// The picture to draw for `jid`, if one is shown.
+    pub fn avatar_of(&self, jid: &BareJid) -> Option<String> {
+        self.show_avatars
+            .then(|| self.avatars.get(jid))
+            .flatten()
+            .map(|hash| format!("avatar:{hash}"))
+    }
+
     /// Opens the settings window on the settings as they are now, the ones changed on
     /// the way (the mouse, the widths) too.
     pub fn open_settings(&mut self) -> Vec<Action> {
@@ -2214,6 +2257,7 @@ impl App {
         ui.right = self.right_width;
         ui.read_markers = self.read_markers;
         ui.typing = self.send_typing;
+        ui.avatars = self.show_avatars;
         self.settings = Some(crate::settings::Settings::open(crate::settings::Current {
             ui: &ui,
             notify: &self.config_notify,
@@ -2298,6 +2342,11 @@ impl App {
                 self.config_ui.auto_download = *on;
                 Ok(())
             }
+            ("avatars", Value::Bool(on)) => {
+                self.show_avatars = *on;
+                self.config_ui.avatars = *on;
+                Ok(())
+            }
             ("viewer", Value::Text(text)) if text.is_empty() => Err("нужна программа".into()),
             ("viewer", Value::Text(text)) => {
                 self.config_ui.viewer = text.clone();
@@ -2313,15 +2362,22 @@ impl App {
             }
             _ => Ok(()),
         };
+        // Turned on: the open chat's avatar is asked for at once.
+        let avatar = match (setting.key, used.is_ok()) {
+            ("avatars", true) => self.selected.and_then(|i| self.ask_avatar(i)),
+            _ => None,
+        };
         let settings = self.settings.as_mut().expect("open");
         match used {
             Ok(()) => {
                 settings.problem = None;
-                vec![Action::Setting {
+                let mut actions = vec![Action::Setting {
                     section: setting.section,
                     key: setting.key,
                     value: setting.value.written(),
-                }]
+                }];
+                actions.extend(avatar);
+                actions
             }
             Err(problem) => {
                 settings.problem = Some(problem);

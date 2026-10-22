@@ -14,9 +14,9 @@ use futures::StreamExt;
 use omemo::OwnKeys;
 use omtalk_omemo::{Direction, Incoming, Omemo, State};
 use omtalk_store::{Store, StoredMessage};
-use omtalk_xmpp::receipts;
 use omtalk_xmpp::services::{CommandAction, CommandStep};
 use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Jid, Server, muc};
+use omtalk_xmpp::{avatar, receipts};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
@@ -155,6 +155,11 @@ enum Msg {
         account: BareJid,
         message: Incoming,
         at: i64,
+    },
+    /// The avatar of `jid` is ready to draw ("avatar:HASH" among the pictures), or gone.
+    Avatar {
+        jid: BareJid,
+        hash: Option<String>,
     },
     Notice {
         account: BareJid,
@@ -296,6 +301,10 @@ struct Shared {
     viewer: String,
     /// Fetch shared files as they come; else on a click.
     auto_download: bool,
+    /// Avatars are fetched (the settings window switches it).
+    avatars: Arc<std::sync::atomic::AtomicBool>,
+    /// Avatars being fetched now, by hash or by whose: one fetch each.
+    avatar_loads: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     store: Store,
     tx: mpsc::UnboundedSender<Msg>,
 }
@@ -325,6 +334,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         cache: config::cache_dir().join("media"),
         viewer: options.config.ui.viewer.clone(),
         auto_download: options.config.ui.auto_download,
+        avatars: Arc::new(options.config.ui.avatars.into()),
+        avatar_loads: Arc::default(),
         store: store.clone(),
         tx,
     };
@@ -354,6 +365,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     }
     app.notify = notify;
     app.config_ui = ui.clone();
+    app.show_avatars = ui.avatars;
     app.config_notify = options.config.notify.clone();
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
@@ -482,6 +494,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 match (key, &value) {
                     ("auto_download", Written::Bool(on)) => shared.auto_download = *on,
                     ("viewer", Written::Text(text)) => shared.viewer = text.clone(),
+                    ("avatars", Written::Bool(on)) => {
+                        shared.avatars.store(*on, std::sync::atomic::Ordering::Relaxed)
+                    }
                     _ => {}
                 }
                 let (path, tx) = (options.config_path.clone(), shared.tx.clone());
@@ -598,6 +613,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::Avatar { jid, hash } => match hash {
+            Some(hash) => drop(app.avatars.insert(jid, hash)),
+            None => drop(app.avatars.remove(&jid)),
+        },
         Msg::RoomName { account, room, name } => {
             if let Some(chat) = app
                 .chats
@@ -901,7 +920,35 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     });
                 }
             }
+            Event::Pep {
+                from, node, items, ..
+            } if node == avatar::METADATA => match avatar::metadata_of(items) {
+                Some(Some(id)) => drop(tokio::spawn(load_avatar(
+                    shared.clone(),
+                    xmpp.clone(),
+                    from.clone(),
+                    AvatarFrom::Pep(id),
+                ))),
+                Some(None) => tell(Msg::Avatar {
+                    jid: from.clone(),
+                    hash: None,
+                }),
+                None => {}
+            },
             Event::Presence(presence) => {
+                // A vCard avatar's hash, on a person's presence (not an occupant's).
+                if let Some(Some(hash)) = avatar::photo_of(presence)
+                    && muc::occupant(presence).is_none()
+                    && let Some(from) = presence.from.as_ref().map(|f| f.to_bare())
+                    && from != account
+                {
+                    tokio::spawn(load_avatar(
+                        shared.clone(),
+                        xmpp.clone(),
+                        from,
+                        AvatarFrom::VCard(Some(hash)),
+                    ));
+                }
                 if let Some(online) = omtalk_xmpp::presence::online(presence) {
                     tell(Msg::Online {
                         account: account.clone(),
@@ -1744,6 +1791,15 @@ async fn perform(action: Action, shared: Shared) {
                 }),
             }
         }
+        Action::Avatar { account, jid, room } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let from = if room {
+                AvatarFrom::VCard(None)
+            } else {
+                AvatarFrom::Ask
+            };
+            load_avatar(shared.clone(), xmpp, jid, from).await;
+        }
         Action::Members { account, room } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let members = read_members(&xmpp, &room).await;
@@ -1882,6 +1938,89 @@ fn fetch_if_media(text: &str, shared: &Shared) {
 }
 
 /// Fetches (and decrypts) a shared file into the cache, and tells the interface.
+/// Where an avatar is to be read from.
+enum AvatarFrom {
+    /// PEP, this one (from a notification).
+    Pep(String),
+    /// The vCard, whose hash, if known, may already be in the cache.
+    VCard(Option<String>),
+    /// Whatever there is: PEP, else the vCard.
+    Ask,
+}
+
+/// Reads the avatar of `jid` (from the cache if it is there), decodes it and hands it to
+/// the view; tells "none" when there is none.
+async fn load_avatar(shared: Shared, xmpp: Account, jid: BareJid, from: AvatarFrom) {
+    use std::sync::atomic::Ordering;
+    if !shared.avatars.load(Ordering::Relaxed) {
+        return;
+    }
+    let dir = config::cache_dir().join("avatars");
+    let cached = |hash: &str| dir.join(hash).is_file();
+    // One fetch at a time per picture (or, while it is not known, per person).
+    let busy = match &from {
+        AvatarFrom::Pep(id) | AvatarFrom::VCard(Some(id)) => id.clone(),
+        _ => jid.to_string(),
+    };
+    if !shared.avatar_loads.lock().unwrap().insert(busy.clone()) {
+        return;
+    }
+    let from = match from {
+        AvatarFrom::Ask => match xmpp.avatar_id(&jid).await {
+            Ok(Some(id)) => AvatarFrom::Pep(id),
+            _ => AvatarFrom::VCard(None),
+        },
+        from => from,
+    };
+    let fetched: Result<Option<String>, String> = async {
+        match from {
+            AvatarFrom::Pep(id) | AvatarFrom::VCard(Some(id)) if cached(&id) => Ok(Some(id)),
+            AvatarFrom::Pep(id) => {
+                let bytes = xmpp.avatar(&jid, &id).await.map_err(|e| e.to_string())?;
+                save_avatar(&dir, &bytes).map(Some)
+            }
+            _ => match xmpp.vcard_avatar(&jid).await.map_err(|e| e.to_string())? {
+                Some(bytes) => save_avatar(&dir, &bytes).map(Some),
+                None => Ok(None),
+            },
+        }
+    }
+    .await;
+    shared.avatar_loads.lock().unwrap().remove(&busy);
+    let hash = match fetched {
+        Ok(Some(hash)) => hash,
+        // None now: nothing is drawn. Not to be had just now: what was drawn stays.
+        Ok(None) => {
+            let _ = shared.tx.send(Msg::Avatar { jid, hash: None });
+            return;
+        }
+        Err(_) => return,
+    };
+    let path = dir.join(&hash);
+    let tx = shared.tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let reader = image::ImageReader::open(&path).and_then(|r| r.with_guessed_format());
+        if let Ok(Ok(image)) = reader.map(|r| r.decode()) {
+            let _ = tx.send(Msg::Picture {
+                url: format!("avatar:{hash}"),
+                image,
+            });
+            let _ = tx.send(Msg::Avatar {
+                jid,
+                hash: Some(hash),
+            });
+        }
+    });
+}
+
+/// Keeps an avatar under its hash; returns the hash.
+fn save_avatar(dir: &std::path::Path, bytes: &[u8]) -> Result<String, String> {
+    let hash = avatar::hash(bytes);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(&hash), bytes).map_err(|e| e.to_string())?;
+    Ok(hash)
+}
+
 async fn fetch_media(link: String, shared: Shared) {
     let Some(media) = omtalk_media::Media::from_text(&link) else {
         return;
