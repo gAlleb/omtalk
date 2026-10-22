@@ -142,6 +142,10 @@ pub struct Chat {
     pub occupants: BTreeMap<String, Option<BareJid>>,
     /// A room's members (owners, admins, members), present or not; read when it opens.
     pub members: Vec<BareJid>,
+    /// A room's own name, if it has one.
+    pub name: Option<String>,
+    /// A room's subject (topic), as it last said.
+    pub topic: Option<String>,
     /// The peer's devices; `None` until read.
     pub devices: Option<Vec<DeviceRow>>,
     /// The newest message here whose sender asked to learn when it is read, not yet
@@ -164,6 +168,8 @@ impl Chat {
             scroll: 0,
             occupants: BTreeMap::new(),
             members: Vec::new(),
+            name: None,
+            topic: None,
             devices: None,
             markable: None,
             read_up_to: None,
@@ -177,6 +183,9 @@ impl Chat {
     pub fn title(&self) -> String {
         if self.kind == ChatKind::Server {
             return "сервер".to_owned();
+        }
+        if let Some(name) = &self.name {
+            return name.clone();
         }
         match self.jid.node() {
             Some(node) => node.to_string(),
@@ -350,6 +359,36 @@ pub enum Action {
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
+    /// Read a room's name.
+    RoomName {
+        account: BareJid,
+        room: BareJid,
+    },
+    /// Set a room's subject.
+    SetTopic {
+        account: BareJid,
+        room: BareJid,
+        topic: String,
+    },
+    /// Name a room (as its owner).
+    SetRoomName {
+        account: BareJid,
+        room: BareJid,
+        name: String,
+    },
+    /// Make a room: members only, real addresses shown (as OMEMO needs), kept; and enter.
+    CreateRoom {
+        account: BareJid,
+        room: BareJid,
+        name: Option<String>,
+        nick: Option<String>,
+    },
+    /// Let `jid` into a room (as a member) and invite them.
+    Invite {
+        account: BareJid,
+        room: BareJid,
+        jid: BareJid,
+    },
     /// Read who belongs to a room, present or not.
     Members {
         account: BareJid,
@@ -819,6 +858,31 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// A room's subject came: on entering (said quietly), or changed by `by`.
+    pub fn topic(&mut self, account: &BareJid, room: &BareJid, by: Option<String>, topic: String, at: i64) {
+        let Some(index) = self
+            .chats
+            .iter()
+            .position(|c| &c.account == account && &c.jid == room)
+        else {
+            return;
+        };
+        let topic = topic.trim().to_owned();
+        let before = self.chats[index].topic.clone();
+        self.chats[index].topic = (!topic.is_empty()).then(|| topic.clone());
+        // Telling it on entering is not news; a change by someone is.
+        if let Some(by) = by.filter(|_| before.is_some() || !topic.is_empty())
+            && before.as_deref() != Some(topic.as_str())
+        {
+            let text = if topic.is_empty() {
+                format!("{by} убрал(а) тему")
+            } else {
+                format!("{by} сменил(а) тему: {topic}")
+            };
+            self.notice(Some(index), text, at);
+        }
+    }
+
     /// A line in the account's server channel only: news, not a problem.
     pub fn server_log(&mut self, account: &BareJid, text: impl Into<String>, at: i64) {
         let index = self.server_chat(account);
@@ -982,6 +1046,12 @@ impl App {
                 account: chat.account.clone(),
                 room: chat.jid.clone(),
             });
+            if chat.name.is_none() {
+                actions.push(Action::RoomName {
+                    account: chat.account.clone(),
+                    room: chat.jid.clone(),
+                });
+            }
         }
         // A direct chat's right pane lists the peer's devices; read them afresh each time
         // it is opened, since devices come and go.
@@ -1630,6 +1700,70 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/topic", _) => match self.current().filter(|c| c.is_room()) {
+                Some(chat) => {
+                    let topic = line[name.len()..].trim().to_owned();
+                    if topic.is_empty() {
+                        let now = chat.topic.clone().unwrap_or_else(|| "темы нет".into());
+                        return self.say(&format!("тема: {now} · /topic ТЕКСТ — сменить"));
+                    }
+                    Ok(vec![Action::SetTopic {
+                        account: chat.account.clone(),
+                        room: chat.jid.clone(),
+                        topic,
+                    }])
+                }
+                None => Err("это не комната".to_owned()),
+            },
+            ("/name", _) => match self.current().filter(|c| c.is_room()) {
+                Some(chat) => {
+                    let new = line[name.len()..].trim().to_owned();
+                    if new.is_empty() {
+                        return self.say("/name НАЗВАНИЕ — сменить название комнаты (только владелец)");
+                    }
+                    Ok(vec![Action::SetRoomName {
+                        account: chat.account.clone(),
+                        room: chat.jid.clone(),
+                        name: new,
+                    }])
+                }
+                None => Err("это не комната".to_owned()),
+            },
+            ("/create", _) => {
+                let mut rest = line[name.len()..].trim().splitn(2, char::is_whitespace);
+                let address = rest.next().unwrap_or_default();
+                let title = rest
+                    .next()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned);
+                if address.is_empty() {
+                    return self.say("/create ИМЯ [НАЗВАНИЕ] — новая закрытая комната; ИМЯ или имя@сервис");
+                }
+                // A bare name goes to the account's room service, which the runtime finds.
+                let room = if address.contains('@') {
+                    address.parse::<BareJid>().ok()
+                } else {
+                    format!("{address}@rooms.invalid").parse::<BareJid>().ok()
+                };
+                match room {
+                    Some(room) => Ok(vec![Action::CreateRoom {
+                        account,
+                        room,
+                        name: title,
+                        nick: None,
+                    }]),
+                    None => Err(format!("{address}: не годится для адреса комнаты")),
+                }
+            }
+            ("/invite", Some(jid)) => match self.current().filter(|c| c.is_room()) {
+                Some(chat) => Ok(vec![Action::Invite {
+                    account: chat.account.clone(),
+                    room: chat.jid.clone(),
+                    jid,
+                }]),
+                None => Err("откройте комнату, в которую позвать".to_owned()),
+            },
             ("/close", _) => match self.selected {
                 Some(index) => return self.close_chat(index),
                 None => Err("нет открытого чата".to_owned()),
@@ -1644,7 +1778,7 @@ impl App {
                 self.focus = Focus::Input;
                 Ok(Vec::new())
             }
-            ("/msg" | "/join" | "/add" | "/accept" | "/refuse", None) => {
+            ("/msg" | "/join" | "/add" | "/accept" | "/refuse" | "/invite", None) => {
                 Err(format!("{name}: нужен адрес вида name@server"))
             }
             _ => Err(format!("нет команды {name}")),

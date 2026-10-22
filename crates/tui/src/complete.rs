@@ -80,6 +80,26 @@ pub const COMMANDS: &[Command] = &[
         about: "ключи OMEMO: отпечатки, доверие, старые устройства",
     },
     Command {
+        name: "/create",
+        args: "ИМЯ [НАЗВАНИЕ]",
+        about: "новая закрытая комната (для OMEMO)",
+    },
+    Command {
+        name: "/invite",
+        args: "JID",
+        about: "позвать в комнату (сделать участником)",
+    },
+    Command {
+        name: "/topic",
+        args: "[ТЕКСТ]",
+        about: "тема комнаты: показать или сменить",
+    },
+    Command {
+        name: "/name",
+        args: "НАЗВАНИЕ",
+        about: "название комнаты (только владелец)",
+    },
+    Command {
         name: "/close",
         args: "",
         about: "закрыть чат; комнату — покинуть",
@@ -150,7 +170,9 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     let start = before[..start_byte].chars().count();
     let found = match command {
         None if typed.starts_with('/') => matching(COMMANDS.iter().map(|c| c.name), typed, " "),
-        Some("/msg" | "/add" | "/accept" | "/refuse" | "/keys") if is_first_argument(&before, start_byte) => {
+        Some("/msg" | "/add" | "/accept" | "/refuse" | "/keys" | "/invite")
+            if is_first_argument(&before, start_byte) =>
+        {
             matching(context.people.iter().map(String::as_str), typed, " ")
         }
         Some("/join") if is_first_argument(&before, start_byte) => {

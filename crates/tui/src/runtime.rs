@@ -167,6 +167,8 @@ enum Msg {
         account: BareJid,
         room: BareJid,
         nick: String,
+        /// Open it: the user entered it just now.
+        open: bool,
     },
     Left {
         account: BareJid,
@@ -223,6 +225,19 @@ enum Msg {
     },
     /// A file to offer for sending (a picture pasted from the clipboard).
     Offer(PathBuf),
+    /// A room's name.
+    RoomName {
+        account: BareJid,
+        room: BareJid,
+        name: Option<String>,
+    },
+    /// A room's subject; `by` is who changed it, none when it is told on entering.
+    Topic {
+        account: BareJid,
+        room: BareJid,
+        by: Option<String>,
+        topic: String,
+    },
     /// Who belongs to a room.
     Members {
         account: BareJid,
@@ -553,6 +568,21 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::RoomName { account, room, name } => {
+            if let Some(chat) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == room)
+            {
+                chat.name = name;
+            }
+        }
+        Msg::Topic {
+            account,
+            room,
+            by,
+            topic,
+        } => app.topic(&account, &room, by, topic, now()),
         Msg::Members {
             account,
             room,
@@ -645,7 +675,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             let index = app.chat(&account, &jid, ChatKind::Direct);
             app.chats[index].devices = Some(rows);
         }
-        Msg::Joined { account, room, nick } => {
+        Msg::Joined {
+            account,
+            room,
+            nick,
+            open,
+        } => {
             tokio::spawn(perform(
                 Action::Members {
                     account: account.clone(),
@@ -654,8 +689,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 shared.clone(),
             ));
             let index = app.chat(&account, &room, ChatKind::Room { nick });
-            if app.selected.is_none() {
-                app.select(index);
+            if open || app.selected.is_none() {
+                for action in app.select(index) {
+                    tokio::spawn(perform(action, shared.clone()));
+                }
+                if open {
+                    app.focus = crate::app::Focus::Input;
+                }
             }
         }
         Msg::Left { account, room } => {
@@ -675,11 +715,18 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             real,
             present,
         } => {
-            if let Some(chat) = app
+            // Entering, the room tells who is there before it confirms the entry: the
+            // chat is made by the first of them, or they would be lost.
+            let index = match app
                 .chats
-                .iter_mut()
-                .find(|c| c.account == account && c.jid == room)
+                .iter()
+                .position(|c| c.account == account && c.jid == room)
             {
+                Some(index) => Some(index),
+                None if present => Some(app.chat(&account, &room, ChatKind::Room { nick: String::new() })),
+                None => None,
+            };
+            if let Some(chat) = index.map(|i| &mut app.chats[i]) {
                 if present {
                     chat.occupants.insert(nick, real);
                 } else {
@@ -743,6 +790,31 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 text: format!("{from} хочет видеть ваш статус: /accept {from} или /refuse {from}"),
             }),
             Event::Message(message) => {
+                if let Some((room, by, topic)) = muc::subject_of(message) {
+                    tell(Msg::Topic {
+                        account: account.clone(),
+                        room,
+                        by,
+                        topic,
+                    });
+                }
+                if let Some((room, from)) = muc::invitation_of(message) {
+                    let who = from.map(|f| f.to_string()).unwrap_or_else(|| "кто-то".into());
+                    tell(Msg::Notice {
+                        account: account.clone(),
+                        chat: None,
+                        text: format!("{who} зовёт в комнату {room}: /join {room}"),
+                    });
+                }
+                if let Some(room) = muc::config_changed(message) {
+                    tokio::spawn(perform(
+                        Action::RoomName {
+                            account: account.clone(),
+                            room,
+                        },
+                        shared.clone(),
+                    ));
+                }
                 // Someone typing; one's own other clients' carbons say nothing here.
                 if let Some((chat, nick, state)) = omtalk_xmpp::chatstates::state_of(message)
                     && chat != account
@@ -891,7 +963,7 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
         }),
     }
     for (room, _) in shared.store.rooms(&account).unwrap_or_default() {
-        join(&account, &xmpp, &omemo, &shared, room, None).await;
+        join(&account, &xmpp, &omemo, &shared, room, None, false).await;
     }
 }
 
@@ -902,6 +974,9 @@ async fn join(
     shared: &Shared,
     room: BareJid,
     nick: Option<String>,
+    // Entered by the user just now: the room opens. Rooms entered again on start do not
+    // take the view.
+    open: bool,
 ) {
     let tell = |msg| drop(shared.tx.send(msg));
     // The nick: as asked, else the one the account's other clients use in this room (its
@@ -940,6 +1015,7 @@ async fn join(
                 account: account.clone(),
                 room: room.clone(),
                 nick,
+                open,
             });
             match omemo.catch_up_room(&room).await {
                 Ok(caught) => {
@@ -1080,6 +1156,24 @@ fn content_type(name: &str) -> Option<&'static str> {
         "m4a" => "audio/mp4",
         _ => return None,
     })
+}
+
+/// A room's owners, admins and members. Open rooms may not show their lists to
+/// everyone: then none.
+async fn read_members(xmpp: &Account, room: &BareJid) -> Vec<BareJid> {
+    let mut members = Vec::new();
+    for affiliation in [
+        omtalk_xmpp::Affiliation::Owner,
+        omtalk_xmpp::Affiliation::Admin,
+        omtalk_xmpp::Affiliation::Member,
+    ] {
+        if let Ok(list) = xmpp.affiliated(room, affiliation).await {
+            members.extend(list);
+        }
+    }
+    members.sort();
+    members.dedup();
+    members
 }
 
 /// The rows of the keys window: `peer`'s devices first, then one's own.
@@ -1260,7 +1354,7 @@ async fn perform(action: Action, shared: Shared) {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
-            join(&account, &xmpp, &omemo, &shared, room, nick).await;
+            join(&account, &xmpp, &omemo, &shared, room, nick, true).await;
         }
         Action::Leave { account, room, nick } => {
             let Some((xmpp, _)) = get(&account) else { return };
@@ -1470,21 +1564,119 @@ async fn perform(action: Action, shared: Shared) {
                 }
             }
         }
+        Action::RoomName { account, room } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            if let Ok(name) = xmpp.room_name(&room).await {
+                tell(Msg::RoomName { account, room, name });
+            }
+        }
+        Action::SetTopic { account, room, topic } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            if let Err(e) = xmpp.set_subject(&room, &topic).await {
+                tell(Msg::Notice {
+                    account,
+                    chat: Some(room),
+                    text: format!("тема не сменилась: {}", service_error(&e)),
+                });
+            }
+        }
+        Action::SetRoomName { account, room, name } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            match xmpp.set_room_name(&room, &name).await {
+                Ok(()) => tell(Msg::RoomName {
+                    account,
+                    room,
+                    name: Some(name),
+                }),
+                Err(e) => tell(Msg::Notice {
+                    account,
+                    chat: Some(room),
+                    text: format!("название не сменилось: {}", service_error(&e)),
+                }),
+            }
+        }
+        Action::CreateRoom {
+            account,
+            room,
+            name,
+            nick,
+        } => {
+            let Some((xmpp, omemo)) = get(&account) else {
+                return;
+            };
+            // A bare name: on the account's own room service.
+            let room = if room.domain().as_str() == "rooms.invalid" {
+                match xmpp.rooms_service().await {
+                    Ok(Some(service)) => match format!(
+                        "{}@{service}",
+                        room.node().map(|n| n.as_str()).unwrap_or_default()
+                    )
+                    .parse()
+                    {
+                        Ok(room) => room,
+                        Err(_) => return,
+                    },
+                    _ => {
+                        tell(Msg::Notice {
+                            account,
+                            chat: None,
+                            text: "у сервера нет сервиса комнат: укажите имя@сервис".into(),
+                        });
+                        return;
+                    }
+                }
+            } else {
+                room
+            };
+            join(&account, &xmpp, &omemo, &shared, room.clone(), nick, true).await;
+            // The room was just made and is locked until configured: private, as OMEMO
+            // in a room needs, kept, and named.
+            match xmpp.make_private_named(&room, name.as_deref()).await {
+                Ok(()) => {
+                    tell(Msg::Log {
+                        account: account.clone(),
+                        text: format!("создана комната {room}"),
+                    });
+                    tell(Msg::RoomName { account, room, name });
+                }
+                Err(e) => tell(Msg::Notice {
+                    account,
+                    chat: Some(room),
+                    text: format!(
+                        "комната не настроилась (может, она уже была чужой): {}",
+                        service_error(&e)
+                    ),
+                }),
+            }
+        }
+        Action::Invite { account, room, jid } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let made = xmpp
+                .set_affiliation(&room, &jid, omtalk_xmpp::Affiliation::Member)
+                .await;
+            let result = match made {
+                Ok(()) => xmpp.invite(&room, &jid).await,
+                Err(e) => Err(e),
+            };
+            let text = match result {
+                Ok(()) => format!("{jid} позван(а) в комнату"),
+                Err(e) => format!("{jid} не позвать: {}", service_error(&e)),
+            };
+            tell(Msg::Notice {
+                account: account.clone(),
+                chat: Some(room.clone()),
+                text,
+            });
+            let members = read_members(&xmpp, &room).await;
+            tell(Msg::Members {
+                account,
+                room,
+                members,
+            });
+        }
         Action::Members { account, room } => {
             let Some((xmpp, _)) = get(&account) else { return };
-            // Open rooms may not show their lists to everyone: then nobody is shown away.
-            let mut members = Vec::new();
-            for affiliation in [
-                omtalk_xmpp::Affiliation::Owner,
-                omtalk_xmpp::Affiliation::Admin,
-                omtalk_xmpp::Affiliation::Member,
-            ] {
-                if let Ok(list) = xmpp.affiliated(&room, affiliation).await {
-                    members.extend(list);
-                }
-            }
-            members.sort();
-            members.dedup();
+            let members = read_members(&xmpp, &room).await;
             tell(Msg::Members {
                 account,
                 room,

@@ -637,3 +637,68 @@ async fn a_message_to_a_server_that_is_not_there_comes_back_with_why() {
     assert_eq!(id, "lost-1");
     assert!(reason.contains("сервер получателя"), "{reason}");
 }
+
+#[tokio::test]
+async fn a_room_gets_a_name_and_a_topic_that_others_see() {
+    use omtalk_xmpp::muc;
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u10")).await;
+    let guest = accounts.add(config("u11")).await;
+    online(&mut events, &[&owner, &guest]).await;
+    let room: BareJid = format!("topic-{}@muc.localhost", std::process::id())
+        .parse()
+        .unwrap();
+    owner.join(&room, "хозяин").await.unwrap();
+    // A new room stays locked until its owner configures it; naming it does.
+    owner.set_room_name(&room, "Комната для тестов").await.unwrap();
+    guest.join(&room, "гость").await.unwrap();
+    assert_eq!(
+        guest.room_name(&room).await.unwrap().as_deref(),
+        Some("Комната для тестов")
+    );
+
+    owner.set_subject(&room, "сегодня про OMEMO").await.unwrap();
+    let (said_in, by, subject) = wait_for(&mut events, |e| match &e.event {
+        // The room tells its subject (none yet) on entering, then the change.
+        Event::Message(m) if e.account == *guest.jid() => {
+            muc::subject_of(m).filter(|(_, _, s)| !s.is_empty())
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        (said_in, by.as_deref(), subject.as_str()),
+        (room.clone(), Some("хозяин"), "сегодня про OMEMO")
+    );
+}
+
+#[tokio::test]
+async fn an_invited_account_hears_of_it() {
+    use omtalk_xmpp::muc;
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u12")).await;
+    let friend = accounts.add(config("u13")).await;
+    online(&mut events, &[&owner, &friend]).await;
+    let room: BareJid = format!("invite-{}@muc.localhost", std::process::id())
+        .parse()
+        .unwrap();
+    owner.join(&room, "хозяин").await.unwrap();
+    owner.make_private_named(&room, Some("Для своих")).await.unwrap();
+    owner
+        .set_affiliation(&room, friend.jid(), omtalk_xmpp::Affiliation::Member)
+        .await
+        .unwrap();
+    owner.invite(&room, friend.jid()).await.unwrap();
+    let (to, from) = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for(&mut events, |e| match &e.event {
+            Event::Message(m) if e.account == *friend.jid() => muc::invitation_of(m),
+            _ => None,
+        }),
+    )
+    .await
+    .expect("the invitation arrives");
+    assert_eq!((to, from), (room.clone(), Some(owner.jid().clone())));
+    // A member now: the room lets them in.
+    friend.join(&room, "друг").await.unwrap();
+}

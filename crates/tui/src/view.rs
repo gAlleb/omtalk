@@ -383,6 +383,11 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             };
             (chat.title(), format!("{} · {seen}", chat.jid))
         }
+        // A room: its topic beside its name, else its address.
+        Some(chat) if chat.is_room() => {
+            let room = chat.topic.clone().unwrap_or_else(|| chat.jid.to_string());
+            (chat.title(), truncate(&room, (area.width as usize / 2).max(10)))
+        }
         Some(chat) => (chat.title(), chat.jid.to_string()),
         None => ("omtalk".to_owned(), String::new()),
     };
@@ -3841,5 +3846,75 @@ mod tests {
         ));
         app.reply_here();
         assert_eq!(app.replying.unwrap().quote, "встреча в пять");
+    }
+
+    #[test]
+    fn a_rooms_name_and_topic_show_and_commands_set_them() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        // Told on entering: quiet. Changed by someone: said.
+        app.topic(&me, &jid("team@muc.home.org"), None, "старая тема".into(), 1);
+        assert!(app.chats[room].lines.is_empty());
+        app.topic(
+            &me,
+            &jid("team@muc.home.org"),
+            Some("Алиса".into()),
+            "новая тема".into(),
+            2,
+        );
+        assert!(
+            app.chats[room].lines[0]
+                .text
+                .contains("Алиса сменил(а) тему: новая тема")
+        );
+        app.chats[room].name = Some("Команда".into());
+        let text = screen(&mut app, 120, 20);
+        assert!(text.contains("Команда") && text.contains("новая тема"), "{text}");
+
+        let typed = |app: &mut App, line: &str| {
+            app.focus = Focus::Input;
+            line.chars()
+                .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+            let mut actions = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            actions.retain(|a| !matches!(a, Action::ChatState { .. }));
+            actions
+        };
+        let room_jid = jid("team@muc.home.org");
+        assert_eq!(
+            typed(&mut app, "/topic про релиз"),
+            [Action::SetTopic {
+                account: me.clone(),
+                room: room_jid.clone(),
+                topic: "про релиз".into()
+            }]
+        );
+        assert_eq!(
+            typed(&mut app, "/name Команда релиза"),
+            [Action::SetRoomName {
+                account: me.clone(),
+                room: room_jid.clone(),
+                name: "Команда релиза".into()
+            }]
+        );
+        assert_eq!(
+            typed(&mut app, "/invite bob@home.org"),
+            [Action::Invite {
+                account: me.clone(),
+                room: room_jid,
+                jid: jid("bob@home.org")
+            }]
+        );
+        let made = typed(&mut app, "/create planning Планёрка");
+        assert!(
+            matches!(&made[..], [Action::CreateRoom { name: Some(n), .. }] if n == "Планёрка"),
+            "{made:?}"
+        );
     }
 }
