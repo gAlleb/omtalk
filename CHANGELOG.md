@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-10-23
 
 - **The interface speaks English by default**; `[ui] language = "ru"` or the settings window switches it to Russian, at once.
 - **Message styling (XEP-0393)** as in Conversations: `*strong*`, `_emphasis_`, `~strike~`, `` `code` ``, preformatted blocks and `>` quotes.
