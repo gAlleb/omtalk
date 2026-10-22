@@ -8,22 +8,22 @@
 //! # direct_tls = "xmpp.example.org:5223"
 //!
 //! [ui]
-//! leader = "ctrl+x"    # press it, let go, then a letter (as tmux's prefix); a list shows
+//! leader = "ctrl+x"     # press it, let go, then a letter (as tmux's prefix); a list shows
 //! modifier = "ctrl"     # ctrl, alt, super or none: held with a letter, the same shortcuts
 //! icons = "nerd"        # nerd (Nerd Font glyphs) or text
 //! viewer = "xdg-open"   # opens a shared file on click
 //! left = 26             # width of the chat list
 //! right = 30            # width of the participants pane
+//! auto_download = true  # false: shared files wait for a click ("скачать")
+//! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
+//! read_markers = true   # let senders see that their messages were read
+//! typing = true         # let chats see that one is typing
+//! bell = true           # ring the bell for a message while the window is behind
 //!
 //! [theme]               # optional: any role in a colour of one's own; the rest stay
 //! accent = "#7aa2f7"    # the terminal's (pywal and the like keep working for them)
 //! # text, background, dim, border, ok, warn, outgoing = names ("bright-red"),
 //! # "#rrggbb" or 0–255; selection_text + selection_background; nicks = ["red", …]
-//! read_markers = true   # let senders see that their messages were read
-//! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
-//! typing = true         # let chats see that one is typing
-//! bell = true           # ring the bell for a message while the window is behind
-//! auto_download = true  # false: shared files wait for a click ("скачать")
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -343,5 +343,19 @@ mod tests {
         );
         let manual: Config = toml::from_str("[ui]\nauto_download = false").unwrap();
         assert!(!manual.ui.auto_download);
+    }
+
+    #[test]
+    fn the_example_in_the_readme_is_a_valid_config() {
+        let readme = include_str!("../../../README.md");
+        let start = readme
+            .find("```toml\n# ~/.config/omtalk/config.toml")
+            .expect("the example is there");
+        let body = &readme[start + "```toml\n".len()..];
+        let example = &body[..body.find("```").unwrap()];
+        let config: Config = toml::from_str(example).expect("the README's example parses");
+        assert_eq!(config.accounts.len(), 1);
+        assert!(config.ui.auto_download && config.ui.bell);
+        config.theme.palette().expect("its colours are colours");
     }
 }

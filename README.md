@@ -36,20 +36,28 @@ target/release/omtalk                      # аккаунты из ~/.config/omt
 
 ```toml
 # ~/.config/omtalk/config.toml
-[[account]]
+[[account]]                               # аккаунтов может быть сколько угодно
 jid = "you@example.org"
 password_command = "pass show xmpp/you"   # иначе пароль спросят при запуске
+# host = "xmpp.example.org"               # сервер напрямую, без SRV (STARTTLS)
+# port = 5222
+# direct_tls = "xmpp.example.org:5223"    # или сразу TLS
 
 [ui]
-leader = "ctrl+x"   # префикс, как в tmux: нажать, отпустить, затем буква
-modifier = "ctrl"   # ctrl, alt, super или none — те же сочетания, удерживая
-icons = "nerd"      # nerd (значки Nerd Font) или text
-left = 26           # ширина списка чатов
-right = 30          # ширина правой панели
-viewer = "xdg-open" # чем открывать файл по клику
+leader = "ctrl+x"      # префикс, как в tmux: нажать, отпустить, затем буква
+modifier = "ctrl"      # ctrl, alt, super или none — те же сочетания, удерживая
+icons = "nerd"         # nerd (значки Nerd Font) или text
+left = 26              # ширина списка чатов
+right = 30             # ширина правой панели
+viewer = "xdg-open"    # чем открывать файл по клику
+auto_download = true   # false — присланные файлы только по клику («скачать»)
+mouse = true           # false — мышь у терминала (выделение как в tmux); префикс+m переключает
+read_markers = true    # false — собеседник не видит, что вы прочитали
+typing = true          # false — собеседник не видит, что вы печатаете
+bell = true            # false — без звонка терминала на новое сообщение, пока окно не в фокусе
 
-[theme]             # по желанию: любой роли — свой цвет; остальные — из палитры терминала
-accent = "#7aa2f7"  # имя (blue, bright-red, gray), #rrggbb или номер 0–255; default — терминала
+[theme]                # по желанию: любой роли — свой цвет; остальные — из палитры терминала
+accent = "#7aa2f7"     # имя (blue, bright-red, gray), #rrggbb или номер 0–255; default — терминала
 # text, background, dim, border, ok, warn, outgoing — так же
 # selection_text = "black"  selection_background = "yellow"   # выделенная строка
 # nicks = ["red", "green", "#ff8800"]                         # цвета ников по кругу
