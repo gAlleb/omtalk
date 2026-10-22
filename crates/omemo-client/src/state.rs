@@ -15,6 +15,8 @@ pub struct State {
     /// otherwise (BTBV, as Gajim and Conversations do); a device whose key changes
     /// later is refused.
     pub identities: HashMap<(BareJid, DeviceId), [u8; 32]>,
+    /// The last message id read from each archive (the account's own, by its JID).
+    pub archive_positions: HashMap<BareJid, String>,
 }
 
 impl State {
@@ -24,6 +26,7 @@ impl State {
             device_lists: HashMap::new(),
             sessions: HashMap::new(),
             identities: HashMap::new(),
+            archive_positions: HashMap::new(),
         }
     }
 

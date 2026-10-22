@@ -84,6 +84,44 @@ pub(crate) fn open_group(
     }))
 }
 
+/// Opens a message from the own archive. It is stored as sent, not as a carbon: from
+/// the sender to the recipient, the own account being one of the two.
+pub(crate) fn open_archived(own: &BareJid, message: Message) -> Option<Envelope> {
+    let sender = message.from.as_ref()?.to_bare();
+    let (peer, direction) = if &sender == own {
+        (message.to.as_ref()?.to_bare(), Direction::Outgoing)
+    } else {
+        (sender.clone(), Direction::Incoming)
+    };
+    encrypted_in(message).map(|encrypted| Envelope {
+        peer,
+        sender,
+        direction,
+        encrypted,
+    })
+}
+
+/// The id the own archive gave this live message (XEP-0359), if it gave one.
+pub(crate) fn archive_id(own: &BareJid, message: &Message) -> Option<String> {
+    let by_own = |payloads: &[xmpp_parsers::minidom::Element]| {
+        payloads
+            .iter()
+            .filter_map(|p| xmpp_parsers::stanza_id::StanzaId::try_from(p.clone()).ok())
+            .find(|id| id.by.resource().is_none() && id.by.to_bare() == *own)
+            .map(|id| id.id)
+    };
+    by_own(&message.payloads).or_else(|| {
+        // A carbon carries the id on the message inside.
+        message.payloads.iter().find_map(|p| {
+            let inner = Received::try_from(p.clone())
+                .map(|r| r.forwarded.message)
+                .or_else(|_| Sent::try_from(p.clone()).map(|s| s.forwarded.message))
+                .ok()?;
+            by_own(&inner.payloads)
+        })
+    })
+}
+
 fn encrypted_in(mut message: Message) -> Option<xml::Encrypted> {
     message.extract_payload::<xml::Encrypted>().ok().flatten()
 }

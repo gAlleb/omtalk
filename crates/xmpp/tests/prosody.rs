@@ -241,3 +241,57 @@ async fn unreachable_server_is_reported_and_retried() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn own_archive_is_read_page_by_page() {
+    let (mut accounts, mut events) = Accounts::new();
+    let reader = accounts.add(config("u35")).await;
+    let writer = accounts.add(config("u34")).await;
+    online(&mut events, &[&reader, &writer]).await;
+
+    let start = reader.archive_newest(None).await.unwrap();
+    let texts: Vec<String> = (0..5)
+        .map(|i| format!("archived {i} {}", rand_suffix()))
+        .collect();
+    for text in &texts {
+        let message = xmpp_parsers::message::Message::chat(Some(reader.jid().clone().into()))
+            .with_body(xmpp_parsers::message::Lang::default(), text.clone());
+        writer.send(message).await.unwrap();
+    }
+    // The server archives as it delivers; wait until the last one arrived.
+    let last = texts.last().unwrap().clone();
+    wait_for(&mut events, |e| match &e.event {
+        Event::Message(m) if m.get_best_body(vec![]).is_some_and(|(_, b)| *b == last) => Some(()),
+        _ => None,
+    })
+    .await;
+
+    // Two at a time, from where we started, until the archive says it is complete.
+    let mut after = start;
+    let mut read = Vec::new();
+    loop {
+        let page = reader.archive_after(None, after.as_deref(), 2).await.unwrap();
+        assert!(page.messages.len() <= 2);
+        read.extend(
+            page.messages
+                .iter()
+                .filter_map(|m| m.message.get_best_body(vec![]).map(|(_, b)| b.clone())),
+        );
+        after = page.last.or(after);
+        if page.complete {
+            break;
+        }
+    }
+    assert_eq!(
+        read, texts,
+        "every message once, in order, nothing from before the start"
+    );
+    assert_eq!(reader.archive_newest(None).await.unwrap(), after);
+}
+
+fn rand_suffix() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos()
+}

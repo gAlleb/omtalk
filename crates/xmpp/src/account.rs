@@ -1,5 +1,6 @@
 //! One account: a task owning the connection, and the handle that talks to it.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -11,6 +12,7 @@ use xmpp_parsers::message::Message;
 use xmpp_parsers::minidom::Element;
 
 use crate::login::{self, Login};
+use crate::mam::{self, Archived, Page};
 use crate::pep::{self, Access};
 use crate::{AccountConfig, AccountEvent, Error, Event, PepItem, Server, disco};
 
@@ -21,7 +23,24 @@ enum Command {
         request: IqRequest,
         reply: oneshot::Sender<Result<Option<Element>, Error>>,
     },
+    /// A message archive query: its results arrive as messages before the answer.
+    Archive {
+        to: Option<Jid>,
+        archive: BareJid,
+        queryid: String,
+        query: Element,
+        reply: oneshot::Sender<Result<Page, Error>>,
+    },
     Stop(oneshot::Sender<()>),
+}
+
+/// An archive query whose results are still arriving.
+struct Collecting {
+    archive: BareJid,
+    /// The account's own archive, not a room's.
+    own: bool,
+    messages: Vec<Archived>,
+    reply: oneshot::Sender<Result<Page, Error>>,
 }
 
 /// Handle to a running account. Clones talk to the same connection.
@@ -104,6 +123,29 @@ impl Account {
         }
     }
 
+    pub(crate) async fn archive_query(
+        &self,
+        to: Option<Jid>,
+        archive: BareJid,
+        queryid: String,
+        query: Element,
+    ) -> Result<Page, Error> {
+        let (reply, answer) = oneshot::channel();
+        self.command(Command::Archive {
+            to,
+            archive,
+            queryid,
+            query,
+            reply,
+        })
+        .await?;
+        // A long archive takes several pages, each its own query; one page is quick.
+        match tokio::time::timeout(self.iq_timeout, answer).await {
+            Ok(answer) => answer.map_err(|_| Error::Stopped)?,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
     async fn command(&self, command: Command) -> Result<(), Error> {
         self.commands.send(command).await.map_err(|_| Error::Stopped)
     }
@@ -169,9 +211,15 @@ enum Ended {
 }
 
 async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &impl Fn(Event)) -> Ended {
+    let mut queries: HashMap<String, Collecting> = HashMap::new();
+    let (finished_tx, mut finished) = mpsc::unbounded_channel::<(String, Result<Option<Element>, Error>)>();
     loop {
+        // Biased: a query's results come before its answer on the stream, but tokio-xmpp
+        // settles the answer at once, so pending stream events must be read first.
         tokio::select! {
+            biased;
             event = client.next() => match event {
+                Some(ClientEvent::Stanza(Stanza::Message(message))) if collect(&mut queries, &message) => {}
                 Some(event) => {
                     if let Some(event) = handle(&mut client, event).await {
                         emit(event);
@@ -180,7 +228,21 @@ async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &
                 // The client's worker is gone; `send_end` would panic now.
                 None => return Ended::Lost,
             },
+            Some((queryid, answer)) = finished.recv() => {
+                if let Some(query) = queries.remove(&queryid) {
+                    let _ = query.reply.send(answer.and_then(|answer| mam::page(query.messages, answer)));
+                }
+            }
             command = commands.recv() => match command {
+                Some(Command::Archive { to, archive, queryid, query, reply }) => {
+                    let own = to.is_none();
+                    let token = client.send_iq(to, IqRequest::Set(query)).await;
+                    queries.insert(queryid.clone(), Collecting { archive, own, messages: Vec::new(), reply });
+                    let finished = finished_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = finished.send((queryid, iq_answer(token.await)));
+                    });
+                }
                 Some(command) => {
                     if let Some(done) = execute(&mut client, command).await {
                         return stop(client, done).await;
@@ -190,6 +252,29 @@ async fn run(mut client: Client, commands: &mut mpsc::Receiver<Command>, emit: &
                 None => return stop(client, None).await,
             },
         }
+    }
+}
+
+/// Takes the message into its archive query, if it is a result of one and comes from
+/// the archive that query asked.
+fn collect(queries: &mut HashMap<String, Collecting>, message: &Message) -> bool {
+    let Some(query) = mam::queryid_of(message).and_then(|id| queries.get_mut(&id)) else {
+        return false;
+    };
+    match mam::result_of(message, &query.archive, query.own) {
+        Some(archived) => {
+            query.messages.push(archived);
+            true
+        }
+        None => false,
+    }
+}
+
+fn iq_answer(answer: Result<IqResponse, tokio_xmpp::IqFailure>) -> Result<Option<Element>, Error> {
+    match answer {
+        Ok(IqResponse::Result(payload)) => Ok(payload),
+        Ok(IqResponse::Error(error)) => Err(Error::Stanza(Box::new(error))),
+        Err(failure) => Err(Error::Send(format!("{failure:?}"))),
     }
 }
 
@@ -216,13 +301,10 @@ async fn execute(client: &mut Client, command: Command) -> Option<Option<oneshot
             let token = client.send_iq(to, request).await;
             // The answer arrives later; waiting for it here would stall the stream.
             tokio::spawn(async move {
-                let _ = reply.send(match token.await {
-                    Ok(IqResponse::Result(payload)) => Ok(payload),
-                    Ok(IqResponse::Error(error)) => Err(Error::Stanza(Box::new(error))),
-                    Err(failure) => Err(Error::Send(format!("{failure:?}"))),
-                });
+                let _ = reply.send(iq_answer(token.await));
             });
         }
+        Command::Archive { .. } => unreachable!("run() handles archive queries itself"),
         Command::Stop(done) => return Some(Some(done)),
     }
     None

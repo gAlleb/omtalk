@@ -26,7 +26,8 @@ pub enum Error {
 }
 
 /// Each entry upgrades the schema by one version; never edit one that has shipped.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE omemo_keys (
         account TEXT PRIMARY KEY,
         keys    BLOB NOT NULL
@@ -45,7 +46,16 @@ const MIGRATIONS: &[&str] = &["
         key     BLOB NOT NULL,
         PRIMARY KEY (account, jid, device)
     );
-"];
+",
+    "
+    CREATE TABLE archive_positions (
+        account TEXT NOT NULL,
+        archive TEXT NOT NULL,
+        last_id TEXT NOT NULL,
+        PRIMARY KEY (account, archive)
+    );
+",
+];
 
 #[derive(Clone)]
 pub struct Store {
@@ -109,6 +119,15 @@ impl Store {
                 .try_into()
                 .map_err(|_| Error::Jid("identity key is not 32 bytes".into()))?;
             state.identities.insert((parse_jid(&jid)?, device), key);
+        }
+        let mut positions =
+            db.prepare("SELECT archive, last_id FROM archive_positions WHERE account = ?1")?;
+        let rows = positions.query_map([account.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (archive, id) = row?;
+            state.archive_positions.insert(parse_jid(&archive)?, id);
         }
         Ok(Some(state))
     }
@@ -196,6 +215,13 @@ impl Persist for AccountOmemo {
         )
     }
 
+    fn archive_position(&self, archive: &BareJid, id: &str) -> Result<(), PersistError> {
+        self.write(
+            "INSERT OR REPLACE INTO archive_positions (account, archive, last_id) VALUES (?1, ?2, ?3)",
+            params![self.account.as_str(), archive.as_str(), id],
+        )
+    }
+
     fn identity(&self, jid: &BareJid, device: DeviceId, key: &[u8; 32]) -> Result<(), PersistError> {
         self.write(
             "INSERT OR REPLACE INTO omemo_identities (account, jid, device, key) VALUES (?1, ?2, ?3, ?4)",
@@ -231,6 +257,7 @@ mod tests {
             persist
                 .identity(&bob, peer.device_id, &peer.bundle().identity_key)
                 .unwrap();
+            persist.archive_position(&alice, "A17").unwrap();
         }
 
         let store = Store::open(&path).unwrap();
@@ -244,6 +271,10 @@ mod tests {
         assert_eq!(
             state.identities[&(bob.clone(), peer.device_id)],
             peer.bundle().identity_key
+        );
+        assert_eq!(
+            state.archive_positions[&alice], "A17",
+            "catch-up resumes where it stopped"
         );
 
         // The restored session continues where the saved one stopped: the peer reads

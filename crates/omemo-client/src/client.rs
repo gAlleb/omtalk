@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use omemo::{DeviceId, Session};
 use omemo_xml::{DEVICE_LIST_NODE, bundle, bundle_node, device_list, message, xml};
@@ -17,6 +18,9 @@ use crate::{Ephemeral, Error, Persist, State};
 /// in one chain without replying, so the sender's chain does not grow forever.
 const STALE_CHAIN: u32 = 53;
 
+/// Archived messages read per request while catching up.
+const ARCHIVE_PAGE: usize = 50;
+
 /// The body other clients show when they cannot decrypt.
 const FALLBACK_BODY: &str = "This message is OMEMO encrypted, and your client cannot decrypt it.";
 
@@ -25,6 +29,10 @@ pub struct Omemo {
     device_id: DeviceId,
     state: Mutex<State>,
     persist: Arc<dyn Persist>,
+    /// Whether this session has read the archive yet. Until it has, live messages must
+    /// not move the archive position: they arrive first after a reconnect, and moving
+    /// past them would skip what was missed before.
+    caught_up: AtomicBool,
     /// Room occupants by nick, with their real JIDs: a group message names only the
     /// nick, but its keys belong to the real account.
     occupants: Mutex<HashMap<BareJid, HashMap<String, BareJid>>>,
@@ -39,6 +47,14 @@ pub struct Incoming {
     pub direction: Direction,
     /// `None` for a message without content (a handshake answer or a heartbeat).
     pub text: Option<String>,
+}
+
+/// What [`Omemo::catch_up`] found in the archive, oldest first.
+#[derive(Debug, Default)]
+pub struct CatchUp {
+    pub messages: Vec<Incoming>,
+    /// Archived messages addressed to this device that did not decrypt, by archive id.
+    pub failed: Vec<(String, Error)>,
 }
 
 /// Which devices a message reached.
@@ -64,6 +80,7 @@ impl Omemo {
             device_id: state.keys.device_id,
             state: Mutex::new(state),
             persist,
+            caught_up: AtomicBool::new(false),
             occupants: Mutex::new(HashMap::new()),
         }
     }
@@ -85,6 +102,7 @@ impl Omemo {
     /// own other devices reach this one, puts this device into the own device list and
     /// publishes its bundle.
     pub async fn announce(&self) -> Result<(), Error> {
+        self.caught_up.store(false, Ordering::SeqCst);
         self.account.set(None, carbons::Enable).await?;
         let own = self.account.jid().clone();
         let current = match self.account.items(&own, DEVICE_LIST_NODE).await {
@@ -146,31 +164,22 @@ impl Omemo {
                     {
                         Ok(None)
                     }
-                    Some(envelope) => match self.receive(envelope).await {
-                        Err(Error::Omemo(omemo_xml::Error::NotForThisDevice))
-                        | Err(Error::Omemo(omemo_xml::Error::Omemo(omemo::Error::DuplicateMessage))) => {
-                            Ok(None)
-                        }
-                        other => other.map(Some),
-                    },
+                    Some(envelope) => ignorable(self.receive(envelope).await),
                     None => Ok(None),
                 }
             }
-            Event::Message(message) => match envelope::open(self.account.jid(), (**message).clone()) {
-                // Messages reach every device of an account, but some are addressed to
-                // only one of them: the answer that completes another device's key
-                // exchange, for instance. Not being a recipient is normal.
-                //
-                // Copies of one message are normal too: a message to the own account
-                // arrives directly and as a carbon, and history catch-up repeats live
-                // messages. The ratchet refuses the second copy; nothing is lost.
-                Some(envelope) => match self.receive(envelope).await {
-                    Err(Error::Omemo(omemo_xml::Error::NotForThisDevice))
-                    | Err(Error::Omemo(omemo_xml::Error::Omemo(omemo::Error::DuplicateMessage))) => Ok(None),
-                    other => other.map(Some),
-                },
-                None => Ok(None),
-            },
+            Event::Message(message) => {
+                let incoming = match envelope::open(self.account.jid(), (**message).clone()) {
+                    Some(envelope) => ignorable(self.receive(envelope).await)?,
+                    None => None,
+                };
+                if self.caught_up.load(Ordering::SeqCst)
+                    && let Some(id) = envelope::archive_id(self.account.jid(), message)
+                {
+                    self.set_archive_position(&id).await?;
+                }
+                Ok(incoming)
+            }
             _ => Ok(None),
         }
     }
@@ -225,6 +234,59 @@ impl Omemo {
                 .plaintext
                 .map(|p| String::from_utf8_lossy(&p).into_owned()),
         })
+    }
+
+    /// Reads what the account's archive holds since this device last looked: messages
+    /// that reached the account while this client was closed went to the clients that
+    /// were online, and only the archive still has them. Call it after
+    /// [`Omemo::announce`]. On the very first run there is no position yet: the archive
+    /// is not read, only marked, so an old history is not replayed.
+    pub async fn catch_up(&self) -> Result<CatchUp, Error> {
+        let own = self.account.jid().clone();
+        let mut after = self.state.lock().await.archive_positions.get(&own).cloned();
+        let mut caught = CatchUp::default();
+        if after.is_none() {
+            if let Some(newest) = self.account.archive_newest(None).await? {
+                self.set_archive_position(&newest).await?;
+            }
+            self.caught_up.store(true, Ordering::SeqCst);
+            return Ok(caught);
+        }
+        loop {
+            let page = self
+                .account
+                .archive_after(None, after.as_deref(), ARCHIVE_PAGE)
+                .await?;
+            for archived in page.messages {
+                if let Some(envelope) = envelope::open_archived(&own, archived.message) {
+                    match ignorable(self.receive(envelope).await) {
+                        Ok(Some(incoming)) => caught.messages.push(incoming),
+                        Ok(None) => {}
+                        // One message that does not decrypt must not hold up the rest.
+                        Err(error) => caught.failed.push((archived.id.clone(), error)),
+                    }
+                }
+                self.set_archive_position(&archived.id).await?;
+                after = Some(archived.id);
+            }
+            if page.complete || page.last.is_none() {
+                break;
+            }
+            after = page.last.or(after);
+        }
+        self.caught_up.store(true, Ordering::SeqCst);
+        Ok(caught)
+    }
+
+    async fn set_archive_position(&self, id: &str) -> Result<(), Error> {
+        let own = self.account.jid().clone();
+        self.persist.archive_position(&own, id)?;
+        self.state
+            .lock()
+            .await
+            .archive_positions
+            .insert(own, id.to_owned());
+        Ok(())
     }
 
     /// Encrypts `text` for all devices of `to` and all other devices of the own account,
@@ -406,6 +468,21 @@ impl Omemo {
         }
         state.device_lists.insert(own, list);
         Ok(())
+    }
+}
+
+/// Messages reach every device of an account, but some are addressed to only one of
+/// them: the answer that completes another device's key exchange, for instance. Not
+/// being a recipient is normal.
+///
+/// Copies of one message are normal too: a message to the own account arrives directly
+/// and as a carbon, and the archive repeats live messages. The ratchet refuses the
+/// second copy; nothing is lost.
+fn ignorable(result: Result<Incoming, Error>) -> Result<Option<Incoming>, Error> {
+    match result {
+        Err(Error::Omemo(omemo_xml::Error::NotForThisDevice))
+        | Err(Error::Omemo(omemo_xml::Error::Omemo(omemo::Error::DuplicateMessage))) => Ok(None),
+        other => other.map(Some),
     }
 }
 

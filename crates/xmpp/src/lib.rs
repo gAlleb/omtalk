@@ -11,6 +11,7 @@ mod disco;
 mod error;
 mod event;
 mod login;
+pub mod mam;
 pub mod muc;
 pub mod pep;
 

@@ -59,6 +59,8 @@ impl Device {
         }
 
         let (tx, inbox) = mpsc::unbounded_channel();
+        // What the account got while this device was off, as a client shows it on start.
+        deliver(&tx, omemo.catch_up().await);
         let (connection_tx, connection) = mpsc::unbounded_channel();
         let driver = omemo.clone();
         tokio::spawn(async move {
@@ -68,6 +70,7 @@ impl Device {
                     Event::Online { resumed, .. } => {
                         if !resumed {
                             driver.announce().await.unwrap();
+                            deliver(&tx, driver.catch_up().await);
                         }
                         let _ = connection_tx.send(event.event);
                         continue;
@@ -123,6 +126,25 @@ impl Device {
         self.omemo
             .with_state(|s| s.device_lists.get(&self.jid).cloned().unwrap_or_default())
             .await
+    }
+
+    /// The next message with text within `limit`, or `None` if none came.
+    pub async fn next_text_within(&mut self, limit: Duration) -> Option<Incoming> {
+        timeout(limit, async {
+            loop {
+                let incoming = self
+                    .inbox
+                    .recv()
+                    .await
+                    .unwrap()
+                    .expect("decryption must not fail");
+                if incoming.text.is_some() {
+                    return incoming;
+                }
+            }
+        })
+        .await
+        .ok()
     }
 
     /// The next message with text; empty handshake answers are skipped.
@@ -204,6 +226,23 @@ pub async fn befriend(a: &Device, b: &Device) {
             .send(Presence::subscribe().with_to(to.jid.clone()))
             .await
             .unwrap();
+    }
+}
+
+fn deliver(
+    inbox: &mpsc::UnboundedSender<Result<Incoming, String>>,
+    caught: Result<omtalk_omemo::CatchUp, omtalk_omemo::Error>,
+) {
+    match caught {
+        Ok(caught) => {
+            for incoming in caught.messages {
+                let _ = inbox.send(Ok(incoming));
+            }
+            for (id, error) in caught.failed {
+                let _ = inbox.send(Err(format!("archived {id}: {error}")));
+            }
+        }
+        Err(error) => drop(inbox.send(Err(format!("catch-up: {error}")))),
     }
 }
 
