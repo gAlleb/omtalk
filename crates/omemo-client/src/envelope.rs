@@ -30,6 +30,16 @@ pub(crate) struct Envelope {
     pub nick: Option<String>,
     pub direction: Direction,
     pub content: Content,
+    pub meta: Meta,
+}
+
+/// What a message says about itself, besides its content.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Meta {
+    /// The sender's id for it: origin-id (XEP-0359), which rooms keep, else the stanza's.
+    pub id: Option<String>,
+    /// The sender would like to know when it is read (XEP-0333).
+    pub markable: bool,
 }
 
 pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
@@ -41,12 +51,13 @@ pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
         if let Ok(Some(sent)) = message.extract_payload::<Sent>() {
             let inner = sent.forwarded.message;
             let peer = inner.to.as_ref()?.to_bare();
-            return content_of(inner).map(|content| Envelope {
+            return content_of(inner).map(|(content, meta)| Envelope {
                 peer,
                 sender: own.clone(),
                 nick: None,
                 direction: Direction::Outgoing,
                 content,
+                meta,
             });
         }
         if let Ok(Some(received)) = message.extract_payload::<Received>() {
@@ -55,12 +66,13 @@ pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
     }
 
     let sender = message.from.as_ref()?.to_bare();
-    content_of(message).map(|content| Envelope {
+    content_of(message).map(|(content, meta)| Envelope {
         peer: sender.clone(),
         sender,
         nick: None,
         direction: Direction::Incoming,
         content,
+        meta,
     })
 }
 
@@ -90,12 +102,13 @@ pub(crate) fn open_archived(own: &BareJid, message: Message) -> Option<Envelope>
     } else {
         (sender.clone(), Direction::Incoming)
     };
-    content_of(message).map(|content| Envelope {
+    content_of(message).map(|(content, meta)| Envelope {
         peer,
         sender,
         nick: None,
         direction,
         content,
+        meta,
     })
 }
 
@@ -132,7 +145,7 @@ fn room_envelope(
     real: Option<BareJid>,
     message: Message,
 ) -> Result<Option<Envelope>, crate::Error> {
-    let Some(content) = content_of(message) else {
+    let Some((content, meta)) = content_of(message) else {
         return Ok(None);
     };
     let sender = match (real, &content) {
@@ -156,21 +169,37 @@ fn room_envelope(
         nick: Some(nick),
         direction,
         content,
+        meta,
     }))
 }
 
 /// OMEMO if the message has it (its body is then only the fallback text), else the
 /// plain body. Errors and messages without either carry nothing to show.
-fn content_of(mut message: Message) -> Option<Content> {
+fn content_of(mut message: Message) -> Option<(Content, Meta)> {
     if message.type_ == MessageType::Error {
         return None;
     }
+    let origin = message.payloads.iter().find_map(|p| {
+        p.is("origin-id", xmpp_parsers::ns::SID)
+            .then(|| {
+                p.attr(xmpp_parsers::minidom::rxml::xml_ncname!("id"))
+                    .map(str::to_owned)
+            })
+            .flatten()
+    });
+    let meta = Meta {
+        id: origin.or_else(|| message.id.as_ref().map(|id| id.0.clone())),
+        markable: message
+            .payloads
+            .iter()
+            .any(|p| p.is("markable", xmpp_parsers::ns::DISPLAYED_MARKERS)),
+    };
     if let Ok(Some(encrypted)) = message.extract_payload::<xml::Encrypted>() {
-        return Some(Content::Omemo(encrypted));
+        return Some((Content::Omemo(encrypted), meta));
     }
     message
         .get_best_body_cloned(vec![])
-        .map(|(_, body)| Content::Plain(body))
+        .map(|(_, body)| (Content::Plain(body), meta))
 }
 
 /// The id `archive` gave this live message (XEP-0359), if it gave one. `archive` is the

@@ -19,7 +19,7 @@ use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
 use xmpp_parsers::data_forms::FieldType;
 
 use crate::app::{
-    App, Areas, Chat, ChatKind, Entry, Focus, Group, LEADER_KEYS, Line, MediaState, ServiceButton,
+    App, Areas, Chat, ChatKind, Delivery, Entry, Focus, Group, LEADER_KEYS, Line, MediaState, ServiceButton,
 };
 use crate::complete;
 use crate::services::FieldState;
@@ -280,7 +280,11 @@ fn chat_row(
     branch: &str,
 ) -> Paragraph<'static> {
     let width = width.saturating_sub(branch.width() as u16);
-    let icon = if chat.is_room() { "# " } else { "@ " };
+    let icon = match chat.kind {
+        ChatKind::Room { .. } => "# ".to_owned(),
+        ChatKind::Direct => "@ ".to_owned(),
+        ChatKind::Server => format!("{} ", icons.service),
+    };
     let badge = if chat.unread > 0 {
         format!(" {} ", chat.unread)
     } else {
@@ -767,8 +771,37 @@ pub fn message_rows(
             rows.push(TextLine::from(spans).into());
             first = false;
         }
+        // How far one's message got, after its last word, or below where it does not fit.
+        if let Some(delivery) = &line.delivery {
+            let (mark, style) = delivery_mark(delivery);
+            let last = rows.last_mut().expect("a message has a row");
+            if last.text.width() + mark.width() < body_width + 2 {
+                last.text.spans.push(Span::styled(format!(" {mark}"), style));
+            } else {
+                rows.push(TextLine::from(vec![Span::raw("  "), Span::styled(mark, style)]).into());
+            }
+        }
     }
     rows
+}
+
+/// The sign for how far a message got: ⋯ being sent, ✓ on the server, ✓✓ delivered,
+/// ✓✓ in the accent colour read, ✗ with the reason when it failed.
+fn delivery_mark(delivery: &Delivery) -> (String, Style) {
+    let dim = Style::default().fg(theme::DIM);
+    match delivery {
+        Delivery::Sending => ("⋯".into(), dim),
+        Delivery::Sent => ("✓".into(), dim),
+        Delivery::Delivered => ("✓✓".into(), dim),
+        Delivery::Read => (
+            "✓✓".into(),
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Delivery::Failed(reason) => (
+            format!("✗ не отправлено: {reason}"),
+            Style::default().fg(theme::WARN),
+        ),
+    }
 }
 
 /// Greedy wrapping on display width: at spaces where possible, inside a word where not.
@@ -933,6 +966,7 @@ pub fn input_rows(input: &str, cursor: usize, width: usize) -> (Vec<String>, (us
 fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = match app.current() {
         Some(chat) if chat.is_room() => format!("Участники {}", chat.occupants.len()),
+        Some(chat) if chat.kind == ChatKind::Server => "Аккаунт".to_owned(),
         Some(_) => "Устройства".to_owned(),
         None => "—".to_owned(),
     };
@@ -964,6 +998,39 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(Span::styled(format!(" {real}"), Style::default().fg(theme::DIM)));
                 }
                 rows.push(TextLine::from(spans));
+            }
+        }
+        ChatKind::Server => {
+            let state = app.connection.get(&chat.account).cloned().unwrap_or_default();
+            let colour = if state == "в сети" {
+                theme::OK
+            } else {
+                theme::WARN
+            };
+            rows.push(TextLine::from(vec![
+                Span::styled("● ", Style::default().fg(colour)),
+                Span::styled(
+                    chat.account.to_string(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            rows.push(TextLine::from(Span::styled(
+                format!("  {state}"),
+                Style::default().fg(theme::DIM),
+            )));
+            rows.push(TextLine::default());
+            for hint in [
+                "здесь — что говорит",
+                "сервер и что omtalk",
+                "знает об аккаунте",
+                "",
+                "/services — что умеет",
+                "сервер, его команды",
+            ] {
+                rows.push(TextLine::from(Span::styled(
+                    hint,
+                    Style::default().fg(theme::DIM),
+                )));
             }
         }
         ChatKind::Direct => {
@@ -2231,6 +2298,9 @@ mod tests {
             text: None,
             at: None,
             not_for_this_device: true,
+            id: None,
+            markable: false,
+            archive_id: None,
         };
         app.on_incoming(&me, &missed, 1);
         app.on_incoming(&me, &missed, 2);
@@ -2281,5 +2351,167 @@ mod tests {
         assert_eq!(cursor, (1, 3));
         let (rows, cursor) = input_rows("ab\ncd", 3, 10);
         assert_eq!((rows, cursor), (vec!["ab".to_owned(), "cd".to_owned()], (1, 0)));
+    }
+
+    #[test]
+    fn own_messages_show_how_far_they_got() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.focus = Focus::Input;
+        "ты тут?"
+            .chars()
+            .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+        let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let [Action::Send { id, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
+        let state = |app: &App| app.chats[bob].lines.last().unwrap().delivery.clone();
+        assert!(screen(&mut app, 100, 20).contains("ты тут? ⋯"));
+        app.delivery(&me, id, Delivery::Sent);
+        assert!(screen(&mut app, 100, 20).contains("ты тут? ✓"));
+        app.delivery(&me, id, Delivery::Read);
+        app.delivery(&me, id, Delivery::Delivered);
+        assert_eq!(
+            state(&app),
+            Some(Delivery::Read),
+            "a late receipt does not undo the read marker"
+        );
+        app.delivery(&me, "someone-else", Delivery::Failed("нет".into()));
+        assert_eq!(state(&app), Some(Delivery::Read));
+        app.delivery(&me, id, Delivery::Failed("сервер недоступен".into()));
+        assert!(screen(&mut app, 100, 20).contains("✗ не отправлено: сервер недоступен"));
+
+        // In a room, the room's copy of one's message is the same message: not shown twice.
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        let sent = app.send_to(room, "всем привет".into());
+        let [Action::Send { id, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
+        let echo = omtalk_omemo::Incoming {
+            peer: jid("team@muc.home.org"),
+            sender: me.clone(),
+            nick: Some("me".into()),
+            device: None,
+            direction: omtalk_omemo::Direction::Outgoing,
+            encrypted: false,
+            text: Some("всем привет".into()),
+            at: None,
+            not_for_this_device: false,
+            id: Some(id.clone()),
+            markable: false,
+            archive_id: None,
+        };
+        app.on_incoming(&me, &echo, 5);
+        let lines = &app.chats[room].lines;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].delivery, Some(Delivery::Sent));
+
+        // Bob's markable message: read at once while his chat is open, later otherwise.
+        let from_bob = omtalk_omemo::Incoming {
+            peer: jid("bob@home.org"),
+            sender: jid("bob@home.org"),
+            nick: None,
+            device: Some(7),
+            direction: omtalk_omemo::Direction::Incoming,
+            encrypted: true,
+            text: Some("тут".into()),
+            at: None,
+            not_for_this_device: false,
+            id: Some("b1".into()),
+            markable: true,
+            archive_id: Some("a1".into()),
+        };
+        assert!(
+            app.on_incoming(&me, &from_bob, 6).is_empty(),
+            "the room is open, not Bob"
+        );
+        let opened = app.select(bob);
+        let read = |marker: Option<&str>, archive: &str| Action::Displayed {
+            account: me.clone(),
+            to: jid("bob@home.org"),
+            room: false,
+            marker: marker.map(Into::into),
+            archive_id: Some(archive.into()),
+        };
+        assert!(opened.contains(&read(Some("b1"), "a1")), "{opened:?}");
+        assert!(
+            !app.select(bob)
+                .iter()
+                .any(|a| matches!(a, Action::Displayed { .. })),
+            "once"
+        );
+        let again = omtalk_omemo::Incoming {
+            id: Some("b2".into()),
+            archive_id: Some("a2".into()),
+            ..from_bob.clone()
+        };
+        assert_eq!(app.on_incoming(&me, &again, 7), [read(Some("b2"), "a2")]);
+        // Without read markers for senders, one's own clients still learn it.
+        app.read_markers = false;
+        let third = omtalk_omemo::Incoming {
+            id: Some("b3".into()),
+            archive_id: Some("a3".into()),
+            ..from_bob.clone()
+        };
+        assert_eq!(app.on_incoming(&me, &third, 8), [read(None, "a3")]);
+
+        // Read on another device: nothing here is unread any more, and nothing is owed.
+        app.select(room);
+        let fourth = omtalk_omemo::Incoming {
+            id: Some("b4".into()),
+            archive_id: Some("a4".into()),
+            ..from_bob
+        };
+        app.on_incoming(&me, &fourth, 9);
+        assert_eq!(app.chats[bob].unread, 1);
+        app.read_elsewhere(&me, &jid("bob@home.org"));
+        assert_eq!(app.chats[bob].unread, 0);
+        assert!(
+            !app.select(bob)
+                .iter()
+                .any(|a| matches!(a, Action::Displayed { .. }))
+        );
+    }
+
+    #[test]
+    fn the_server_channel_heads_the_account_and_takes_commands_only() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let anna = app.chat(&me, &jid("anna@home.org"), ChatKind::Direct);
+        app.server_notice(&me, "пароль не принят", 1);
+        let server = app.chats.iter().position(|c| c.kind == ChatKind::Server).unwrap();
+        assert_eq!(app.visible_chats(), [server, anna], "first under its account");
+        assert_eq!(app.status, "пароль не принят", "and below for a while");
+        // The server's own messages land there too.
+        assert_eq!(app.chat(&me, &jid("home.org"), ChatKind::Direct), server);
+
+        app.select(server);
+        let text = screen(&mut app, 100, 20);
+        assert!(
+            text.contains("сервер") && text.contains("пароль не принят") && text.contains("Аккаунт"),
+            "{text}"
+        );
+        app.focus = Focus::Input;
+        "привет"
+            .chars()
+            .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+        assert!(
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert!(app.status.contains("только команды"), "{}", app.status);
+        assert!(
+            app.move_to_folder(server, Some("Папка")).is_empty(),
+            "it stays at the top"
+        );
     }
 }

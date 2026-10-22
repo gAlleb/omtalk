@@ -540,3 +540,79 @@ async fn bookmarks_are_written_read_and_private() {
         "bookmarks are private"
     );
 }
+
+#[tokio::test]
+async fn receipts_and_read_markers_go_through_the_server() {
+    use omtalk_xmpp::receipts::{self, Mark};
+    use xmpp_parsers::message::{Lang, Message};
+    let (mut accounts, mut events) = Accounts::new();
+    let alice = accounts.add(config("u20")).await;
+    let bob = accounts.add(config("u21")).await;
+    online(&mut events, &[&alice, &bob]).await;
+
+    let mut message =
+        Message::chat(Some(bob.jid().clone().into())).with_body(Lang::default(), "дошло?".into());
+    receipts::mark_outgoing(&mut message, "r-1");
+    alice.send(message).await.unwrap();
+
+    // Bob's side: the message, still asking, and the receipt it is owed.
+    let got = wait_for(&mut events, |e| match &e.event {
+        Event::Message(m) if e.account == *bob.jid() && !m.bodies.is_empty() => Some((**m).clone()),
+        _ => None,
+    })
+    .await;
+    let receipt = receipts::answer(bob.jid(), &got).expect("a receipt is owed");
+    bob.send(receipt).await.unwrap();
+    bob.send(receipts::displayed(alice.jid().clone().into(), "r-1"))
+        .await
+        .unwrap();
+
+    // Alice's side: delivered, then read.
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        let marks = wait_for(&mut events, |e| match &e.event {
+            Event::Message(m) if e.account == *alice.jid() => {
+                let marks = receipts::marks(m);
+                (!marks.is_empty()).then_some(marks)
+            }
+            _ => None,
+        })
+        .await;
+        seen.extend(marks);
+    }
+    assert_eq!(
+        seen,
+        [Mark::Received("r-1".into()), Mark::Displayed("r-1".into())]
+    );
+}
+
+#[tokio::test]
+async fn what_one_client_read_the_others_learn() {
+    use omtalk_xmpp::receipts;
+    // Two clients of one account, each on its own connection.
+    let (mut laptop_accounts, mut laptop_events) = Accounts::new();
+    let (mut phone_accounts, mut phone_events) = Accounts::new();
+    let laptop = laptop_accounts.add(config("u06")).await;
+    let phone = phone_accounts.add(config("u06")).await;
+    online(&mut laptop_events, &[&laptop]).await;
+    online(&mut phone_events, &[&phone]).await;
+
+    let chat: BareJid = "bob@localhost".parse().unwrap();
+    laptop.read_up_to(&chat, laptop.jid(), "archive-7").await.unwrap();
+    let read = wait_for(&mut phone_events, |e| match &e.event {
+        Event::Pep { node, items, .. } if node == receipts::MDS => Some(receipts::read_elsewhere(items)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(read, std::slice::from_ref(&chat));
+
+    // What it says is what Gajim and Monal read: the archive's id, by whom.
+    let items = phone.items(phone.jid(), receipts::MDS).await.unwrap();
+    let item = items
+        .iter()
+        .find(|i| i.id.as_deref() == Some("bob@localhost"))
+        .unwrap();
+    let stanza_id = item.payload.get_child("stanza-id", "urn:xmpp:sid:0").unwrap();
+    assert_eq!(stanza_id.attr("id"), Some("archive-7"));
+    assert_eq!(stanza_id.attr("by"), Some("u06@localhost"));
+}

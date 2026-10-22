@@ -20,7 +20,25 @@ use crate::services::{Outcome, Services};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatKind {
     Direct,
-    Room { nick: String },
+    Room {
+        nick: String,
+    },
+    /// The account's own channel: what its server says, and what omtalk has to say about
+    /// the account (connection, errors, requests). Commands only.
+    Server,
+}
+
+/// How far one's own message has got.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Delivery {
+    Sending,
+    /// The server has it (for a room: the room sent it back).
+    Sent,
+    /// A client of the recipient has it (XEP-0184).
+    Delivered,
+    /// The recipient has seen it (XEP-0333).
+    Read,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +51,10 @@ pub struct Line {
     pub outgoing: bool,
     /// Said by omtalk itself (an error, a request), not by anyone in the chat.
     pub notice: bool,
+    /// The message's id, as sent: receipts and markers refer to it.
+    pub id: Option<String>,
+    /// For one's own messages sent from here: how far it has got.
+    pub delivery: Option<Delivery>,
     /// A shared file the message is, if it is one.
     pub media: Option<MediaSlot>,
 }
@@ -73,6 +95,8 @@ impl Line {
             outgoing,
             notice: false,
             media,
+            id: None,
+            delivery: None,
         }
     }
 }
@@ -100,6 +124,12 @@ pub struct Chat {
     pub occupants: BTreeMap<String, Option<BareJid>>,
     /// The peer's devices; `None` until read.
     pub devices: Option<Vec<DeviceRow>>,
+    /// The newest message here whose sender asked to learn when it is read, not yet
+    /// marked read.
+    pub markable: Option<String>,
+    /// The archive's id of the newest message here not yet reported read to one's own
+    /// other clients.
+    pub read_up_to: Option<String>,
 }
 
 impl Chat {
@@ -114,6 +144,8 @@ impl Chat {
             scroll: 0,
             occupants: BTreeMap::new(),
             devices: None,
+            markable: None,
+            read_up_to: None,
         }
     }
 
@@ -122,6 +154,9 @@ impl Chat {
     }
 
     pub fn title(&self) -> String {
+        if self.kind == ChatKind::Server {
+            return "сервер".to_owned();
+        }
         match self.jid.node() {
             Some(node) => node.to_string(),
             None => self.jid.to_string(),
@@ -205,6 +240,8 @@ pub enum Action {
         room: bool,
         text: String,
         encrypted: bool,
+        /// The message's id; its line, already shown as being sent, carries it too.
+        id: String,
     },
     Join {
         account: BareJid,
@@ -240,6 +277,15 @@ pub enum Action {
         request: crate::services::Request,
         /// The command's title, for the form that comes back.
         title: String,
+    },
+    /// Chat `to` was read here: tell the sender (`marker`, the message's id, XEP-0333;
+    /// not in rooms) and one's own other clients (`archive_id`, XEP-0490).
+    Displayed {
+        account: BareJid,
+        to: BareJid,
+        room: bool,
+        marker: Option<String>,
+        archive_id: Option<String>,
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
@@ -286,6 +332,8 @@ pub struct App {
     pub completion: Option<Completion>,
     /// What Ctrl+W/U/K cut last, for Ctrl+Y.
     pub killed: String,
+    /// Whether peers learn that their messages were read here.
+    pub read_markers: bool,
     /// The prefix key; after it, one letter from [`LEADER_KEYS`].
     pub leader: (KeyCode, KeyModifiers),
     /// The prefix was pressed: the next key is a shortcut.
@@ -335,6 +383,7 @@ impl App {
             services: None,
             completion: None,
             killed: String::new(),
+            read_markers: true,
             leader: (KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_pending: false,
             collapsed: BTreeSet::new(),
@@ -354,6 +403,12 @@ impl App {
 
     /// The chat with `jid` on `account`, made if needed.
     pub fn chat(&mut self, account: &BareJid, jid: &BareJid, kind: ChatKind) -> usize {
+        // The account's own server is its server channel, however it came up.
+        let kind = if jid.node().is_none() && jid.domain() == account.domain() {
+            ChatKind::Server
+        } else {
+            kind
+        };
         if let Some(index) = self
             .chats
             .iter()
@@ -371,23 +426,104 @@ impl App {
         self.chats.len() - 1
     }
 
+    /// The account's server channel, made if needed.
+    pub fn server_chat(&mut self, account: &BareJid) -> usize {
+        let server: BareJid = account.domain().as_str().parse().expect("a domain is a JID");
+        self.chat(account, &server, ChatKind::Server)
+    }
+
+    /// A line in the account's server channel, which also shows for a while below.
+    pub fn server_notice(&mut self, account: &BareJid, text: impl Into<String>, at: i64) {
+        let text = text.into();
+        let index = self.server_chat(account);
+        self.notice(Some(index), text.clone(), at);
+        self.status = text;
+    }
+
+    /// One's own message, sent from here: shown at once, as being sent. `id` is the
+    /// message's, for receipts.
+    pub fn sending(&mut self, index: usize, text: &str, encrypted: bool, id: &str, at: i64) {
+        let mut line = Line::message(at, "я".into(), text.to_owned(), encrypted, true);
+        line.id = Some(id.to_owned());
+        line.delivery = Some(Delivery::Sending);
+        self.push(index, line);
+    }
+
+    /// How far one's message `id` got. A step back is ignored (a late receipt after the
+    /// read marker), a failure always shows.
+    pub fn delivery(&mut self, account: &BareJid, id: &str, state: Delivery) {
+        for chat in self.chats.iter_mut().filter(|c| &c.account == account) {
+            for line in chat
+                .lines
+                .iter_mut()
+                .rev()
+                .filter(|l| l.outgoing && l.id.as_deref() == Some(id))
+            {
+                let later = match (&line.delivery, &state) {
+                    (_, Delivery::Failed(_)) => true,
+                    (Some(Delivery::Failed(_)), _) => false,
+                    (Some(now), next) => next > now,
+                    (None, _) => true,
+                };
+                if later {
+                    line.delivery = Some(state.clone());
+                }
+            }
+        }
+    }
+
+    /// What is owed now that chat `index` is in sight: the sender's read marker (if
+    /// those are on), and one's own other clients' note of it, which is always kept.
+    fn mark_read(&mut self, index: usize) -> Vec<Action> {
+        let chat = &mut self.chats[index];
+        let marker = chat
+            .markable
+            .take()
+            .filter(|_| self.read_markers && !chat.is_room());
+        let archive_id = chat.read_up_to.take();
+        if marker.is_none() && archive_id.is_none() {
+            return Vec::new();
+        }
+        vec![Action::Displayed {
+            account: chat.account.clone(),
+            to: chat.jid.clone(),
+            room: chat.is_room(),
+            marker,
+            archive_id,
+        }]
+    }
+
+    /// Another of one's clients read `chat`: nothing there is unread here either.
+    pub fn read_elsewhere(&mut self, account: &BareJid, chat: &BareJid) {
+        if let Some(c) = self
+            .chats
+            .iter_mut()
+            .find(|c| &c.account == account && &c.jid == chat)
+        {
+            c.unread = 0;
+            c.markable = None;
+            c.read_up_to = None;
+        }
+    }
+
     pub fn select(&mut self, index: usize) -> Vec<Action> {
         if index >= self.chats.len() {
             return Vec::new();
         }
         self.selected = Some(index);
         self.active = Some(self.chats[index].account.clone());
+        let mut actions = self.mark_read(index);
         let chat = &mut self.chats[index];
         chat.unread = 0;
         // A direct chat's right pane lists the peer's devices; read them afresh each time
         // it is opened, since devices come and go.
-        if chat.is_room() {
-            return Vec::new();
+        if chat.kind == ChatKind::Direct {
+            actions.push(Action::Devices {
+                account: chat.account.clone(),
+                jid: chat.jid.clone(),
+            });
         }
-        vec![Action::Devices {
-            account: chat.account.clone(),
-            jid: chat.jid.clone(),
-        }]
+        actions
     }
 
     pub fn push(&mut self, index: usize, line: Line) {
@@ -399,16 +535,33 @@ impl App {
         chat.lines.push(line);
     }
 
-    pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) {
+    /// A message arrived (or one's own came back): shown, and its read marker owed. What
+    /// to do about it comes back: the marker, while the chat is in sight.
+    pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) -> Vec<Action> {
         if message.not_for_this_device {
-            return self.not_for_this_device(account, message, at);
+            self.not_for_this_device(account, message, at);
+            return Vec::new();
         }
-        let Some(text) = &message.text else { return };
+        let Some(text) = &message.text else {
+            return Vec::new();
+        };
         let kind = match &message.nick {
             Some(_) => ChatKind::Room { nick: String::new() },
             None => ChatKind::Direct,
         };
         let index = self.chat(account, &message.peer, kind);
+        // A room sends one's message back: the line sent from here is that message,
+        // which has now arrived.
+        if message.direction == Direction::Outgoing
+            && let Some(id) = &message.id
+            && self.chats[index]
+                .lines
+                .iter()
+                .any(|l| l.outgoing && l.id.as_ref() == Some(id))
+        {
+            self.delivery(account, &id.clone(), Delivery::Sent);
+            return Vec::new();
+        }
         let who = match (&message.nick, message.direction) {
             (Some(nick), _) => nick.clone(),
             (None, Direction::Outgoing) => "я".to_owned(),
@@ -422,6 +575,19 @@ impl App {
             message.direction == Direction::Outgoing,
         );
         self.push(index, line);
+        if message.direction == Direction::Incoming {
+            let chat = &mut self.chats[index];
+            if message.markable {
+                chat.markable = message.id.clone();
+            }
+            if message.archive_id.is_some() {
+                chat.read_up_to = message.archive_id.clone();
+            }
+            if self.selected == Some(index) {
+                return self.mark_read(index);
+            }
+        }
+        Vec::new()
     }
 
     /// Someone wrote, encrypted, but not for this device: said once in the chat, not for
@@ -474,6 +640,8 @@ impl App {
                     outgoing: false,
                     notice: true,
                     media: None,
+                    id: None,
+                    delivery: None,
                 },
             ),
             _ => self.status = text,
@@ -680,18 +848,33 @@ impl App {
         }
         // A pasted block keeps its indentation; only empty lines around it go.
         let text = input.trim_end().trim_start_matches(['\n', '\r']).to_owned();
-        let Some(chat) = self.current_mut() else {
+        let Some(index) = self.selected else {
             self.status = "нет открытого чата: /msg JID или /join КОМНАТА".into();
             return Vec::new();
         };
+        self.send_to(index, text)
+    }
+
+    /// Sends `text` to chat `index`: its line shows at once, as being sent.
+    pub fn send_to(&mut self, index: usize, text: String) -> Vec<Action> {
+        let chat = &mut self.chats[index];
+        if chat.kind == ChatKind::Server {
+            self.status = "это служебный канал аккаунта: здесь только команды (/help)".into();
+            return Vec::new();
+        }
         chat.scroll = 0;
-        vec![Action::Send {
+        let id = omtalk_xmpp::receipts::new_id();
+        let action = Action::Send {
             account: chat.account.clone(),
             to: chat.jid.clone(),
             room: chat.is_room(),
-            text,
+            text: text.clone(),
             encrypted: chat.omemo,
-        }]
+            id: id.clone(),
+        };
+        let encrypted = chat.omemo;
+        self.sending(index, &text, encrypted, &id, chrono::Utc::now().timestamp());
+        vec![action]
     }
 
     fn command(&mut self, line: &str) -> Vec<Action> {
@@ -713,14 +896,7 @@ impl App {
                     .map(|(_, text)| text.trim())
                     .unwrap_or_default();
                 if !text.is_empty() {
-                    let chat = &self.chats[index];
-                    actions.push(Action::Send {
-                        account: chat.account.clone(),
-                        to: chat.jid.clone(),
-                        room: false,
-                        text: text.to_owned(),
-                        encrypted: chat.omemo,
-                    });
+                    actions.extend(self.send_to(index, text.to_owned()));
                 }
                 return actions;
             }
@@ -918,11 +1094,11 @@ impl App {
         if let Some(chat) = self.current().filter(|c| c.is_room()) {
             let own = match &chat.kind {
                 ChatKind::Room { nick } => nick.as_str(),
-                ChatKind::Direct => "",
+                ChatKind::Direct | ChatKind::Server => "",
             };
             context.nicks = chat.occupants.keys().filter(|n| *n != own).cloned().collect();
         }
-        for chat in &self.chats {
+        for chat in self.chats.iter().filter(|c| c.kind != ChatKind::Server) {
             let list = if chat.is_room() {
                 &mut context.rooms
             } else {
@@ -1168,10 +1344,18 @@ impl App {
                     }
                 }
             }
-            for (index, chat) in self.chats.iter().enumerate() {
-                if &chat.account == account && !placed.contains(&index) {
-                    rows.push((Entry::Chat(index), base));
-                }
+            // The server channel first, then the other chats in no folder.
+            let loose = self
+                .chats
+                .iter()
+                .enumerate()
+                .filter(|(i, c)| &c.account == account && !placed.contains(i))
+                .filter(|(_, c)| c.kind == ChatKind::Server)
+                .chain(self.chats.iter().enumerate().filter(|(i, c)| {
+                    &c.account == account && !placed.contains(i) && c.kind != ChatKind::Server
+                }));
+            for (index, _) in loose {
+                rows.push((Entry::Chat(index), base));
             }
         }
         rows
@@ -1230,6 +1414,10 @@ impl App {
         let Some(chat) = self.chats.get(index) else {
             return Vec::new();
         };
+        if chat.kind == ChatKind::Server {
+            self.status = "служебный канал остаётся наверху аккаунта".into();
+            return Vec::new();
+        }
         let (account, jid) = (chat.account.clone(), chat.jid.clone());
         for f in self.folders.iter_mut().filter(|f| f.account == account) {
             f.chats.retain(|c| *c != jid);
@@ -1454,6 +1642,9 @@ mod tests {
         assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
 
         let sent = type_text(&mut app, "привет, Боб");
+        let [Action::Send { id, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
         assert_eq!(
             sent,
             [Action::Send {
@@ -1461,8 +1652,15 @@ mod tests {
                 to: jid("bob@example.org"),
                 room: false,
                 text: "привет, Боб".into(),
-                encrypted: true
+                encrypted: true,
+                id: id.clone(),
             }]
+        );
+        // Shown at once, as being sent, under the same id.
+        let line = app.current().unwrap().lines.last().unwrap();
+        assert_eq!(
+            (line.text.as_str(), line.id.as_ref(), &line.delivery),
+            ("привет, Боб", Some(id), &Some(Delivery::Sending))
         );
         assert!(app.input.is_empty());
 
@@ -1519,13 +1717,10 @@ mod tests {
         // `/msg JID text` opens the chat and sends the text there, also from a room.
         let sent = type_text(&mut app, "/msg  xff@example.org  привет, как ты ");
         assert!(
-            sent.contains(&Action::Send {
-                account: jid("me@example.org"),
-                to: jid("xff@example.org"),
-                room: false,
-                text: "привет, как ты".into(),
-                encrypted: true,
-            }),
+            sent.iter().any(
+                |a| matches!(a, Action::Send { to, text, room: false, encrypted: true, .. }
+                if *to == jid("xff@example.org") && text == "привет, как ты")
+            ),
             "{sent:?}"
         );
         assert_eq!(app.current().unwrap().jid, jid("xff@example.org"));
@@ -1553,6 +1748,9 @@ mod tests {
             text: Some("hi".into()),
             at: None,
             not_for_this_device: false,
+            id: None,
+            markable: false,
+            archive_id: None,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);
         app.on_incoming(&me, &incoming("carol@example.org"), 0);

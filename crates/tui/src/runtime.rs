@@ -14,6 +14,7 @@ use futures::StreamExt;
 use omemo::OwnKeys;
 use omtalk_omemo::{Direction, Incoming, Omemo, State};
 use omtalk_store::{Store, StoredMessage};
+use omtalk_xmpp::receipts;
 use omtalk_xmpp::services::{CommandAction, CommandStep};
 use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Jid, Server, muc};
 use ratatui::Terminal;
@@ -22,7 +23,7 @@ use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use xmpp_parsers::message::{Lang, Message};
 
-use crate::app::{Action, App, ChatKind, DeviceRow, Line, MediaState};
+use crate::app::{Action, App, ChatKind, Delivery, DeviceRow, Line, MediaState};
 use crate::config::{self, AccountEntry, Config};
 use crate::services::{Listing, Request};
 use crate::view::{self, Pictures};
@@ -147,12 +148,6 @@ enum Msg {
         message: Incoming,
         at: i64,
     },
-    Line {
-        account: BareJid,
-        chat: BareJid,
-        kind: ChatKind,
-        line: Line,
-    },
     Notice {
         account: BareJid,
         chat: Option<BareJid>,
@@ -195,6 +190,17 @@ enum Msg {
     },
     /// A line for the status bar, about no account in particular.
     Status(String),
+    /// Another of one's clients read `chat`.
+    ReadElsewhere {
+        account: BareJid,
+        chat: BareJid,
+    },
+    /// How far one's message `id` got.
+    Delivery {
+        account: BareJid,
+        id: String,
+        state: Delivery,
+    },
     /// What an address offers, for the services window.
     Listed {
         jid: Jid,
@@ -254,6 +260,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let ui = &options.config.ui;
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
+    app.read_markers = ui.read_markers;
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -391,20 +398,12 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
         Msg::Incoming { account, message, at } => {
-            app.on_incoming(&account, &message, at);
+            for action in app.on_incoming(&account, &message, at) {
+                tokio::spawn(perform(action, shared.clone()));
+            }
             if let Some(text) = &message.text {
                 fetch_if_media(text, shared);
             }
-        }
-        Msg::Line {
-            account,
-            chat,
-            kind,
-            line,
-        } => {
-            fetch_if_media(&line.text, shared);
-            let index = app.chat(&account, &chat, kind);
-            app.push(index, line);
         }
         Msg::Media { url, state } => {
             // A picture is decoded aside: large ones take a moment.
@@ -422,7 +421,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.media_done(&url, state);
         }
         Msg::Picture { .. } => {}
-        Msg::Status(text) => app.status = text,
+        Msg::Status(text) => match app.active.clone().or_else(|| app.accounts.first().cloned()) {
+            Some(account) => app.server_notice(&account, text, now()),
+            None => app.status = text,
+        },
+        Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
+        Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
         Msg::Listed { jid, node, listing } => {
             if let Some(services) = app.services.as_mut() {
                 services.listed(&jid, &node, listing);
@@ -433,11 +437,27 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 services.stepped(jid, title, step);
             }
         }
-        Msg::Notice { account, chat, text } => {
-            let index = chat.map(|chat| app.chat(&account, &chat, ChatKind::Direct));
-            app.notice(index, text, now());
+        // About a chat: there; about the account: in its server channel.
+        Msg::Notice {
+            account,
+            chat: Some(chat),
+            text,
+        } => {
+            let index = app.chat(&account, &chat, ChatKind::Direct);
+            app.notice(Some(index), text, now());
         }
-        Msg::Connection { account, state } => drop(app.connection.insert(account, state)),
+        Msg::Notice {
+            account,
+            chat: None,
+            text,
+        } => app.server_notice(&account, text, now()),
+        Msg::Connection { account, state } => {
+            let index = app.server_chat(&account);
+            if app.connection.get(&account) != Some(&state) {
+                app.notice(Some(index), state.clone(), now());
+            }
+            app.connection.insert(account, state);
+        }
         Msg::Devices { account, jid, rows } => {
             let index = app.chat(&account, &jid, ChatKind::Direct);
             app.chats[index].devices = Some(rows);
@@ -519,6 +539,32 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 chat: Some(from.clone()),
                 text: format!("{from} хочет видеть ваш статус: /accept {from} или /refuse {from}"),
             }),
+            Event::Message(message) => {
+                for mark in receipts::marks(message) {
+                    let (id, state) = match mark {
+                        receipts::Mark::Received(id) => (id, Delivery::Delivered),
+                        receipts::Mark::Displayed(id) => (id, Delivery::Read),
+                    };
+                    tell(Msg::Delivery {
+                        account: account.clone(),
+                        id,
+                        state,
+                    });
+                }
+                if let Some(receipt) = receipts::answer(&account, message) {
+                    let _ = xmpp.send(receipt).await;
+                }
+            }
+            Event::Pep {
+                from, node, items, ..
+            } if node == receipts::MDS && *from == account => {
+                for chat in receipts::read_elsewhere(items) {
+                    tell(Msg::ReadElsewhere {
+                        account: account.clone(),
+                        chat,
+                    });
+                }
+            }
             Event::Presence(presence) => {
                 if let Some(occupant) = muc::occupant(presence) {
                     tell(Msg::Occupant {
@@ -732,30 +778,29 @@ async fn perform(action: Action, shared: Shared) {
             room,
             text,
             encrypted,
+            id,
         } => {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
-            let kind = if room {
-                ChatKind::Room { nick: String::new() }
-            } else {
-                ChatKind::Direct
+            fetch_if_media(&text, &shared);
+            let delivery = |state| {
+                tell(Msg::Delivery {
+                    account: account.clone(),
+                    id: id.clone(),
+                    state,
+                })
             };
             if encrypted {
                 let sent = if room {
-                    omemo.send_group(&to, &text).await
+                    omemo.send_group_with_id(&to, &text, &id).await
                 } else {
-                    omemo.send(&to, &text).await
+                    omemo.send_with_id(&to, &text, &id).await
                 };
                 match sent {
                     Ok(report) => {
                         save_own(&shared, &account, &to, &text, true);
-                        tell(Msg::Line {
-                            account: account.clone(),
-                            chat: to.clone(),
-                            kind,
-                            line: own_line(&text, true),
-                        });
+                        delivery(Delivery::Sent);
                         for (jid, device, e) in report.failed {
                             tell(Msg::Notice {
                                 account: account.clone(),
@@ -771,36 +816,53 @@ async fn perform(action: Action, shared: Shared) {
                             });
                         }
                     }
-                    Err(e) => tell(Msg::Notice {
-                        account,
-                        chat: Some(to),
-                        text: format!("не отправлено: {e}. Без шифрования — выключите OMEMO (^O)"),
-                    }),
+                    Err(e) => {
+                        delivery(Delivery::Failed(e.to_string()));
+                        tell(Msg::Notice {
+                            account: account.clone(),
+                            chat: Some(to),
+                            text: format!("не отправлено: {e}. Без шифрования — выключите OMEMO (^O)"),
+                        });
+                    }
                 }
             } else {
-                let message = if room {
+                let mut message = if room {
                     Message::groupchat(Some(to.clone().into()))
                 } else {
                     Message::chat(Some(to.clone().into()))
                 }
                 .with_body(Lang::default(), text.clone());
+                receipts::mark_outgoing(&mut message, &id);
                 match xmpp.send(message).await {
-                    // A room sends our message back to us, and that copy is the one shown.
-                    Ok(()) if room => {}
                     Ok(()) => {
-                        save_own(&shared, &account, &to, &text, false);
-                        tell(Msg::Line {
-                            account,
-                            chat: to,
-                            kind,
-                            line: own_line(&text, false),
-                        });
+                        // A room's copy back goes into the history when it comes.
+                        if !room {
+                            save_own(&shared, &account, &to, &text, false);
+                        }
+                        delivery(Delivery::Sent);
                     }
-                    Err(e) => tell(Msg::Notice {
-                        account,
-                        chat: Some(to),
-                        text: format!("не отправлено: {e}"),
-                    }),
+                    Err(e) => delivery(Delivery::Failed(e.to_string())),
+                }
+            }
+        }
+        Action::Displayed {
+            account,
+            to,
+            room,
+            marker,
+            archive_id,
+        } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            if let Some(id) = marker {
+                let _ = xmpp.send(receipts::displayed(to.clone().into(), &id)).await;
+            }
+            // In a room the room's archive names the message; in a chat, one's own.
+            if let Some(id) = archive_id {
+                let by = if room { to.clone() } else { account.clone() };
+                if let Err(e) = xmpp.read_up_to(&to, &by, &id).await {
+                    tell(Msg::Status(format!(
+                        "отметка «прочитано» для других устройств: {e}"
+                    )));
                 }
             }
         }
@@ -953,10 +1015,6 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::Quit => {}
     }
-}
-
-fn own_line(text: &str, encrypted: bool) -> Line {
-    Line::message(now(), "я".into(), text.to_owned(), encrypted, true)
 }
 
 fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encrypted: bool) {

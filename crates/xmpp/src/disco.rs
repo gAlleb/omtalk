@@ -21,6 +21,10 @@ const FEATURES: &[&str] = &[
     ns::PING,
     ns::LEGACY_OMEMO_DEVICELIST,
     "eu.siacs.conversations.axolotl.devicelist+notify",
+    // Receipts and read markers, also shared between one's own clients (XEP-0490).
+    ns::RECEIPTS,
+    ns::DISPLAYED_MARKERS,
+    "urn:xmpp:mds:displayed:0+notify",
 ];
 
 pub fn info() -> DiscoInfoResult {

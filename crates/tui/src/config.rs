@@ -14,6 +14,7 @@
 //! viewer = "xdg-open"   # opens a shared file on click
 //! left = 26             # width of the chat list
 //! right = 30            # width of the participants pane
+//! read_markers = true   # let senders see that their messages were read
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -75,6 +76,8 @@ pub struct Ui {
     pub right: u16,
     /// The program a click on a shared file opens it with.
     pub viewer: String,
+    /// Tell senders when their messages were read here (XEP-0333), as others do.
+    pub read_markers: bool,
 }
 
 impl Default for Ui {
@@ -86,6 +89,7 @@ impl Default for Ui {
             left: 26,
             right: 30,
             viewer: "xdg-open".into(),
+            read_markers: true,
         }
     }
 }

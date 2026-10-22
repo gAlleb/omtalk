@@ -60,6 +60,13 @@ pub struct Incoming {
     /// client does not know this device, or does not trust it. Worth saying, since
     /// otherwise someone wrote and nothing shows.
     pub not_for_this_device: bool,
+    /// The sender's id for the message, to which receipts and read markers refer.
+    pub id: Option<String>,
+    /// The sender would like a read marker (XEP-0333).
+    pub markable: bool,
+    /// The archive's id for it (XEP-0359): the own account's for chats, the room's for
+    /// rooms. One's other clients learn what was read by it (XEP-0490).
+    pub archive_id: Option<String>,
 }
 
 /// One published device of an account, as [`Omemo::devices`] reports it.
@@ -91,6 +98,7 @@ struct Received {
     sender: BareJid,
     nick: Option<String>,
     direction: Direction,
+    meta: envelope::Meta,
 }
 
 /// What [`Omemo::catch_up`] found in the archive, oldest first.
@@ -212,15 +220,21 @@ impl Omemo {
             Event::Message(message) if message.type_ == MessageType::Groupchat => {
                 let rooms = self.occupants.lock().await.clone();
                 let resolve = |room: &BareJid, nick: &str| rooms.get(room)?.get(nick).cloned();
-                if let Some(room) = message.from.as_ref().map(|f| f.to_bare())
-                    && let Some(id) = envelope::archive_id(&room, message)
-                {
-                    self.live_archive_position(&room, &id).await?;
+                let archived = message.from.as_ref().map(|f| f.to_bare()).and_then(|room| {
+                    let id = envelope::archive_id(&room, message)?;
+                    Some((room, id))
+                });
+                if let Some((room, id)) = &archived {
+                    self.live_archive_position(room, id).await?;
                 }
-                match envelope::open_group(self.account.jid(), (**message).clone(), resolve)? {
-                    Some(envelope) => self.open_envelope(envelope).await,
-                    None => Ok(None),
-                }
+                let incoming = match envelope::open_group(self.account.jid(), (**message).clone(), resolve)? {
+                    Some(envelope) => self.open_envelope(envelope).await?,
+                    None => None,
+                };
+                Ok(incoming.map(|i| Incoming {
+                    archive_id: archived.map(|(_, id)| id),
+                    ..i
+                }))
             }
             Event::Message(message) => {
                 let incoming = match envelope::open(self.account.jid(), (**message).clone()) {
@@ -228,10 +242,11 @@ impl Omemo {
                     None => None,
                 };
                 let own = self.account.jid().clone();
-                if let Some(id) = envelope::archive_id(&own, message) {
-                    self.live_archive_position(&own, &id).await?;
+                let archive_id = envelope::archive_id(&own, message);
+                if let Some(id) = &archive_id {
+                    self.live_archive_position(&own, id).await?;
                 }
-                Ok(incoming)
+                Ok(incoming.map(|i| Incoming { archive_id, ..i }))
             }
             _ => Ok(None),
         }
@@ -252,6 +267,9 @@ impl Omemo {
                     text: Some(text),
                     at: None,
                     not_for_this_device: false,
+                    id: envelope.meta.id,
+                    markable: envelope.meta.markable,
+                    archive_id: None,
                 }));
             }
             Content::Omemo(_) if self.has_no_key(&envelope) => {
@@ -265,6 +283,9 @@ impl Omemo {
                     text: None,
                     at: None,
                     not_for_this_device: true,
+                    id: envelope.meta.id,
+                    markable: envelope.meta.markable,
+                    archive_id: None,
                 }));
             }
             Content::Omemo(encrypted) => encrypted,
@@ -279,6 +300,7 @@ impl Omemo {
             sender: envelope.sender,
             nick: envelope.nick,
             direction: envelope.direction,
+            meta: envelope.meta,
         };
         ignorable(self.receive(parts, encrypted).await)
     }
@@ -318,7 +340,7 @@ impl Omemo {
             let empty = message::empty(state.keys.device_id, [(device, &mut session)])?;
             // To the sender's account, also for group messages: it concerns one session.
             self.account
-                .send(stanza(MessageType::Chat, envelope.sender.clone(), empty, false))
+                .send(stanza(MessageType::Chat, envelope.sender.clone(), empty, None))
                 .await?;
         }
         self.persist.session(&key.0, key.1, &session)?;
@@ -336,6 +358,9 @@ impl Omemo {
                 .map(|p| String::from_utf8_lossy(&p).into_owned()),
             at: None,
             not_for_this_device: false,
+            id: envelope.meta.id,
+            markable: envelope.meta.markable,
+            archive_id: None,
         })
     }
 
@@ -440,7 +465,11 @@ impl Omemo {
             Err(error) => Err(error),
         };
         match result {
-            Ok(Some(incoming)) => caught.messages.push(Incoming { at, ..incoming }),
+            Ok(Some(incoming)) => caught.messages.push(Incoming {
+                at,
+                archive_id: Some(archived.id.clone()),
+                ..incoming
+            }),
             Ok(None) => {}
             // One message that does not decrypt must not hold up the rest.
             Err(error) => caught.failed.push((archived.id.clone(), error)),
@@ -484,6 +513,13 @@ impl Omemo {
     /// Encrypts `text` for all devices of `to` and all other devices of the own account,
     /// and sends it.
     pub async fn send(&self, to: &BareJid, text: &str) -> Result<SendReport, Error> {
+        self.send_with_id(to, text, &omtalk_xmpp::receipts::new_id())
+            .await
+    }
+
+    /// [`Omemo::send`] under the message id `id`, to which receipts and read markers
+    /// will refer.
+    pub async fn send_with_id(&self, to: &BareJid, text: &str, id: &str) -> Result<SendReport, Error> {
         let mut state = self.state.lock().await;
         let mut report = SendReport::default();
         let targets = self
@@ -494,7 +530,7 @@ impl Omemo {
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
         self.account
-            .send(stanza(MessageType::Chat, to.clone(), encrypted, true))
+            .send(stanza(MessageType::Chat, to.clone(), encrypted, Some(id)))
             .await?;
         report.devices = targets;
         Ok(report)
@@ -504,6 +540,17 @@ impl Omemo {
     /// members, present or not, and anyone else present), and sends it to the room.
     /// The room must be non-anonymous, or the members' accounts are unknown.
     pub async fn send_group(&self, room: &BareJid, text: &str) -> Result<SendReport, Error> {
+        self.send_group_with_id(room, text, &omtalk_xmpp::receipts::new_id())
+            .await
+    }
+
+    /// [`Omemo::send_group`] under the message id `id`; the room sends it back with it.
+    pub async fn send_group_with_id(
+        &self,
+        room: &BareJid,
+        text: &str,
+        id: &str,
+    ) -> Result<SendReport, Error> {
         let mut members = BTreeSet::new();
         for affiliation in [Affiliation::Owner, Affiliation::Admin, Affiliation::Member] {
             members.extend(self.account.affiliated(room, affiliation).await?);
@@ -522,7 +569,7 @@ impl Omemo {
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
         self.account
-            .send(stanza(MessageType::Groupchat, room.clone(), encrypted, true))
+            .send(stanza(MessageType::Groupchat, room.clone(), encrypted, Some(id)))
             .await?;
         report.devices = targets;
         Ok(report)
@@ -713,17 +760,18 @@ fn parse_device_list(items: &[PepItem]) -> BTreeSet<DeviceId> {
         .unwrap_or_default()
 }
 
-/// An OMEMO message. One with `content` (text) says so twice for clients that cannot
+/// An OMEMO message. One with content (text, under the id given) says so twice for clients that cannot
 /// read it: the encryption mark (XEP-0380) and a fallback body. A key exchange answer or
 /// heartbeat carries neither: it reaches every device of the account but concerns one,
 /// and the mark alone makes the others show "could not be decrypted" for nothing.
-fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, content: bool) -> Message {
+fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, content: Option<&str>) -> Message {
     let mut message = Message::new_with_type(type_, Some(to.into())).with_payload(encrypted);
     // Archive it (MAM) and keep it for offline delivery even without a body.
     message
         .payloads
         .push(Element::builder("store", "urn:xmpp:hints").build());
-    if content {
+    if let Some(id) = content {
+        omtalk_xmpp::receipts::mark_outgoing(&mut message, id);
         message = message
             .with_payload(ExplicitMessageEncryption {
                 namespace: omemo::NAMESPACE.into(),
@@ -753,9 +801,9 @@ mod tests {
     fn only_messages_with_text_carry_the_encryption_mark_and_fallback() {
         let to: BareJid = "bob@example.org".parse().unwrap();
         let eme = |m: &Message| m.payloads.iter().any(|p| p.is("encryption", "urn:xmpp:eme:0"));
-        let text = stanza(MessageType::Chat, to.clone(), encrypted(true), true);
+        let text = stanza(MessageType::Chat, to.clone(), encrypted(true), Some("m1"));
         assert!(eme(&text) && !text.bodies.is_empty());
-        let empty = stanza(MessageType::Chat, to, encrypted(false), false);
+        let empty = stanza(MessageType::Chat, to, encrypted(false), None);
         assert!(!eme(&empty) && empty.bodies.is_empty(), "{empty:?}");
         assert!(
             empty.payloads.iter().any(|p| p.is("store", "urn:xmpp:hints")),
