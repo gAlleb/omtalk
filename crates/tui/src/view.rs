@@ -1285,8 +1285,9 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
     // The avatar on top, round, the rest below it.
     let width = AVATAR_WIDTH.min(inner.width);
     let height = width / 2;
-    let place = Rect::new(inner.x + (inner.width - width) / 2, inner.y, width, height);
-    let fits = inner.height > height + 4;
+    // A row of air above it, as below.
+    let place = Rect::new(inner.x + (inner.width - width) / 2, inner.y + 1, width, height);
+    let fits = inner.height > height + 5;
     let drawn = match app.avatar_of(&chat.jid) {
         Some(key) if fits => match (app.avatar_blocks.get(&key), pictures.get_mut(&key)) {
             (Some(image), _) => {
@@ -1302,8 +1303,8 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
         _ => false,
     };
     if drawn {
-        inner.y += height + 1;
-        inner.height -= height + 1;
+        inner.y += height + 2;
+        inner.height -= height + 2;
     }
     let mut rows: Vec<TextLine> = Vec::new();
     let mut nicks = Vec::new();
@@ -4395,7 +4396,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            first_words as u16 > right.y + AVATAR_WIDTH / 2,
+            first_words as u16 > right.y + 1 + AVATAR_WIDTH / 2,
             "below the picture:\n{}",
             text.join("\n")
         );
@@ -4415,9 +4416,14 @@ mod tests {
             .unwrap();
         let inner_x = right.x + 1 + (right.width - 2 - AVATAR_WIDTH) / 2;
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(inner_x, right.y + 1)].symbol(), " ", "a corner");
+        assert_eq!(buffer[(inner_x, right.y + 2)].symbol(), " ", "a corner");
+        assert!(
+            (0..right.width)
+                .all(|x| buffer[(right.x + x, right.y + 1)].fg != ratatui::style::Color::Rgb(200, 0, 0)),
+            "a row of air above"
+        );
         assert_eq!(
-            buffer[(inner_x + AVATAR_WIDTH / 2, right.y + 1 + AVATAR_WIDTH / 4)].fg,
+            buffer[(inner_x + AVATAR_WIDTH / 2, right.y + 2 + AVATAR_WIDTH / 4)].fg,
             ratatui::style::Color::Rgb(200, 0, 0),
             "the middle"
         );
