@@ -17,6 +17,49 @@ pub struct State {
     pub identities: HashMap<(BareJid, DeviceId), [u8; 32]>,
     /// The last message id read from each archive (the account's own, by its JID).
     pub archive_positions: HashMap<BareJid, String>,
+    /// What the user decided about each device; one not here is trusted blindly.
+    pub trust: HashMap<(BareJid, DeviceId), Trust>,
+}
+
+/// Whether messages go to a device, as Gajim keeps it (BTBV, "blind trust before
+/// verification"): a new device is trusted blindly until the user has verified any
+/// device of that account; from then on a new one waits for a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// Trusted without its fingerprint compared.
+    Blind,
+    /// Its fingerprint compared with the owner's, and found right.
+    Verified,
+    /// Refused: nothing is encrypted for it, what it sends is marked.
+    Distrusted,
+    /// New, after the user began verifying this account's devices: refused until decided.
+    Undecided,
+}
+
+impl Trust {
+    /// Whether messages are encrypted for it.
+    pub fn receives(self) -> bool {
+        matches!(self, Trust::Blind | Trust::Verified)
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Trust::Blind => 0,
+            Trust::Verified => 1,
+            Trust::Distrusted => 2,
+            Trust::Undecided => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Trust> {
+        Some(match code {
+            0 => Trust::Blind,
+            1 => Trust::Verified,
+            2 => Trust::Distrusted,
+            3 => Trust::Undecided,
+            _ => return None,
+        })
+    }
 }
 
 impl State {
@@ -27,7 +70,24 @@ impl State {
             sessions: HashMap::new(),
             identities: HashMap::new(),
             archive_positions: HashMap::new(),
+            trust: HashMap::new(),
         }
+    }
+
+    pub fn trust_of(&self, jid: &BareJid, device: DeviceId) -> Trust {
+        self.trust
+            .get(&(jid.clone(), device))
+            .copied()
+            .unwrap_or(Trust::Blind)
+    }
+
+    /// The trust a device seen for the first time starts with.
+    pub(crate) fn first_trust(&self, jid: &BareJid) -> Trust {
+        let verifying = self
+            .trust
+            .iter()
+            .any(|((j, _), t)| j == jid && *t == Trust::Verified);
+        if verifying { Trust::Undecided } else { Trust::Blind }
     }
 
     /// Records the identity key of a device, or checks it against the recorded one.

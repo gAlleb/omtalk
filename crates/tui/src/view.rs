@@ -82,6 +82,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     }
     status_line(frame, app, status);
     services_window(frame, app, area);
+    keys_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -913,6 +914,13 @@ pub fn message_rows(
             } else if !line.encrypted {
                 spans.push(Span::raw(" ".repeat(marker.width())));
             }
+            // From a device refused or not decided on.
+            if line.untrusted && first {
+                spans.push(Span::styled(
+                    "⚠ непроверенное устройство · ",
+                    Style::default().fg(theme::warn()),
+                ));
+            }
             spans.push(Span::styled(text, Style::default().fg(theme::text())));
             rows.push(TextLine::from(spans).into());
             first = false;
@@ -1143,6 +1151,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(chat) = app.current() else { return };
     let mut rows: Vec<TextLine> = Vec::new();
     let mut nicks = Vec::new();
+    let mut devices_from = None;
     match &chat.kind {
         ChatKind::Room { .. } => {
             for (nick, real) in &chat.occupants {
@@ -1235,8 +1244,9 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             client_rows(&mut rows, &clients, inner.width);
             rows.push(TextLine::default());
+            devices_from = Some(rows.len());
             rows.push(TextLine::from(Span::styled(
-                "устройства OMEMO",
+                "устройства OMEMO · ключи",
                 Style::default().fg(theme::dim()),
             )));
             let devices = match &chat.devices {
@@ -1261,14 +1271,19 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                 Some(devices) => devices.as_slice(),
             };
             for device in devices {
-                let (dot, colour) = match (&device.fingerprint, device.has_session) {
+                let (dot, colour) = match (&device.fingerprint, device.trust) {
                     (None, _) => ("○", theme::dim()),
-                    (Some(_), true) => ("●", theme::ok()),
-                    (Some(_), false) => ("●", theme::accent()),
+                    (Some(_), omtalk_omemo::Trust::Verified) => ("✓", theme::ok()),
+                    (Some(_), omtalk_omemo::Trust::Blind) => ("●", theme::accent()),
+                    (Some(_), _) => ("✗", theme::warn()),
                 };
                 let mut header = vec![
                     Span::styled(format!("{dot} "), Style::default().fg(colour)),
                     Span::styled(device.device.to_string(), Style::default().fg(theme::text())),
+                    Span::styled(
+                        format!(" {}", crate::keys::trust_words(device.trust)),
+                        Style::default().fg(theme::dim()),
+                    ),
                 ];
                 if device.this_device {
                     header.push(Span::styled(
@@ -1288,6 +1303,13 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                     )));
                 }
             }
+        }
+    }
+    // The device list is a way into the keys window.
+    if let Some(from) = devices_from {
+        let top = inner.y + from as u16;
+        if top < inner.bottom() {
+            app.areas.side_devices = Some(Rect::new(inner.x, top, inner.width, inner.bottom() - top));
         }
     }
     frame.render_widget(Paragraph::new(rows), inner);
@@ -1382,6 +1404,169 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hints_width)]).areas(area);
     frame.render_widget(Paragraph::new(TextLine::from(left)), left_area);
     frame.render_widget(Paragraph::new(hints), right_area);
+}
+
+/// The keys window, over the middle of the screen.
+fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(keys) = app.keys.as_ref() else { return };
+    // Wide enough for a whole fingerprint (8 groups of 8) on one row.
+    let width = screen.width.saturating_sub(4).min(82);
+    let height = screen.height.saturating_sub(3).min(26);
+    let area = Rect {
+        x: screen.x + (screen.width - width) / 2,
+        y: screen.y + (screen.height.saturating_sub(1) - height) / 2,
+        width,
+        height,
+    };
+    app.areas.key_window = area;
+    clear(frame, area);
+    let title = match &keys.peer {
+        Some(peer) => format!("Ключи OMEMO · {peer}"),
+        None => "Ключи OMEMO".to_owned(),
+    };
+    let block = pane(&title, true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 4 || inner.width < 20 {
+        return;
+    }
+    let [body, status, buttons, hint] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let body = Rect {
+        x: body.x + 1,
+        width: body.width.saturating_sub(2),
+        ..body
+    };
+
+    // Each owner's devices under a heading; a device takes two rows: its state, its
+    // fingerprint.
+    let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
+    let mut owner: Option<&BareJid> = None;
+    for (index, row) in keys.rows.iter().enumerate() {
+        if owner != Some(&row.owner) {
+            owner = Some(&row.owner);
+            if !lines.is_empty() {
+                lines.push((TextLine::default(), None));
+            }
+            let heading = if row.owner == keys.account {
+                format!("ваши устройства · {}", row.owner)
+            } else {
+                row.owner.to_string()
+            };
+            lines.push((
+                TextLine::styled(
+                    heading,
+                    Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+                ),
+                None,
+            ));
+        }
+        let (dot, colour) = match (&row.fingerprint, row.trust) {
+            (None, _) => ("○", theme::dim()),
+            (Some(_), omtalk_omemo::Trust::Verified) => ("✓", theme::ok()),
+            (Some(_), omtalk_omemo::Trust::Blind) => ("●", theme::accent()),
+            (Some(_), _) => ("✗", theme::warn()),
+        };
+        let mut state = crate::keys::trust_words(row.trust).to_owned();
+        if row.this_device {
+            state = "это устройство".into();
+        }
+        let selected = index == keys.cursor;
+        let style = if selected {
+            theme::selected()
+        } else {
+            Style::default()
+        };
+        lines.push((
+            TextLine::from(vec![
+                Span::styled(format!(" {dot} "), Style::default().fg(colour)),
+                Span::styled(format!("{:<12}", row.device), style),
+                Span::styled(format!(" {state}"), Style::default().fg(colour)),
+            ]),
+            Some(index),
+        ));
+        let fingerprint = row.fingerprint.clone().unwrap_or_else(|| "нет ключей".into());
+        lines.push((
+            TextLine::styled(format!("   {fingerprint}"), Style::default().fg(theme::dim())),
+            Some(index),
+        ));
+    }
+    if keys.rows.is_empty() && !keys.loading {
+        lines.push((
+            TextLine::styled("устройств нет", Style::default().fg(theme::dim())),
+            None,
+        ));
+    }
+    let cursor_line = lines
+        .iter()
+        .rposition(|(_, r)| *r == Some(keys.cursor))
+        .unwrap_or(0);
+    let skip = cursor_line.saturating_sub(body.height as usize - 1);
+    let mut row_areas = Vec::new();
+    for (i, (line, row)) in lines
+        .into_iter()
+        .skip(skip)
+        .take(body.height as usize)
+        .enumerate()
+    {
+        let place = Rect {
+            y: body.y + i as u16,
+            height: 1,
+            ..body
+        };
+        if let Some(row) = row {
+            row_areas.push((place, row));
+        }
+        frame.render_widget(Paragraph::new(line), place);
+    }
+
+    let (words, style) = match (&keys.problem, keys.loading, keys.confirm_remove) {
+        (Some(problem), _, _) => (problem.clone(), Style::default().fg(theme::warn())),
+        (None, true, _) => ("загрузка…".to_owned(), Style::default().fg(theme::dim())),
+        (None, false, Some(device)) => (
+            format!("удалить {device}? Ещё раз — удалить"),
+            Style::default().fg(theme::warn()),
+        ),
+        _ => (String::new(), Style::default()),
+    };
+    frame.render_widget(Paragraph::new(format!(" {words}")).style(style), status);
+
+    let labels = keys.buttons();
+    let total: u16 = labels
+        .iter()
+        .map(|b| crate::keys::button_words(*b).width() as u16 + 5)
+        .sum();
+    let mut x = buttons.x + buttons.width.saturating_sub(total + 1);
+    let mut button_areas = Vec::new();
+    for button in labels {
+        let text = format!("[ {} ]", crate::keys::button_words(button));
+        let w = text.width() as u16;
+        let place = Rect {
+            x,
+            width: w.min(buttons.right().saturating_sub(x)),
+            ..buttons
+        };
+        let style = if button == crate::keys::KeyButton::Remove {
+            Style::default().fg(theme::warn())
+        } else {
+            Style::default().fg(theme::accent())
+        };
+        frame.render_widget(Paragraph::new(text).style(style), place);
+        button_areas.push((place, button));
+        x += w + 1;
+    }
+    frame.render_widget(
+        Paragraph::new(" v проверено · d не доверять · b вслепую · x удалить своё · Esc")
+            .style(Style::default().fg(theme::dim())),
+        hint,
+    );
+    app.areas.key_rows = row_areas;
+    app.areas.key_buttons = button_areas;
 }
 
 /// The services window, over the middle of the screen.
@@ -2516,6 +2701,7 @@ mod tests {
             id: None,
             markable: false,
             archive_id: None,
+            untrusted: false,
         };
         app.on_incoming(&me, &missed, 1);
         app.on_incoming(&me, &missed, 2);
@@ -2627,6 +2813,7 @@ mod tests {
             id: Some(id.clone()),
             markable: false,
             archive_id: None,
+            untrusted: false,
         };
         app.on_incoming(&me, &echo, 5);
         let lines = &app.chats[room].lines;
@@ -2647,6 +2834,7 @@ mod tests {
             id: Some("b1".into()),
             markable: true,
             archive_id: Some("a1".into()),
+            untrusted: false,
         };
         assert!(
             app.on_incoming(&me, &from_bob, 6).is_empty(),
@@ -3110,6 +3298,7 @@ mod tests {
             id: None,
             markable: false,
             archive_id: None,
+            untrusted: false,
         };
         app.on_incoming(&me, &from_bob, 1);
         assert!(!screen(&mut app, 100, 20).contains("печатает"));
@@ -3164,6 +3353,7 @@ mod tests {
             id: Some(id.into()),
             markable: true,
             archive_id: Some(format!("a-{id}")),
+            untrusted: false,
         };
         assert_eq!(
             app.alert_for(&me, &from_bob("1")),
@@ -3246,5 +3436,100 @@ mod tests {
         app.media_done(link, crate::app::MediaState::Loading);
         assert!(screen(&mut app, 100, 20).contains("загружается…"));
         assert!(app.areas.fetches.is_empty(), "nothing to click while it comes");
+    }
+
+    #[test]
+    fn the_keys_window_shows_devices_and_decides_about_them() {
+        use crate::keys::{KeyButton, KeyRow, Request};
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        use omtalk_omemo::Trust;
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.chats[bob].devices = Some(vec![crate::app::DeviceRow {
+            device: 11,
+            fingerprint: Some("aaaa bbbb".into()),
+            has_session: true,
+            this_device: false,
+            trust: Trust::Blind,
+        }]);
+        screen(&mut app, 120, 30);
+        let devices = app.areas.side_devices.expect("the devices beside the chat");
+        let click = |x, y| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let opened = app.on_mouse(click(devices.x + 1, devices.y + 1));
+        assert_eq!(
+            opened,
+            [Action::Keys(Request::Load {
+                account: me.clone(),
+                peer: Some(jid("bob@home.org"))
+            })]
+        );
+
+        let row = |owner: &str, device, trust, this_device| KeyRow {
+            owner: jid(owner),
+            device,
+            fingerprint: Some("05ded421 707f60dc".into()),
+            trust,
+            this_device,
+        };
+        app.keys.as_mut().unwrap().loaded(Ok(vec![
+            row("bob@home.org", 11, Trust::Blind, false),
+            row("bob@home.org", 12, Trust::Undecided, false),
+            row("me@home.org", 21, Trust::Blind, true),
+        ]));
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("Ключи OMEMO · bob@home.org") && text.contains("ваши устройства"),
+            "{text}"
+        );
+        assert!(
+            text.contains("не решено")
+                && text.contains("это устройство")
+                && text.contains("05ded421 707f60dc"),
+            "{text}"
+        );
+
+        // A click on the second device, then on its button: verified.
+        let (place, _) = *app.areas.key_rows.iter().find(|(_, i)| *i == 1).unwrap();
+        app.on_mouse(click(place.x + 2, place.y));
+        screen(&mut app, 120, 30);
+        let (verify, _) = *app
+            .areas
+            .key_buttons
+            .iter()
+            .find(|(_, b)| *b == KeyButton::Verify)
+            .unwrap();
+        let asked = app.on_mouse(click(verify.x + 1, verify.y));
+        assert_eq!(
+            asked,
+            [Action::Keys(Request::Trust {
+                account: me.clone(),
+                owner: jid("bob@home.org"),
+                device: 12,
+                trust: Trust::Verified
+            })]
+        );
+        assert_eq!(app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)), []);
+        assert!(app.keys.is_none());
+
+        // The leader and e open it from the keyboard.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            &app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))[..],
+            [Action::Keys(_)]
+        ));
+
+        // A message from an undecided device is marked.
+        app.keys = None;
+        let mut line = Line::message(1_700_000_000, "bob".into(), "привет".into(), true, false);
+        line.untrusted = true;
+        app.push(bob, line);
+        assert!(screen(&mut app, 120, 30).contains("⚠ непроверенное устройство · привет"));
     }
 }

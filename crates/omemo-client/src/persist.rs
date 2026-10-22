@@ -12,6 +12,10 @@ pub trait Persist: Send + Sync {
     fn archive_position(&self, archive: &BareJid, id: &str) -> Result<(), PersistError>;
     /// No position for `archive`: the next catch-up starts from its newest message.
     fn forget_archive_position(&self, archive: &BareJid) -> Result<(), PersistError>;
+    /// What the user decided about a device.
+    fn trust(&self, _jid: &BareJid, _device: DeviceId, _trust: crate::Trust) -> Result<(), PersistError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

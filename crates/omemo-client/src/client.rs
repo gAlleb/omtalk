@@ -10,7 +10,7 @@ use xmpp_parsers::eme::ExplicitMessageEncryption;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
 use crate::envelope::{self, Content, Direction};
-use crate::state::Identity;
+use crate::state::{Identity, Trust};
 use crate::{Ephemeral, Error, Persist, State};
 
 /// python-omemo answers with an empty message once it has received this many messages
@@ -67,6 +67,8 @@ pub struct Incoming {
     /// The archive's id for it (XEP-0359): the own account's for chats, the room's for
     /// rooms. One's other clients learn what was read by it (XEP-0490).
     pub archive_id: Option<String>,
+    /// Written on a device the user refused or has not decided on: worth a mark.
+    pub untrusted: bool,
 }
 
 /// One published device of an account, as [`Omemo::devices`] reports it.
@@ -80,6 +82,7 @@ pub struct DeviceInfo {
     pub has_session: bool,
     /// The device this `Omemo` runs on.
     pub this_device: bool,
+    pub trust: Trust,
 }
 
 /// An identity key as Gajim and Conversations show it: 64 hex digits in groups of 8.
@@ -123,6 +126,8 @@ pub struct SendReport {
     pub failed: Vec<(BareJid, DeviceId, Error)>,
     /// Group members that publish no OMEMO devices at all.
     pub without_omemo: Vec<BareJid>,
+    /// Devices left out because they are refused or not decided on.
+    pub untrusted: Vec<(BareJid, DeviceId)>,
 }
 
 impl Omemo {
@@ -270,6 +275,7 @@ impl Omemo {
                     id: envelope.meta.id,
                     markable: envelope.meta.markable,
                     archive_id: None,
+                    untrusted: false,
                 }));
             }
             Content::Omemo(_) if self.has_no_key(&envelope) => {
@@ -286,6 +292,7 @@ impl Omemo {
                     id: envelope.meta.id,
                     markable: envelope.meta.markable,
                     archive_id: None,
+                    untrusted: false,
                 }));
             }
             Content::Omemo(encrypted) => encrypted,
@@ -345,6 +352,7 @@ impl Omemo {
         }
         self.persist.session(&key.0, key.1, &session)?;
         state.sessions.insert(key, session);
+        let untrusted = !state.trust_of(&envelope.sender, device).receives();
 
         Ok(Incoming {
             peer: envelope.peer,
@@ -361,6 +369,7 @@ impl Omemo {
             id: envelope.meta.id,
             markable: envelope.meta.markable,
             archive_id: None,
+            untrusted,
         })
     }
 
@@ -526,6 +535,9 @@ impl Omemo {
             .targets(&mut state, std::slice::from_ref(to), &mut report)
             .await?;
         if !targets.iter().any(|(jid, _)| jid == to) {
+            if report.untrusted.iter().any(|(jid, _)| jid == to) {
+                return Err(Error::NoTrustedDevices(to.clone()));
+            }
             return Err(Error::NoDevices(to.clone()));
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
@@ -633,6 +645,14 @@ impl Omemo {
                 }
             }
         }
+        // Devices refused, or new ones not decided on, get nothing; the report says so.
+        targets.retain(|(jid, device)| {
+            let receives = state.trust_of(jid, *device).receives();
+            if !receives {
+                report.untrusted.push((jid.clone(), *device));
+            }
+            receives
+        });
         Ok(targets)
     }
 
@@ -657,6 +677,7 @@ impl Omemo {
                     identity_key: bundle.ok().map(|b| b.identity_key),
                     known_identity_key: state.identities.get(&key).copied(),
                     has_session: state.sessions.contains_key(&key),
+                    trust: state.trust_of(jid, device),
                     this_device: jid == self.account.jid() && device == self.device_id,
                 }
             })
@@ -671,7 +692,8 @@ impl Omemo {
         Ok(bundle::from_xml(&bundle)?)
     }
 
-    /// Trusts a device's first identity key (BTBV) and refuses a changed one.
+    /// Records a device's first identity key, with the trust it starts with (BTBV), and
+    /// refuses a changed one.
     fn record_identity(
         &self,
         state: &mut State,
@@ -681,7 +703,15 @@ impl Omemo {
     ) -> Result<(), Error> {
         match state.check_identity(jid, device, key) {
             Identity::Known => Ok(()),
-            Identity::New => Ok(self.persist.identity(jid, device, key)?),
+            Identity::New => {
+                self.persist.identity(jid, device, key)?;
+                let trust = state.first_trust(jid);
+                if trust != Trust::Blind {
+                    state.trust.insert((jid.clone(), device), trust);
+                    self.persist.trust(jid, device, trust)?;
+                }
+                Ok(())
+            }
             Identity::Changed => Err(Error::IdentityChanged {
                 jid: jid.clone(),
                 device,
@@ -720,6 +750,34 @@ impl Omemo {
                 Access::Open,
             )
             .await?;
+        Ok(())
+    }
+
+    /// Decides about a device: verified, refused, or back to blind trust.
+    pub async fn set_trust(&self, jid: &BareJid, device: DeviceId, trust: Trust) -> Result<(), Error> {
+        let mut state = self.state.lock().await;
+        state.trust.insert((jid.clone(), device), trust);
+        self.persist.trust(jid, device, trust)?;
+        Ok(())
+    }
+
+    /// Takes an old device of one's own off the account's device list, so that nobody
+    /// encrypts for it any more. Not this one. A device still in use puts itself back.
+    pub async fn remove_own_device(&self, device: DeviceId) -> Result<(), Error> {
+        if device == self.device_id {
+            return Err(Error::ThisDevice);
+        }
+        let own = self.account.jid().clone();
+        let mut list = parse_device_list(&self.account.items(&own, DEVICE_LIST_NODE).await?);
+        if list.remove(&device) {
+            let payload: Element = device_list::to_xml(list.iter().copied()).into();
+            self.account
+                .publish(DEVICE_LIST_NODE, Some("current"), payload, Access::Open)
+                .await?;
+        }
+        let mut state = self.state.lock().await;
+        state.device_lists.insert(own.clone(), list);
+        state.sessions.remove(&(own, device));
         Ok(())
     }
 

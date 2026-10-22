@@ -66,6 +66,17 @@ const MIGRATIONS: &[&str] = &[
     folders::MIGRATION,
     folders::MIGRATION_PER_ACCOUNT,
     closed::MIGRATION,
+    // Schema 7: what the user decided about each device (omtalk_omemo::Trust codes); a
+    // device not here is trusted blindly.
+    "
+    CREATE TABLE omemo_trust (
+        account TEXT NOT NULL,
+        jid     TEXT NOT NULL,
+        device  INTEGER NOT NULL,
+        trust   INTEGER NOT NULL,
+        PRIMARY KEY (account, jid, device)
+    );
+    ",
 ];
 
 #[derive(Clone)]
@@ -139,6 +150,16 @@ impl Store {
         for row in rows {
             let (archive, id) = row?;
             state.archive_positions.insert(parse_jid(&archive)?, id);
+        }
+        let mut trust = db.prepare("SELECT jid, device, trust FROM omemo_trust WHERE account = ?1")?;
+        let rows = trust.query_map([account.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?, r.get::<_, u8>(2)?))
+        })?;
+        for row in rows {
+            let (jid, device, code) = row?;
+            if let Some(level) = omtalk_omemo::Trust::from_code(code) {
+                state.trust.insert((parse_jid(&jid)?, device), level);
+            }
         }
         Ok(Some(state))
     }
@@ -246,6 +267,13 @@ impl Persist for AccountOmemo {
             params![self.account.as_str(), jid.as_str(), device, key.as_slice()],
         )
     }
+
+    fn trust(&self, jid: &BareJid, device: DeviceId, trust: omtalk_omemo::Trust) -> Result<(), PersistError> {
+        self.write(
+            "INSERT OR REPLACE INTO omemo_trust (account, jid, device, trust) VALUES (?1, ?2, ?3, ?4)",
+            params![self.account.as_str(), jid.as_str(), device, trust.code()],
+        )
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +304,10 @@ mod tests {
                 .identity(&bob, peer.device_id, &peer.bundle().identity_key)
                 .unwrap();
             persist.archive_position(&alice, "A17").unwrap();
+            persist
+                .trust(&bob, peer.device_id, omtalk_omemo::Trust::Verified)
+                .unwrap();
+            persist.trust(&bob, 99, omtalk_omemo::Trust::Distrusted).unwrap();
         }
 
         let store = Store::open(&path).unwrap();
@@ -293,6 +325,16 @@ mod tests {
         assert_eq!(
             state.archive_positions[&alice], "A17",
             "catch-up resumes where it stopped"
+        );
+        assert_eq!(
+            state.trust_of(&bob, peer.device_id),
+            omtalk_omemo::Trust::Verified
+        );
+        assert_eq!(state.trust_of(&bob, 99), omtalk_omemo::Trust::Distrusted);
+        assert_eq!(
+            state.trust_of(&bob, 7),
+            omtalk_omemo::Trust::Blind,
+            "undecided ones are blind"
         );
 
         // The restored session continues where the saved one stopped: the peer reads

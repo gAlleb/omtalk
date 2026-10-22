@@ -55,6 +55,8 @@ pub struct Line {
     pub outgoing: bool,
     /// Said by omtalk itself (an error, a request), not by anyone in the chat.
     pub notice: bool,
+    /// Written on a device refused or not decided on.
+    pub untrusted: bool,
     /// The message's id, as sent: receipts and markers refer to it.
     pub id: Option<String>,
     /// For one's own messages sent from here: how far it has got.
@@ -102,6 +104,7 @@ impl Line {
             encrypted,
             outgoing,
             notice: false,
+            untrusted: false,
             media,
             id: None,
             delivery: None,
@@ -115,6 +118,7 @@ pub struct DeviceRow {
     pub fingerprint: Option<String>,
     pub has_session: bool,
     pub this_device: bool,
+    pub trust: omtalk_omemo::Trust,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +243,12 @@ pub struct Areas {
     pub message_rows: Vec<(Rect, String)>,
     /// Senders' names in a room and its participants: a click opens a chat with them.
     pub nicks: Vec<(Rect, String)>,
+    /// The keys window and what is clickable in it.
+    pub key_window: Rect,
+    pub key_rows: Vec<(Rect, usize)>,
+    pub key_buttons: Vec<(Rect, crate::keys::KeyButton)>,
+    /// The devices in the pane beside a direct chat: a click opens the keys window.
+    pub side_devices: Option<Rect>,
     /// The services window and what is clickable in it.
     pub service_window: Rect,
     pub service_rows: Vec<(Rect, usize)>,
@@ -325,6 +335,8 @@ pub enum Action {
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
+    /// The keys window asks something of OMEMO.
+    Keys(crate::keys::Request),
     /// Put text into the clipboards (ordinary and primary).
     Copy(String),
     /// Paste what is selected elsewhere on the desktop (primary).
@@ -405,6 +417,7 @@ pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("s", "сервисы сервера"),
     ("b", "список чатов скрыть/показать"),
     ("r", "правую панель скрыть/показать"),
+    ("e", "ключи OMEMO: отпечатки, доверие"),
     ("w", "закрыть чат (комнату — покинуть)"),
     ("z", "только текущий аккаунт / все"),
     ("m", "мышь: omtalk / терминал (выделение tmux)"),
@@ -467,6 +480,8 @@ pub struct App {
     pub leader_pending: bool,
     /// The services window, over the chat while open.
     pub services: Option<Services>,
+    /// The keys window, likewise.
+    pub keys: Option<crate::keys::Keys>,
     /// Connected clients by (account, whose), each by resource.
     pub online: BTreeMap<(BareJid, BareJid), BTreeMap<String, Online>>,
     /// This program's own resource on each account.
@@ -512,6 +527,7 @@ impl App {
             dragging: None,
             dragging_chat: None,
             services: None,
+            keys: None,
             completion: None,
             killed: String::new(),
             read_markers: true,
@@ -971,13 +987,14 @@ impl App {
             (None, Direction::Outgoing) => "я".to_owned(),
             (None, Direction::Incoming) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
         };
-        let line = Line::message(
+        let mut line = Line::message(
             at,
             who,
             text.clone(),
             message.encrypted,
             message.direction == Direction::Outgoing,
         );
+        line.untrusted = message.untrusted;
         self.push(index, line);
         if message.direction == Direction::Incoming {
             let chat = &mut self.chats[index];
@@ -1040,6 +1057,7 @@ impl App {
                     encrypted: true,
                     outgoing: false,
                     notice: true,
+                    untrusted: false,
                     media: None,
                     id: None,
                     delivery: None,
@@ -1067,6 +1085,10 @@ impl App {
         if let Some(services) = self.services.as_mut() {
             let outcome = services.on_key(key);
             return self.services_outcome(outcome);
+        }
+        if let Some(keys) = self.keys.as_mut() {
+            let outcome = keys.on_key(key);
+            return self.keys_outcome(outcome);
         }
         // The prefix, then one key: as tmux, and free of what the input line needs.
         if self.leader_pending {
@@ -1141,6 +1163,7 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('s') => self.open_services(None),
+            KeyCode::Char('e') => self.open_keys(None),
             KeyCode::Char('w') => match self.selected {
                 Some(index) => self.close_chat(index),
                 None => Vec::new(),
@@ -1449,6 +1472,14 @@ impl App {
                     (Some(index), Some(file)) => return self.upload(index, file),
                 }
             }
+            ("/keys", _) => {
+                let peer = match args.first().map(|a| a.parse::<BareJid>()) {
+                    Some(Ok(peer)) => Some(peer),
+                    Some(Err(_)) => return self.say("/keys [АДРЕС]"),
+                    None => None,
+                };
+                return self.open_keys(peer);
+            }
             ("/close", _) => match self.selected {
                 Some(index) => return self.close_chat(index),
                 None => Err("нет открытого чата".to_owned()),
@@ -1625,6 +1656,12 @@ impl App {
         true
     }
 
+    /// A word in the status line, as a command's answer.
+    fn say(&mut self, text: &str) -> Vec<Action> {
+        self.status = text.to_owned();
+        Vec::new()
+    }
+
     /// What Tab can complete here.
     fn completion_context(&self) -> complete::Context {
         let mut context = complete::Context::default();
@@ -1738,6 +1775,65 @@ impl App {
                 Vec::new()
             }
         }
+    }
+
+    /// Opens the keys window: `peer`'s devices (else the open chat's peer) and one's own.
+    pub fn open_keys(&mut self, peer: Option<BareJid>) -> Vec<Action> {
+        let peer = peer.or_else(|| {
+            self.current()
+                .filter(|c| c.kind == ChatKind::Direct)
+                .map(|c| c.jid.clone())
+        });
+        let Some(account) = self.account_for(peer.clone().map(Jid::from).as_ref()) else {
+            return Vec::new();
+        };
+        let (keys, request) = crate::keys::Keys::open(account, peer);
+        self.keys = Some(keys);
+        vec![Action::Keys(request)]
+    }
+
+    fn keys_outcome(&mut self, outcome: crate::keys::Outcome) -> Vec<Action> {
+        match outcome {
+            crate::keys::Outcome::Stay => Vec::new(),
+            crate::keys::Outcome::Close => {
+                self.keys = None;
+                Vec::new()
+            }
+            crate::keys::Outcome::Ask(request) => vec![Action::Keys(request)],
+        }
+    }
+
+    fn keys_mouse(&mut self, mouse: MouseEvent) -> Vec<Action> {
+        let (x, y) = (mouse.column, mouse.row);
+        let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        let row = self
+            .areas
+            .key_rows
+            .iter()
+            .find(|(r, _)| inside(*r))
+            .map(|&(_, i)| i);
+        let button = self
+            .areas
+            .key_buttons
+            .iter()
+            .find(|(r, _)| inside(*r))
+            .map(|&(_, b)| b);
+        let outside = !inside(self.areas.key_window);
+        let Some(keys) = self.keys.as_mut() else {
+            return Vec::new();
+        };
+        let outcome = match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => match (button, row) {
+                (Some(button), _) => keys.press(button),
+                (None, Some(row)) => keys.click_row(row),
+                _ if outside => crate::keys::Outcome::Close,
+                _ => crate::keys::Outcome::Stay,
+            },
+            MouseEventKind::ScrollUp => keys.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            MouseEventKind::ScrollDown => keys.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            _ => crate::keys::Outcome::Stay,
+        };
+        self.keys_outcome(outcome)
     }
 
     /// Opens the services window on `jid`, or on the current account's own server.
@@ -2038,6 +2134,9 @@ impl App {
         if self.services.is_some() {
             return self.services_mouse(mouse);
         }
+        if self.keys.is_some() {
+            return self.keys_mouse(mouse);
+        }
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
             || self.areas.files.iter().any(|(r, _)| inside(*r))
@@ -2110,6 +2209,8 @@ impl App {
                 } else if let Some((_, nick)) = self.areas.nicks.iter().find(|(r, _)| inside(*r)) {
                     let nick = nick.clone();
                     return self.open_private(&nick);
+                } else if inside_opt(self.areas.side_devices) {
+                    return self.open_keys(None);
                 } else if let Some((_, link)) = self.areas.fetches.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Fetch(link.clone())];
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
@@ -2342,6 +2443,7 @@ mod tests {
             id: None,
             markable: false,
             archive_id: None,
+            untrusted: false,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);
         app.on_incoming(&me, &incoming("carol@example.org"), 0);

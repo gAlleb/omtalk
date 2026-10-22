@@ -11,6 +11,10 @@ pub enum Error {
     Persist(#[from] crate::PersistError),
     #[error("{0} has no OMEMO device that can receive messages")]
     NoDevices(BareJid),
+    #[error("{0} has no trusted OMEMO device: decide about its devices first")]
+    NoTrustedDevices(BareJid),
+    #[error("this device cannot remove itself")]
+    ThisDevice,
     #[error("{nick} in {room} is not known to the room as a real account")]
     UnknownOccupant { room: BareJid, nick: String },
     #[error("device {device} of {jid} presents a different identity key than before")]

@@ -223,6 +223,13 @@ enum Msg {
     },
     /// A file to offer for sending (a picture pasted from the clipboard).
     Offer(PathBuf),
+    /// The keys window's devices, or why not.
+    Keys(Result<Vec<crate::keys::KeyRow>, String>),
+    /// A device's trust changed: the pane beside that chat reads them again.
+    DevicesStale {
+        account: BareJid,
+        jid: BareJid,
+    },
     /// Text from a clipboard, for the input.
     Paste(String),
     /// Another of one's clients read `chat`.
@@ -540,6 +547,19 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::Keys(rows) => {
+            if let Some(keys) = app.keys.as_mut() {
+                keys.loaded(rows);
+            }
+        }
+        Msg::DevicesStale { account, jid } => {
+            if app
+                .current()
+                .is_some_and(|c| c.account == account && c.jid == jid)
+            {
+                tokio::spawn(perform(Action::Devices { account, jid }, shared.clone()));
+            }
+        }
         Msg::Paste(text) => {
             for action in app.on_paste(&text) {
                 tokio::spawn(perform(action, shared.clone()));
@@ -1036,6 +1056,37 @@ fn content_type(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The rows of the keys window: `peer`'s devices first, then one's own.
+async fn key_rows(
+    omemo: &Omemo,
+    account: &BareJid,
+    peer: Option<&BareJid>,
+) -> Result<Vec<crate::keys::KeyRow>, String> {
+    let mut rows = Vec::new();
+    for owner in peer.into_iter().chain([account]) {
+        let devices = omemo.devices(owner).await.map_err(|e| e.to_string())?;
+        rows.extend(devices.into_iter().map(|d| crate::keys::KeyRow {
+            owner: owner.clone(),
+            device: d.device,
+            fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
+            trust: d.trust,
+            this_device: d.this_device,
+        }));
+    }
+    Ok(rows)
+}
+
+/// A failed OMEMO send, in words.
+fn omemo_error(error: &omtalk_omemo::Error) -> String {
+    match error {
+        omtalk_omemo::Error::NoTrustedDevices(jid) => {
+            format!("у {jid} нет доверенных устройств — решите о них в окне ключей (/keys)")
+        }
+        omtalk_omemo::Error::NoDevices(jid) => format!("у {jid} нет устройств OMEMO"),
+        other => other.to_string(),
+    }
+}
+
 /// A failed service query, in words.
 fn service_error(error: &omtalk_xmpp::Error) -> String {
     use omtalk_xmpp::stanza_error::DefinedCondition as C;
@@ -1102,6 +1153,15 @@ async fn perform(action: Action, shared: Shared) {
                                 text: format!("устройство {device} у {jid} не сможет прочитать: {e}"),
                             });
                         }
+                        for (jid, device) in report.untrusted {
+                            tell(Msg::Notice {
+                                account: account.clone(),
+                                chat: Some(to.clone()),
+                                text: format!(
+                                    "устройство {device} у {jid} не проверено, ему не шифруется (/keys)"
+                                ),
+                            });
+                        }
                         for jid in report.without_omemo {
                             tell(Msg::Notice {
                                 account: account.clone(),
@@ -1111,12 +1171,7 @@ async fn perform(action: Action, shared: Shared) {
                         }
                     }
                     Err(e) => {
-                        delivery(Delivery::Failed(e.to_string()));
-                        tell(Msg::Notice {
-                            account: account.clone(),
-                            chat: Some(to),
-                            text: format!("не отправлено: {e}. Без шифрования — выключите OMEMO (^O)"),
-                        });
+                        delivery(Delivery::Failed(omemo_error(&e)));
                     }
                 }
             } else {
@@ -1312,6 +1367,7 @@ async fn perform(action: Action, shared: Shared) {
                             fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
                             has_session: d.has_session,
                             this_device: d.this_device,
+                            trust: d.trust,
                         })
                         .collect();
                     tell(Msg::Devices { account, jid, rows });
@@ -1381,6 +1437,43 @@ async fn perform(action: Action, shared: Shared) {
                     }
                 }
             }
+        }
+        Action::Keys(request) => {
+            let account = match &request {
+                crate::keys::Request::Load { account, .. }
+                | crate::keys::Request::Trust { account, .. }
+                | crate::keys::Request::Remove { account, .. } => account.clone(),
+            };
+            let Some((_, omemo)) = get(&account) else { return };
+            let peer = match request {
+                crate::keys::Request::Load { peer, .. } => peer,
+                crate::keys::Request::Trust {
+                    owner, device, trust, ..
+                } => {
+                    if let Err(e) = omemo.set_trust(&owner, device, trust).await {
+                        tell(Msg::Keys(Err(e.to_string())));
+                        return;
+                    }
+                    // The pane beside the chat shows it too.
+                    tell(Msg::DevicesStale {
+                        account: account.clone(),
+                        jid: owner.clone(),
+                    });
+                    (owner != account).then_some(owner)
+                }
+                crate::keys::Request::Remove { device, .. } => {
+                    if let Err(e) = omemo.remove_own_device(device).await {
+                        tell(Msg::Keys(Err(e.to_string())));
+                        return;
+                    }
+                    tell(Msg::Log {
+                        account: account.clone(),
+                        text: format!("устройство {device} удалено из списка"),
+                    });
+                    None
+                }
+            };
+            tell(Msg::Keys(key_rows(&omemo, &account, peer.as_ref()).await));
         }
         Action::Copy(text) => {
             // wl-copy is quick; OSC 52 writes to the terminal, which the drawing also does,

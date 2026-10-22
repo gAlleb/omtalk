@@ -16,4 +16,4 @@ pub use client::{CatchUp, DeviceInfo, Incoming, Omemo, SendReport, fingerprint};
 pub use envelope::Direction;
 pub use error::Error;
 pub use persist::{Ephemeral, Persist, PersistError};
-pub use state::State;
+pub use state::{State, Trust};
