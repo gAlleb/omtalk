@@ -14,6 +14,7 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use omtalk_xmpp::BareJid;
 use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
 use xmpp_parsers::data_forms::FieldType;
 
@@ -109,10 +110,15 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     let several = app.accounts.len() > 1;
     let mut y = inner.y;
     for account in app.accounts.clone() {
+        let folded = app.collapsed.contains(&account);
         if several && y < inner.bottom() {
-            let header = Span::styled(account.to_string(), Style::default().fg(theme::DIM));
-            frame.render_widget(Paragraph::new(header), Rect::new(inner.x, y, inner.width, 1));
+            let row = Rect::new(inner.x, y, inner.width, 1);
+            frame.render_widget(account_row(app, &account, folded, inner.width), row);
+            app.areas.account_rows.push((row, account.clone()));
             y += 1;
+        }
+        if several && folded {
+            continue;
         }
         for (index, chat) in app.chats.iter().enumerate().filter(|(_, c)| c.account == account) {
             if y >= inner.bottom() {
@@ -137,6 +143,50 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
             Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(1), 2),
         );
     }
+}
+
+/// An account's heading in the chat list: fold mark, state, address, and while folded
+/// the unread count of its chats, so nothing hides there unnoticed.
+fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragraph<'static> {
+    let online = app.connection.get(account).is_some_and(|s| s == "в сети");
+    let mark = if folded { "▸ " } else { "▾ " };
+    let unread: usize = app
+        .chats
+        .iter()
+        .filter(|c| &c.account == account)
+        .map(|c| c.unread)
+        .sum();
+    let badge = if folded && unread > 0 {
+        format!(" {unread} ")
+    } else {
+        String::new()
+    };
+    let room = (width as usize).saturating_sub(mark.width() + 2 + badge.width());
+    let name = truncate(&account.to_string(), room);
+    let gap = (width as usize).saturating_sub(mark.width() + 2 + name.width() + badge.width());
+    Paragraph::new(TextLine::from(vec![
+        Span::styled(mark, Style::default().fg(theme::DIM)),
+        Span::styled(
+            "● ",
+            Style::default().fg(if online { theme::OK } else { theme::DIM }),
+        ),
+        Span::styled(name, {
+            // The account commands go to stands out.
+            let style = Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+            if app.active.as_ref() == Some(account) {
+                style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                style
+            }
+        }),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(
+            badge,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ),
+    ]))
 }
 
 fn chat_row(chat: &Chat, selected: bool, width: u16, icons: theme::Icons) -> Paragraph<'static> {
@@ -1426,5 +1476,76 @@ mod tests {
         assert!(app.status.contains("не показывает"), "{}", app.status);
         app.on_mouse(click(at(&app, "bob", false).unwrap()));
         assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
+    }
+
+    #[test]
+    fn accounts_head_their_chats_and_fold_away() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let (home, work) = (jid("me@home.org"), jid("me@work.org"));
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+        app.connection.insert(home.clone(), "в сети".into());
+        let a = app.chat(&home, &jid("anna@home.org"), ChatKind::Direct);
+        let b = app.chat(&work, &jid("boss@work.org"), ChatKind::Direct);
+        let c = app.chat(&home, &jid("carl@home.org"), ChatKind::Direct);
+        app.select(a);
+        app.push(
+            b,
+            Line::message(1_700_000_000, "boss".into(), "срочно".into(), true, false),
+        );
+        let text = screen(&mut app, 120, 20);
+        assert!(
+            text.contains("me@home.org") && text.contains("me@work.org"),
+            "{text}"
+        );
+
+        // The list goes by account, and so do the arrows: anna, carl, then boss.
+        assert_eq!(app.visible_chats(), [a, c, b]);
+        app.focus = Focus::Chats;
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected, Some(c));
+
+        // A click on the work heading folds it; its unread count stays in sight.
+        let (heading, _) = app
+            .areas
+            .account_rows
+            .iter()
+            .find(|(_, acc)| *acc == work)
+            .cloned()
+            .unwrap();
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: heading.x + 1,
+            row: heading.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let text = screen(&mut app, 120, 20);
+        assert!(!text.contains("boss") && text.contains("▸"), "{text}");
+        assert_eq!(app.visible_chats(), [a, c]);
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected, Some(a), "folded chats are skipped");
+
+        // z: only the current account; again, all of them.
+        app.collapsed.clear();
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.visible_chats(), [a, c]);
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.visible_chats(), [a, c, b]);
+
+        // Commands go from the account on the peer's server, else from the one last picked.
+        assert_eq!(
+            app.account_for(Some(&"x@work.org".parse().unwrap())),
+            Some(work.clone())
+        );
+        assert_eq!(
+            app.account_for(Some(&"room@muc.work.org".parse().unwrap())),
+            Some(work.clone())
+        );
+        app.select(a);
+        assert_eq!(
+            app.account_for(Some(&"x@elsewhere.net".parse().unwrap())),
+            Some(home.clone())
+        );
+        app.select(b);
+        assert_eq!(app.account_for(None), Some(work.clone()));
     }
 }

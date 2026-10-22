@@ -2,7 +2,7 @@
 //! keys and mouse turn into changes of this model and into [`Action`]s, which the
 //! runtime carries out. That keeps all of it testable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -166,6 +166,8 @@ pub struct Areas {
     pub show_left: Option<Rect>,
     pub show_right: Option<Rect>,
     pub chat_rows: Vec<(Rect, usize)>,
+    /// Account headings, shown with more than one account: a click folds them.
+    pub account_rows: Vec<(Rect, BareJid)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
     /// Senders' names in a room and its participants: a click opens a chat with them.
@@ -248,6 +250,10 @@ pub struct App {
     pub dragging: Option<Splitter>,
     /// The services window, over the chat while open.
     pub services: Option<Services>,
+    /// Accounts whose chats are folded away in the list.
+    pub collapsed: BTreeSet<BareJid>,
+    /// The account commands act for: the last one picked, by its chat or its heading.
+    pub active: Option<BareJid>,
     pub quit: bool,
 }
 
@@ -281,6 +287,8 @@ impl App {
             areas: Areas::default(),
             dragging: None,
             services: None,
+            collapsed: BTreeSet::new(),
+            active: None,
             quit: false,
         }
     }
@@ -317,6 +325,7 @@ impl App {
             return Vec::new();
         }
         self.selected = Some(index);
+        self.active = Some(self.chats[index].account.clone());
         let chat = &mut self.chats[index];
         chat.unread = 0;
         // A direct chat's right pane lists the peer's devices; read them afresh each time
@@ -470,6 +479,16 @@ impl App {
                 self.focus = Focus::Input;
                 Vec::new()
             }
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Char('h') => {
+                if let Some(account) = self.current().map(|c| c.account.clone()) {
+                    self.toggle_account(&account);
+                }
+                Vec::new()
+            }
+            KeyCode::Char('z') => {
+                self.focus_account();
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -554,10 +573,8 @@ impl App {
         let mut words = line.split_whitespace();
         let name = words.next().unwrap_or_default();
         let args: Vec<&str> = words.collect();
-        let account = self
-            .current()
-            .map(|c| c.account.clone())
-            .or_else(|| self.accounts.first().cloned());
+        let target = args.first().and_then(|a| a.parse::<Jid>().ok());
+        let account = self.account_for(target.as_ref());
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
@@ -634,6 +651,23 @@ impl App {
         }
     }
 
+    /// The account to reach `jid` from: the one on its server (or on the server whose
+    /// service it is, as `muc.example.org`), else the one last picked.
+    pub fn account_for(&self, jid: Option<&Jid>) -> Option<BareJid> {
+        let domain = jid.map(|j| j.domain().as_str());
+        let local = domain.and_then(|d| {
+            self.accounts
+                .iter()
+                .find(|a| a.domain().as_str() == d)
+                .or_else(|| {
+                    self.accounts
+                        .iter()
+                        .find(|a| d.ends_with(&format!(".{}", a.domain())))
+                })
+        });
+        local.or(self.active.as_ref()).or(self.accounts.first()).cloned()
+    }
+
     /// Opens a direct chat with a room participant, by nick: the room must show who is
     /// behind it.
     pub fn open_private(&mut self, nick: &str) -> Vec<Action> {
@@ -665,11 +699,9 @@ impl App {
 
     /// Opens the services window on `jid`, or on the current account's own server.
     pub fn open_services(&mut self, jid: Option<Jid>) -> Vec<Action> {
-        let account = self
-            .current()
-            .map(|c| c.account.clone())
-            .or_else(|| self.accounts.first().cloned());
-        let Some(account) = account else { return Vec::new() };
+        let Some(account) = self.account_for(jid.as_ref()) else {
+            return Vec::new();
+        };
         let jid = jid.unwrap_or_else(|| Jid::from(account.domain().to_owned()));
         let (services, request) = Services::open(account, jid);
         self.services = Some(services);
@@ -754,16 +786,55 @@ impl App {
         }
     }
 
+    /// Chats in the order the list shows them: by account, folded ones left out.
+    pub fn visible_chats(&self) -> Vec<usize> {
+        let several = self.accounts.len() > 1;
+        self.accounts
+            .iter()
+            .filter(|a| !several || !self.collapsed.contains(*a))
+            .flat_map(|a| {
+                self.chats
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, c)| &c.account == a)
+                    .map(|(i, _)| i)
+            })
+            .collect()
+    }
+
+    /// Folds an account's chats away, or opens them again.
+    pub fn toggle_account(&mut self, account: &BareJid) {
+        if !self.collapsed.remove(account) {
+            self.collapsed.insert(account.clone());
+        }
+    }
+
+    /// Folds every account but the current chat's: to look at one server only. Again,
+    /// and all are open.
+    pub fn focus_account(&mut self) {
+        let Some(current) = self.current().map(|c| c.account.clone()) else {
+            return;
+        };
+        let others: BTreeSet<BareJid> = self.accounts.iter().filter(|a| **a != current).cloned().collect();
+        if self.collapsed == others {
+            self.collapsed.clear();
+        } else {
+            self.collapsed = others;
+        }
+    }
+
     fn move_selection(&mut self, by: isize) -> Vec<Action> {
-        if self.chats.is_empty() {
+        let order = self.visible_chats();
+        if order.is_empty() {
             return Vec::new();
         }
-        let len = self.chats.len() as isize;
-        let next = match self.selected {
-            Some(i) => (i as isize + by).rem_euclid(len),
+        let len = order.len() as isize;
+        let next = match self.selected.and_then(|s| order.iter().position(|&i| i == s)) {
+            Some(at) => (at as isize + by).rem_euclid(len),
+            None if by < 0 => len - 1,
             None => 0,
         };
-        self.select(next as usize)
+        self.select(order[next as usize])
     }
 
     fn scroll(&mut self, by: isize) -> Vec<Action> {
@@ -816,6 +887,10 @@ impl App {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
                     self.toggle_omemo();
+                } else if let Some((_, account)) = self.areas.account_rows.iter().find(|(r, _)| inside(*r)) {
+                    let account = account.clone();
+                    self.toggle_account(&account);
+                    self.active = Some(account);
                 } else if let Some(&(_, index)) = self.areas.chat_rows.iter().find(|(r, _)| inside(*r)) {
                     self.focus = Focus::Chats;
                     return self.select(index);
