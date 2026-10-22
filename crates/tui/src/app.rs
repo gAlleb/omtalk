@@ -121,6 +121,8 @@ impl Line {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRow {
     pub device: u32,
+    /// When it last wrote (Unix seconds), if it ever did here.
+    pub seen: Option<i64>,
     pub fingerprint: Option<String>,
     pub has_session: bool,
     pub this_device: bool,

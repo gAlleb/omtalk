@@ -14,6 +14,8 @@ pub struct KeyRow {
     pub fingerprint: Option<String>,
     pub trust: Trust,
     pub this_device: bool,
+    /// When it last wrote (Unix seconds), if it ever did here.
+    pub seen: Option<i64>,
 }
 
 /// What the window asks the runtime to do.
@@ -189,6 +191,23 @@ impl Keys {
     }
 }
 
+/// When a device last wrote, in words: "сегодня 14:05", "вчера 09:12", "12.10.2026".
+pub fn seen_words(at: i64, now: i64) -> String {
+    use chrono::{Local, TimeZone};
+    let (Some(at), Some(now)) = (
+        Local.timestamp_opt(at, 0).single(),
+        Local.timestamp_opt(now, 0).single(),
+    ) else {
+        return String::new();
+    };
+    let days = (now.date_naive() - at.date_naive()).num_days();
+    match days {
+        0 => format!("писало сегодня {}", at.format("%H:%M")),
+        1 => format!("писало вчера {}", at.format("%H:%M")),
+        _ => format!("писало {}", at.format("%d.%m.%Y")),
+    }
+}
+
 pub fn trust_words(trust: Trust) -> &'static str {
     match trust {
         Trust::Blind => "вслепую",
@@ -225,6 +244,7 @@ mod tests {
             fingerprint: Some("aaaa bbbb".into()),
             trust,
             this_device,
+            seen: None,
         };
         keys.loaded(Ok(vec![
             row("bob@home.org", 1, Trust::Blind, false),
@@ -236,6 +256,19 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn when_a_device_last_wrote_is_said_by_the_day() {
+        use chrono::{Local, TimeZone};
+        let now = Local
+            .with_ymd_and_hms(2026, 10, 23, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        let at = |d, h, m| Local.with_ymd_and_hms(2026, 10, d, h, m, 0).unwrap().timestamp();
+        assert_eq!(seen_words(at(23, 9, 5), now), "писало сегодня 09:05");
+        assert_eq!(seen_words(at(22, 23, 59), now), "писало вчера 23:59");
+        assert_eq!(seen_words(at(1, 10, 0), now), "писало 01.10.2026");
     }
 
     #[test]

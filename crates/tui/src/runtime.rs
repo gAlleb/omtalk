@@ -1018,6 +1018,12 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
 /// Saves a message to the history and shows it.
 fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
     let at = message.at.unwrap_or_else(now);
+    // The device wrote: when, for the keys window ("писало вчера 14:05").
+    if let Some(device) = message.device
+        && message.text.is_some()
+    {
+        let _ = shared.store.device_seen(account, &message.sender, device, at);
+    }
     if let Some(text) = &message.text {
         let _ = shared.store.save_message(
             account,
@@ -1303,18 +1309,21 @@ async fn read_members(xmpp: &Account, room: &BareJid) -> Vec<BareJid> {
 /// The rows of the keys window: `peer`'s devices first, then one's own.
 async fn key_rows(
     omemo: &Omemo,
+    store: &Store,
     account: &BareJid,
     peer: Option<&BareJid>,
 ) -> Result<Vec<crate::keys::KeyRow>, String> {
     let mut rows = Vec::new();
     for owner in peer.into_iter().chain([account]) {
         let devices = omemo.devices(owner).await.map_err(|e| e.to_string())?;
+        let seen = store.devices_seen(account, owner).unwrap_or_default();
         rows.extend(devices.into_iter().map(|d| crate::keys::KeyRow {
             owner: owner.clone(),
             device: d.device,
             fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
             trust: d.trust,
             this_device: d.this_device,
+            seen: seen.get(&d.device).copied(),
         }));
     }
     Ok(rows)
@@ -1612,9 +1621,11 @@ async fn perform(action: Action, shared: Shared) {
             let Some((_, omemo)) = get(&account) else { return };
             match omemo.devices(&jid).await {
                 Ok(devices) => {
+                    let seen = shared.store.devices_seen(&account, &jid).unwrap_or_default();
                     let rows = devices
                         .into_iter()
                         .map(|d| DeviceRow {
+                            seen: seen.get(&d.device).copied(),
                             device: d.device,
                             fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
                             has_session: d.has_session,
@@ -1879,7 +1890,9 @@ async fn perform(action: Action, shared: Shared) {
                     None
                 }
             };
-            tell(Msg::Keys(key_rows(&omemo, &account, peer.as_ref()).await));
+            tell(Msg::Keys(
+                key_rows(&omemo, &shared.store, &account, peer.as_ref()).await,
+            ));
         }
         Action::Copy(text) => {
             // wl-copy is quick; OSC 52 writes to the terminal, which the drawing also does,

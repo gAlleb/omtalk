@@ -1515,6 +1515,15 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                         Style::default().fg(theme::dim()),
                     )));
                 }
+                if let Some(at) = device.seen.filter(|_| !device.this_device) {
+                    let words = crate::keys::seen_words(at, chrono::Utc::now().timestamp());
+                    for part in wrap(&words, inner.width.saturating_sub(2) as usize) {
+                        rows.push(TextLine::from(Span::styled(
+                            format!("  {part}"),
+                            Style::default().fg(theme::dim()),
+                        )));
+                    }
+                }
             }
         }
     }
@@ -1689,6 +1698,11 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         let mut state = crate::keys::trust_words(row.trust).to_owned();
         if row.this_device {
             state = "это устройство".into();
+        } else if let Some(at) = row.seen {
+            state = format!(
+                "{state} · {}",
+                crate::keys::seen_words(at, chrono::Utc::now().timestamp())
+            );
         }
         let selected = index == keys.cursor;
         let style = if selected {
@@ -3936,14 +3950,20 @@ mod tests {
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
         let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
         app.select(bob);
+        let yesterday = chrono::Utc::now().timestamp() - 86_400;
         app.chats[bob].devices = Some(vec![crate::app::DeviceRow {
             device: 11,
+            seen: Some(yesterday),
             fingerprint: Some("aaaa bbbb".into()),
             has_session: true,
             this_device: false,
             trust: Trust::Blind,
         }]);
-        screen(&mut app, 120, 30);
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("писало вчера"),
+            "when the device last wrote: {text}"
+        );
         let devices = app.areas.side_devices.expect("the devices beside the chat");
         let click = |x, y| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -3966,6 +3986,7 @@ mod tests {
             fingerprint: Some("05ded421 707f60dc".into()),
             trust,
             this_device,
+            seen: (device == 12).then_some(yesterday),
         };
         app.keys.as_mut().unwrap().loaded(Ok(vec![
             row("bob@home.org", 11, Trust::Blind, false),
@@ -3977,6 +3998,7 @@ mod tests {
             text.contains("Ключи OMEMO · bob@home.org") && text.contains("ваши устройства"),
             "{text}"
         );
+        assert!(text.contains("не решено · писало вчера"), "{text}");
         assert!(
             text.contains("не решено")
                 && text.contains("это устройство")

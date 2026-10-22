@@ -6,6 +6,7 @@
 mod closed;
 mod folders;
 mod history;
+mod seen;
 
 pub use folders::Folder;
 pub use history::{ChatSummary, StoredMessage};
@@ -77,6 +78,7 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (account, jid, device)
     );
     ",
+    seen::MIGRATION,
 ];
 
 #[derive(Clone)]

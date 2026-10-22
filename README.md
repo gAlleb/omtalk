@@ -170,7 +170,8 @@ contact's client shows, then mark the device verified (`v`). After the first ver
 new devices of that contact wait for your decision and get no messages ("blind trust
 before verification", as in Gajim and Conversations). `d` distrusts, `b` goes back to blind
 trust, `x` removes an old device of your own from the list (press twice). A message from
-an unverified or distrusted device is marked `⚠`.
+an unverified or distrusted device is marked `⚠`. Beside each device: when it last wrote
+(«писало вчера 14:05», "wrote yesterday 14:05"), so a device silent for months stands out.
 
 ## Mouse and clipboard
 
