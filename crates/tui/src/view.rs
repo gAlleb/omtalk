@@ -158,6 +158,8 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
                         inner.width,
                         app.icons,
                         &branch,
+                        !app.clients(&app.chats[index].account, &app.chats[index].jid)
+                            .is_empty(),
                     ),
                     row,
                 );
@@ -278,6 +280,7 @@ fn chat_row(
     width: u16,
     icons: theme::Icons,
     branch: &str,
+    online: bool,
 ) -> Paragraph<'static> {
     let width = width.saturating_sub(branch.width() as u16);
     let icon = match chat.kind {
@@ -308,7 +311,12 @@ fn chat_row(
             if selected {
                 base
             } else {
-                base.fg(if chat.is_room() { theme::ACCENT } else { theme::DIM })
+                // A person's mark is green while any of their clients is online.
+                base.fg(match chat.kind {
+                    ChatKind::Room { .. } => theme::ACCENT,
+                    ChatKind::Direct if online => theme::OK,
+                    _ => theme::DIM,
+                })
             },
         ),
         Span::styled(title, base),
@@ -333,6 +341,19 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     app.areas.input = input;
 
     let (title, subtitle) = match app.current() {
+        Some(chat) if chat.kind == ChatKind::Direct => {
+            let clients: Vec<String> = app
+                .clients(&chat.account, &chat.jid)
+                .iter()
+                .map(|c| c.client.clone())
+                .collect();
+            let seen = if clients.is_empty() {
+                "не в сети".to_owned()
+            } else {
+                clients.join(", ")
+            };
+            (chat.title(), format!("{} · {seen}", chat.jid))
+        }
         Some(chat) => (chat.title(), chat.jid.to_string()),
         None => ("omtalk".to_owned(), String::new()),
     };
@@ -426,6 +447,28 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     input_box(frame, app, input);
     suggestions(frame, app, input, messages);
     leader_keys(frame, app, input);
+}
+
+/// Connected clients, one a row: the program, its state, its own words.
+fn client_rows(rows: &mut Vec<TextLine<'static>>, clients: &[&omtalk_xmpp::presence::Online], width: u16) {
+    use omtalk_xmpp::presence::State;
+    for client in clients {
+        let state = client.state.unwrap_or(State::Online);
+        let colour = match state {
+            State::Chat | State::Online => theme::OK,
+            State::Away | State::Xa => theme::ACCENT,
+            State::Dnd => theme::WARN,
+        };
+        let mut words = state.words().to_owned();
+        if let Some(status) = &client.status {
+            words = format!("{words} · {status}");
+        }
+        let line = format!("{}  {words}", client.client);
+        rows.push(TextLine::from(vec![
+            Span::styled("● ", Style::default().fg(colour)),
+            Span::raw(truncate(&line, (width as usize).saturating_sub(2))),
+        ]));
+    }
 }
 
 /// The selected text in the conversation, in the terminal's own colours swapped.
@@ -997,7 +1040,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = match app.current() {
         Some(chat) if chat.is_room() => format!("Участники {}", chat.occupants.len()),
         Some(chat) if chat.kind == ChatKind::Server => "Аккаунт".to_owned(),
-        Some(_) => "Устройства".to_owned(),
+        Some(_) => "Собеседник".to_owned(),
         None => "—".to_owned(),
     };
     let block = pane(&title, false).title(
@@ -1068,8 +1111,42 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(theme::ACCENT),
                 )));
             }
+            rows.push(TextLine::default());
+            rows.push(TextLine::from(Span::styled(
+                "свои клиенты",
+                Style::default().fg(theme::DIM),
+            )));
+            let own = app.own_resource.get(&chat.account);
+            let mut clients: Vec<omtalk_xmpp::presence::Online> = app
+                .clients(&chat.account, &chat.account)
+                .into_iter()
+                .cloned()
+                .collect();
+            for client in &mut clients {
+                if Some(&client.resource) == own {
+                    client.client = format!("{} (это)", client.client);
+                }
+            }
+            client_rows(&mut rows, &clients.iter().collect::<Vec<_>>(), inner.width);
         }
         ChatKind::Direct => {
+            rows.push(TextLine::from(Span::styled(
+                "в сети",
+                Style::default().fg(theme::DIM),
+            )));
+            let clients = app.clients(&chat.account, &chat.jid);
+            if clients.is_empty() {
+                rows.push(TextLine::from(Span::styled(
+                    "  никого",
+                    Style::default().fg(theme::DIM),
+                )));
+            }
+            client_rows(&mut rows, &clients, inner.width);
+            rows.push(TextLine::default());
+            rows.push(TextLine::from(Span::styled(
+                "устройства OMEMO",
+                Style::default().fg(theme::DIM),
+            )));
             let devices = match &chat.devices {
                 None => {
                     rows.push(TextLine::from(Span::styled("…", Style::default().fg(theme::DIM))));
@@ -1625,7 +1702,10 @@ mod tests {
             !text.chars().any(|c| ('\u{1F300}'..='\u{1FAFF}').contains(&c)),
             "no colour emoji in the interface"
         );
-        assert!(text.contains("Устройства"), "right pane for a direct chat");
+        assert!(
+            text.contains("Собеседник") && text.contains("устройства OMEMO"),
+            "right pane for a direct chat"
+        );
         assert!(app.areas.left.is_some() && app.areas.right.is_some());
     }
 
@@ -2636,5 +2716,72 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         assert!(!app.mouse && app.status.contains("терминал"));
+    }
+
+    #[test]
+    fn a_peers_online_clients_show_in_the_chat_and_ones_own_in_the_server_pane() {
+        use omtalk_xmpp::presence::{Online, State};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        assert!(screen(&mut app, 120, 24).contains("не в сети"));
+        let client = |who: &str, resource: &str, name: &str, state| Online {
+            account: jid(who),
+            resource: resource.into(),
+            state,
+            client: name.into(),
+            status: None,
+        };
+        app.presence(
+            &me,
+            client("bob@home.org", "gajim.1", "Gajim", Some(State::Away)),
+            1,
+        );
+        app.presence(
+            &me,
+            client("bob@home.org", "Monal-iOS.2", "Monal", Some(State::Online)),
+            1,
+        );
+        let text = screen(&mut app, 120, 24);
+        assert!(
+            text.contains("bob@home.org · Monal, Gajim"),
+            "the most available first: {text}"
+        );
+        assert!(
+            text.contains("Gajim  отошёл") && text.contains("Monal  в сети"),
+            "{text}"
+        );
+
+        // Gone: off the list.
+        app.presence(&me, client("bob@home.org", "gajim.1", "Gajim", None), 2);
+        app.presence(&me, client("bob@home.org", "Monal-iOS.2", "Monal", None), 2);
+        assert!(screen(&mut app, 120, 24).contains("не в сети"));
+
+        // One's own clients: in the server pane, and their coming and going in the channel.
+        app.presence(
+            &me,
+            client("me@home.org", "gajim.3", "Gajim", Some(State::Online)),
+            3,
+        );
+        let server = app.server_chat(&me);
+        assert!(
+            app.chats[server]
+                .lines
+                .iter()
+                .any(|l| l.text.contains("свой клиент: Gajim (gajim.3) в сети"))
+        );
+        app.select(server);
+        let text = screen(&mut app, 120, 24);
+        assert!(
+            text.contains("свои клиенты") && text.contains("Gajim  в сети"),
+            "{text}"
+        );
+        app.presence(
+            &me,
+            client("me@home.org", "gajim.3", "Gajim", Some(State::Dnd)),
+            4,
+        );
+        assert_eq!(app.chats[server].lines.len(), 1, "a change of state is not news");
     }
 }

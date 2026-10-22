@@ -191,6 +191,21 @@ enum Msg {
     },
     /// A line for the status bar, about no account in particular.
     Status(String),
+    /// A client of someone (or one's own) came, went or changed.
+    Online {
+        account: BareJid,
+        online: omtalk_xmpp::presence::Online,
+    },
+    /// The resource this program got on the account.
+    Bound {
+        account: BareJid,
+        resource: String,
+    },
+    /// News for the account's server channel, not shown below.
+    Log {
+        account: BareJid,
+        text: String,
+    },
     /// Text from a clipboard, for the input.
     Paste(String),
     /// Another of one's clients read `chat`.
@@ -445,6 +460,9 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
         Msg::Paste(text) => drop(app.on_paste(&text)),
+        Msg::Online { account, online } => app.presence(&account, online, now()),
+        Msg::Log { account, text } => app.server_log(&account, text, now()),
+        Msg::Bound { account, resource } => drop(app.own_resource.insert(account, resource)),
         Msg::Listed { jid, node, listing } => {
             if let Some(services) = app.services.as_mut() {
                 services.listed(&jid, &node, listing);
@@ -470,6 +488,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             text,
         } => app.server_notice(&account, text, now()),
         Msg::Connection { account, state } => {
+            // Offline, nobody is known to be online: the server tells again on return.
+            if state != "в сети" {
+                app.online.retain(|(a, _), _| *a != account);
+            }
             let index = app.server_chat(&account);
             if app.connection.get(&account) != Some(&state) {
                 app.notice(Some(index), state.clone(), now());
@@ -530,10 +552,22 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
         };
         let tell = |msg| drop(shared.tx.send(msg));
         match &event {
-            Event::Online { resumed, .. } => {
+            Event::Online { resumed, jid } => {
+                tell(Msg::Bound {
+                    account: account.clone(),
+                    resource: jid.resource().to_string(),
+                });
                 tell(Msg::Connection {
                     account: account.clone(),
                     state: "в сети".into(),
+                });
+                tell(Msg::Log {
+                    account: account.clone(),
+                    text: if *resumed {
+                        format!("сессия {jid} восстановлена (XEP-0198): пропущенное придёт само")
+                    } else {
+                        format!("вошли как {jid}")
+                    },
                 });
                 if !resumed {
                     tokio::spawn(come_online(
@@ -592,6 +626,12 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 }
             }
             Event::Presence(presence) => {
+                if let Some(online) = omtalk_xmpp::presence::online(presence) {
+                    tell(Msg::Online {
+                        account: account.clone(),
+                        online,
+                    });
+                }
                 if let Some(occupant) = muc::occupant(presence) {
                     tell(Msg::Occupant {
                         account: account.clone(),
@@ -643,15 +683,36 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
 /// After every new login: announce the device, read what was missed, enter the rooms.
 async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
-    if let Err(e) = omemo.announce().await {
-        tell(Msg::Notice {
+    match omemo.announce().await {
+        Ok(()) => {
+            let fingerprint = omtalk_omemo::fingerprint(&omemo.identity_key().await);
+            tell(Msg::Log {
+                account: account.clone(),
+                text: format!(
+                    "OMEMO: это устройство {}, отпечаток {fingerprint}",
+                    omemo.device_id()
+                ),
+            });
+        }
+        Err(e) => tell(Msg::Notice {
             account: account.clone(),
             chat: None,
             text: format!("OMEMO: {e}"),
-        });
+        }),
     }
     match omemo.catch_up().await {
         Ok(caught) => {
+            let got = caught.messages.iter().filter(|m| m.text.is_some()).count();
+            if got > 0 || caught.unreadable > 0 {
+                let unreadable = match caught.unreadable {
+                    0 => String::new(),
+                    n => format!(", не для этого устройства: {n}"),
+                };
+                tell(Msg::Log {
+                    account: account.clone(),
+                    text: format!("из архива за время отсутствия: {got} сообщ.{unreadable}"),
+                });
+            }
             if caught.position_lost {
                 tell(Msg::Notice {
                     account: account.clone(),
@@ -698,6 +759,10 @@ async fn join(
     match xmpp.join(&room, &nick).await {
         Ok(()) => {
             let _ = shared.store.remember_room(account, &room, &nick);
+            tell(Msg::Log {
+                account: account.clone(),
+                text: format!("в комнате {room} как {nick}"),
+            });
             // A room new to the account goes into its bookmarks, as Gajim does, so its
             // other clients know it and the nick.
             if bookmark.is_none() {

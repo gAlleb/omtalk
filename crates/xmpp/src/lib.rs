@@ -15,6 +15,7 @@ mod login;
 pub mod mam;
 pub mod muc;
 pub mod pep;
+pub mod presence;
 pub mod receipts;
 pub mod roster;
 pub mod services;

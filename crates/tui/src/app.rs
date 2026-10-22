@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use omtalk_omemo::{Direction, Incoming};
+use omtalk_xmpp::presence::Online;
 use omtalk_xmpp::services::CommandAction;
 use omtalk_xmpp::{BareJid, Jid};
 use ratatui::layout::Rect;
@@ -371,6 +372,10 @@ pub struct App {
     pub leader_pending: bool,
     /// The services window, over the chat while open.
     pub services: Option<Services>,
+    /// Connected clients by (account, whose), each by resource.
+    pub online: BTreeMap<(BareJid, BareJid), BTreeMap<String, Online>>,
+    /// This program's own resource on each account.
+    pub own_resource: BTreeMap<BareJid, String>,
     /// Headings whose chats are folded away in the list.
     pub collapsed: BTreeSet<Group>,
     /// The user's own folders of chats, in order.
@@ -421,6 +426,8 @@ impl App {
             leader: (KeyCode::Char('x'), KeyModifiers::CONTROL),
             leader_pending: false,
             collapsed: BTreeSet::new(),
+            online: BTreeMap::new(),
+            own_resource: BTreeMap::new(),
             folders: Vec::new(),
             active: None,
             quit: false,
@@ -472,6 +479,47 @@ impl App {
         let index = self.server_chat(account);
         self.notice(Some(index), text.clone(), at);
         self.status = text;
+    }
+
+    /// A line in the account's server channel only: news, not a problem.
+    pub fn server_log(&mut self, account: &BareJid, text: impl Into<String>, at: i64) {
+        let index = self.server_chat(account);
+        self.notice(Some(index), text, at);
+    }
+
+    /// A client of someone (or of oneself) came, went or changed its state. One's own
+    /// clients coming and going are noted in the server channel.
+    pub fn presence(&mut self, account: &BareJid, online: Online, at: i64) {
+        let key = (account.clone(), online.account.clone());
+        let clients = self.online.entry(key).or_default();
+        let known = clients.contains_key(&online.resource);
+        let line = match &online.state {
+            Some(_) if !known => Some(format!("{} ({}) в сети", online.client, online.resource)),
+            None if known => Some(format!("{} ({}) вышел", online.client, online.resource)),
+            _ => None,
+        };
+        match online.state {
+            Some(_) => drop(clients.insert(online.resource.clone(), online.clone())),
+            None => drop(clients.remove(&online.resource)),
+        }
+        let this = self.own_resource.get(account) == Some(&online.resource);
+        if &online.account == account
+            && !this
+            && let Some(line) = line
+        {
+            self.server_log(account, format!("свой клиент: {line}"), at);
+        }
+    }
+
+    /// `who`'s connected clients, the most available first.
+    pub fn clients(&self, account: &BareJid, who: &BareJid) -> Vec<&Online> {
+        let mut clients: Vec<&Online> = self
+            .online
+            .get(&(account.clone(), who.clone()))
+            .map(|c| c.values().collect())
+            .unwrap_or_default();
+        clients.sort_by_key(|c| (c.state, c.client.clone()));
+        clients
     }
 
     /// One's own message, sent from here: shown at once, as being sent. `id` is the
