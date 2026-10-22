@@ -30,6 +30,8 @@ pub struct Occupant {
     pub is_self: bool,
     /// `false` when they left.
     pub present: bool,
+    /// Leaving under this nick to come back under another (status 303): the new one.
+    pub new_nick: Option<String>,
 }
 
 /// Reads a presence from a room occupant; `None` for any other presence.
@@ -49,6 +51,11 @@ pub fn occupant(presence: &Presence) -> Option<Occupant> {
         role: item.role.clone(),
         is_self: user.status.contains(&Status::SelfPresence),
         present: presence.type_ != PresenceType::Unavailable,
+        new_nick: user
+            .status
+            .contains(&Status::NewNick)
+            .then(|| item.nick.clone())
+            .flatten(),
     })
 }
 

@@ -359,6 +359,12 @@ pub enum Action {
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
+    /// Take another nick in a room.
+    Nick {
+        account: BareJid,
+        room: BareJid,
+        nick: String,
+    },
     /// Read a room's name.
     RoomName {
         account: BareJid,
@@ -856,6 +862,24 @@ impl App {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Someone in room `index` (or oneself) now goes by `new`: the same person, the
+    /// occupants list and one's own nick follow, and the room is told.
+    pub fn rename_occupant(&mut self, index: usize, old: &str, new: &str, at: i64) {
+        let chat = &mut self.chats[index];
+        let real = chat.occupants.remove(old).flatten();
+        chat.occupants.insert(new.to_owned(), real);
+        let own = matches!(&chat.kind, ChatKind::Room { nick } if nick == old);
+        if own {
+            chat.kind = ChatKind::Room { nick: new.to_owned() };
+        }
+        let text = if own {
+            format!("теперь вы {new}")
+        } else {
+            format!("{old} теперь {new}")
+        };
+        self.notice(Some(index), text, at);
     }
 
     /// A room's subject came: on entering (said quietly), or changed by `by`.
@@ -1572,7 +1596,8 @@ impl App {
             .filter(|r| r.account == chat.account && r.chat == chat.jid);
         let (text, reply) = match &replying {
             Some(r) => {
-                let (body, length) = omtalk_xmpp::replies::body(&r.quote, &text);
+                // The quote says whose it is, as clients write it: "Алиса:" first.
+                let (body, length) = omtalk_xmpp::replies::body(&format!("{}:\n{}", r.who, r.quote), &text);
                 (body, r.to.clone().map(|to| (to, length)))
             }
             None => (text, None),
@@ -1700,6 +1725,20 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/nick", _) => match self.current().filter(|c| c.is_room()) {
+                Some(chat) => {
+                    let nick = line[name.len()..].trim().to_owned();
+                    if nick.is_empty() {
+                        return self.say("/nick НИК — сменить свой ник в этой комнате");
+                    }
+                    Ok(vec![Action::Nick {
+                        account: chat.account.clone(),
+                        room: chat.jid.clone(),
+                        nick,
+                    }])
+                }
+                None => Err("это не комната".to_owned()),
+            },
             ("/topic", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
                     let topic = line[name.len()..].trim().to_owned();

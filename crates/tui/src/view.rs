@@ -686,9 +686,8 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
     if rows.is_empty() || app.focus != Focus::Input {
         return;
     }
-    let height = (rows.len() as u16 + 2)
-        .min(above.height.saturating_sub(1))
-        .min(14);
+    // As tall as the commands need, up to the chat's height: all of them for /help.
+    let height = (rows.len() as u16 + 2).min(above.height.saturating_sub(1));
     if height < 3 {
         return;
     }
@@ -969,7 +968,18 @@ pub fn message_rows(
                 .into(),
             );
         }
-        let (quote, said) = split_quote(&line.text);
+        let (mut quote, said) = split_quote(&line.text);
+        // "Алиса:" opening the quote says what the header says already.
+        if let Some(answered) = &line.reply_to
+            && let Some(original) = lines
+                .iter()
+                .find(|l| l.id.as_ref() == Some(answered) || l.archive_id.as_ref() == Some(answered))
+            && quote
+                .first()
+                .is_some_and(|first| *first == format!("{}:", original.who))
+        {
+            quote.remove(0);
+        }
         for text in quote
             .iter()
             .flat_map(|q| wrap(q, text_width.saturating_sub(2).max(1)))
@@ -1263,6 +1273,20 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut people = Vec::new();
     match &chat.kind {
         ChatKind::Room { .. } => {
+            // What the room is: its topic in full, and its address.
+            if let Some(topic) = &chat.topic {
+                for part in wrap(topic, inner.width as usize) {
+                    rows.push(TextLine::from(Span::styled(
+                        part,
+                        Style::default().fg(theme::text()),
+                    )));
+                }
+            }
+            rows.push(TextLine::from(Span::styled(
+                chat.jid.to_string(),
+                Style::default().fg(theme::dim()),
+            )));
+            rows.push(TextLine::default());
             for (nick, real) in &chat.occupants {
                 let y = inner.y + rows.len() as u16;
                 if y < inner.bottom() {
@@ -1308,6 +1332,20 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                         ),
                     ]));
                 }
+            }
+            // What can be done with the room, so nobody has to look for it.
+            rows.push(TextLine::default());
+            for command in [
+                "/topic тема",
+                "/name название",
+                "/invite адрес",
+                "/nick ник",
+                "/close",
+            ] {
+                rows.push(TextLine::from(Span::styled(
+                    command,
+                    Style::default().fg(theme::accent()),
+                )));
             }
         }
         ChatKind::Server => {
@@ -3782,8 +3820,11 @@ mod tests {
         else {
             panic!("{sent:?}")
         };
-        assert_eq!(text, "> как дела?\nотлично");
-        assert_eq!((to.id.as_str(), *length), ("b1", "> как дела?\n".chars().count()));
+        assert_eq!(text, "> bob:\n> как дела?\nотлично", "the quote says whose it is");
+        assert_eq!(
+            (to.id.as_str(), *length),
+            ("b1", "> bob:\n> как дела?\n".chars().count())
+        );
         assert!(app.replying.is_none());
         let text = screen(&mut app, 100, 20);
         assert!(
@@ -3793,6 +3834,10 @@ mod tests {
         assert!(
             !text.contains("> как дела?"),
             "the quote is drawn, not its marks: {text}"
+        );
+        assert!(
+            !text.contains("▎ bob:"),
+            "the name is in the header, not twice: {text}"
         );
 
         // Esc drops a reply before it is sent.
@@ -3916,5 +3961,71 @@ mod tests {
             matches!(&made[..], [Action::CreateRoom { name: Some(n), .. }] if n == "Планёрка"),
             "{made:?}"
         );
+    }
+
+    #[test]
+    fn nicks_change_in_place_and_the_room_pane_says_what_the_room_is() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        app.chats[room].name = Some("Команда".into());
+        app.chats[room].topic = Some("релиз в пятницу".into());
+        app.chats[room]
+            .occupants
+            .insert("гость".into(), Some(jid("xff@home.org")));
+        app.chats[room].occupants.insert("me".into(), Some(me.clone()));
+
+        app.rename_occupant(room, "гость", "mrak", 1);
+        let chat = &app.chats[room];
+        assert_eq!(
+            chat.occupants.get("mrak"),
+            Some(&Some(jid("xff@home.org"))),
+            "the same person"
+        );
+        assert!(!chat.occupants.contains_key("гость"));
+        assert!(chat.lines.last().unwrap().text.contains("гость теперь mrak"));
+        app.rename_occupant(room, "me", "Стефан", 2);
+        assert_eq!(
+            app.chats[room].kind,
+            ChatKind::Room {
+                nick: "Стефан".into()
+            }
+        );
+
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("релиз в пятницу") && text.contains("team@muc.home.org"),
+            "topic and address: {text}"
+        );
+        assert!(
+            text.contains("/topic тема") && text.contains("/nick ник"),
+            "{text}"
+        );
+
+        app.focus = Focus::Input;
+        "/nick Стеф"
+            .chars()
+            .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+        let mut actions = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        actions.retain(|a| !matches!(a, Action::ChatState { .. }));
+        assert_eq!(
+            actions,
+            [Action::Nick {
+                account: me.clone(),
+                room: jid("team@muc.home.org"),
+                nick: "Стеф".into()
+            }]
+        );
+
+        // /help: every command, the last ones too.
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        let text = screen(&mut app, 120, 40);
+        assert!(text.contains("/create") && text.contains("/quit"), "{text}");
     }
 }

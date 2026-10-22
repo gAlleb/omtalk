@@ -90,6 +90,11 @@ pub const COMMANDS: &[Command] = &[
         about: "позвать в комнату (сделать участником)",
     },
     Command {
+        name: "/nick",
+        args: "НИК",
+        about: "сменить свой ник в комнате",
+    },
+    Command {
         name: "/topic",
         args: "[ТЕКСТ]",
         about: "тема комнаты: показать или сменить",

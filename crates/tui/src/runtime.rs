@@ -180,6 +180,8 @@ enum Msg {
         nick: String,
         real: Option<BareJid>,
         present: bool,
+        /// Leaving `nick` for this one (status 303).
+        new_nick: Option<String>,
     },
     /// A shared file was fetched (or not).
     Media {
@@ -714,7 +716,18 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             nick,
             real,
             present,
+            new_nick,
         } => {
+            // A nick changed: the same person, a new name, said in the room.
+            if let Some(new) = new_nick
+                && let Some(index) = app
+                    .chats
+                    .iter()
+                    .position(|c| c.account == account && c.jid == room)
+            {
+                app.rename_occupant(index, &nick, &new, now());
+                return;
+            }
             // Entering, the room tells who is there before it confirms the entry: the
             // chat is made by the first of them, or they would be lost.
             let index = match app
@@ -874,6 +887,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         nick: occupant.nick,
                         real: occupant.real_jid,
                         present: occupant.present,
+                        new_nick: occupant.new_nick,
                     });
                 }
             }
@@ -1673,6 +1687,32 @@ async fn perform(action: Action, shared: Shared) {
                 room,
                 members,
             });
+        }
+        Action::Nick { account, room, nick } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            // Entering again under another nick is how a nick changes (XEP-0045, 7.6).
+            match xmpp.join(&room, &nick).await {
+                Ok(()) => {
+                    let _ = shared.store.remember_room(&account, &room, &nick);
+                    // The account's other clients keep the room under the new nick too.
+                    let bookmarks = xmpp.bookmarks().await.unwrap_or_default();
+                    let mut mark = bookmarks.into_iter().find(|b| b.room == room).unwrap_or(
+                        omtalk_xmpp::bookmarks::Bookmark {
+                            room: room.clone(),
+                            name: None,
+                            nick: None,
+                            autojoin: true,
+                        },
+                    );
+                    mark.nick = Some(nick);
+                    let _ = xmpp.bookmark(&mark).await;
+                }
+                Err(e) => tell(Msg::Notice {
+                    account,
+                    chat: Some(room),
+                    text: format!("ник не сменился: {}", refusal(&e)),
+                }),
+            }
         }
         Action::Members { account, room } => {
             let Some((xmpp, _)) = get(&account) else { return };

@@ -702,3 +702,31 @@ async fn an_invited_account_hears_of_it() {
     // A member now: the room lets them in.
     friend.join(&room, "друг").await.unwrap();
 }
+
+#[tokio::test]
+async fn a_nick_change_is_seen_as_the_same_person_renamed() {
+    use omtalk_xmpp::muc;
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u14")).await;
+    let guest = accounts.add(config("u15")).await;
+    online(&mut events, &[&owner, &guest]).await;
+    let room: BareJid = format!("nick-{}@muc.localhost", std::process::id())
+        .parse()
+        .unwrap();
+    owner.join(&room, "хозяин").await.unwrap();
+    owner.set_room_name(&room, "Ники").await.unwrap();
+    guest.join(&room, "гость").await.unwrap();
+
+    // Entering again under another nick is the change; the room confirms it.
+    guest.join(&room, "mrak").await.unwrap();
+    let renamed = wait_for(&mut events, |e| match &e.event {
+        Event::Presence(p) if e.account == *owner.jid() => muc::occupant(p).filter(|o| o.new_nick.is_some()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        (renamed.nick.as_str(), renamed.new_nick.as_deref()),
+        ("гость", Some("mrak"))
+    );
+    assert_eq!(renamed.real_jid.as_ref(), Some(guest.jid()));
+}
