@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use omtalk_omemo::Direction;
-use omtalk_testkit::{Device, WAIT, converge, text};
+use omtalk_testkit::{Device, WAIT, converge, fresh_device_lists, stop_all, text};
 use omtalk_xmpp::{Affiliation, BareJid};
 use tokio::time::timeout;
 
@@ -27,6 +27,7 @@ async fn sees(device: &Device, room: &BareJid, nicks: &[&str]) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn members_on_all_their_devices_read_group_messages() {
+    fresh_device_lists(&["u10", "u11", "u12", "u13"]).await;
     let (mut alice_phone, mut alice_laptop, mut bob, mut carol_phone, mut carol_laptop, dave) = tokio::join!(
         Device::start("u10"),
         Device::start("u10"),
@@ -111,4 +112,5 @@ async fn members_on_all_their_devices_read_group_messages() {
             }
         }
     }
+    stop_all(devices.into_iter().chain([dave])).await;
 }

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+futures = "0.3.34"
 omemo = { version = "0.1.0", path = "../omemo" }
 omemo-xml = { version = "0.1.0", path = "../omemo-xml" }
 omtalk-xmpp = { version = "0.1.0", path = "../xmpp" }

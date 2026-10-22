@@ -47,26 +47,16 @@ impl Device {
 
     /// One client: its own connection and keys, driven by its own event loop.
     pub async fn start_with(user: &str, state: State, persist: Arc<dyn Persist>) -> Self {
-        let jid: BareJid = format!("{user}@localhost").parse().unwrap();
-        let mut config = AccountConfig::new(jid.clone(), "test");
-        config.server = Server::Plaintext {
-            addr: "127.0.0.1:15222".into(),
-        };
-        config.iq_timeout = Duration::from_secs(5);
-        // A dead connection is noticed within seconds here, not a minute.
-        config.keepalive = Duration::from_secs(2);
-        config.keepalive_answer = Duration::from_secs(2);
-
-        let (mut accounts, mut events) = Accounts::new();
-        let account = accounts.add(config).await;
-        timeout(WAIT, async {
-            while !matches!(events.recv().await.unwrap().event, Event::Online { .. }) {}
-        })
-        .await
-        .expect("online; is the test server up (`mise run prosody`)?");
+        let jid = test_jid(user);
+        let (accounts, mut events, account) = connect(user).await;
 
         let omemo = Arc::new(Omemo::persisting(account.clone(), state, persist));
+        let started = std::time::Instant::now();
         omemo.announce().await.unwrap();
+        if started.elapsed() > Duration::from_secs(1) {
+            // Shown only when a test fails; a slow server explains timeouts.
+            eprintln!("{} announced in {:?}", jid, started.elapsed());
+        }
 
         let (tx, inbox) = mpsc::unbounded_channel();
         let (connection_tx, connection) = mpsc::unbounded_channel();
@@ -161,8 +151,9 @@ impl Device {
 pub async fn converge(devices: &[&Device]) {
     let ids: BTreeSet<DeviceId> = devices.iter().map(|d| d.omemo.device_id()).collect();
     let owner = devices[0].jid.clone();
-    let settled = |seen: Vec<BTreeSet<DeviceId>>| seen.iter().all(|list| list.is_superset(&ids));
-    timeout(WAIT, async {
+    let settled = |seen: &[BTreeSet<DeviceId>]| seen.iter().all(|list| list.is_superset(&ids));
+    let mut last_seen = Vec::new();
+    let converged = timeout(WAIT, async {
         let mut stable_since = None;
         loop {
             let mut seen = Vec::new();
@@ -178,7 +169,9 @@ pub async fn converge(devices: &[&Device]) {
                 .map(|list| omemo_xml::device_list::from_xml(&list))
                 .unwrap_or_default();
             seen.push(on_server);
-            if settled(seen) {
+            let done = settled(&seen);
+            last_seen = seen;
+            if done {
                 let since = *stable_since.get_or_insert_with(tokio::time::Instant::now);
                 if since.elapsed() > Duration::from_millis(500) {
                     return;
@@ -189,8 +182,11 @@ pub async fn converge(devices: &[&Device]) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
-    .await
-    .expect("own device lists did not converge");
+    .await;
+    assert!(
+        converged.is_ok(),
+        "own device lists of {owner} did not converge on {ids:?}; last seen (each device, then the server): {last_seen:?}"
+    );
 }
 
 pub fn text(incoming: &Incoming) -> &str {
@@ -211,13 +207,17 @@ pub async fn befriend(a: &Device, b: &Device) {
     }
 }
 
-pub async fn unfriend(a: &Device, b: &Device) {
-    use xmpp_parsers::roster::{Item, Roster, Subscription};
-    for (from, to) in [(a, b), (b, a)] {
+/// Makes two test accounts strangers before their devices start. The server keeps
+/// rosters across runs, and a contact is pushed the other's device list on login: a
+/// list from an earlier run, which a later removal cannot take back.
+pub async fn strangers(a: &str, b: &str) {
+    let ((_a_accounts, _, a_account), (_b_accounts, _, b_account)) = tokio::join!(connect(a), connect(b));
+    for (from, to) in [(&a_account, b), (&b_account, a)] {
+        use xmpp_parsers::roster::{Item, Roster, Subscription};
         let remove = Roster {
             ver: None,
             items: vec![Item {
-                jid: to.jid.clone(),
+                jid: test_jid(to),
                 name: None,
                 subscription: Subscription::Remove,
                 ask: Default::default(),
@@ -226,6 +226,67 @@ pub async fn unfriend(a: &Device, b: &Device) {
             }],
         };
         // Not being in the roster is fine too: the server says item-not-found.
-        let _ = from.account.set(None, remove).await;
+        let _ = from.set(None, remove).await;
+    }
+    a_account.stop().await;
+    b_account.stop().await;
+}
+
+/// Empties the device lists of test accounts before their devices start, as for fresh
+/// accounts: the server keeps lists across runs, and each run's devices stay in them.
+pub async fn fresh_device_lists(users: &[&str]) {
+    for user in users {
+        let (_accounts, _, account) = connect(user).await;
+        let empty: omtalk_xmpp::Element = omemo_xml::device_list::to_xml([]).into();
+        account
+            .publish(
+                omemo_xml::DEVICE_LIST_NODE,
+                Some("current"),
+                empty,
+                omtalk_xmpp::Access::Open,
+            )
+            .await
+            .unwrap();
+        account.stop().await;
+    }
+}
+
+fn test_jid(user: &str) -> BareJid {
+    format!("{user}@localhost").parse().unwrap()
+}
+
+/// A logged-in connection of a test account, without OMEMO.
+async fn connect(
+    user: &str,
+) -> (
+    Accounts,
+    mpsc::UnboundedReceiver<omtalk_xmpp::AccountEvent>,
+    Account,
+) {
+    let mut config = AccountConfig::new(test_jid(user), "test");
+    config.server = Server::Plaintext {
+        addr: "127.0.0.1:15222".into(),
+    };
+    config.iq_timeout = Duration::from_secs(5);
+    // A dead connection is noticed within seconds here, not a minute.
+    config.keepalive = Duration::from_secs(2);
+    config.keepalive_answer = Duration::from_secs(2);
+
+    let (mut accounts, mut events) = Accounts::new();
+    let account = accounts.add(config).await;
+    timeout(WAIT, async {
+        while !matches!(events.recv().await.unwrap().event, Event::Online { .. }) {}
+    })
+    .await
+    .expect("online; is the test server up (`mise run prosody`)?");
+    (accounts, events, account)
+}
+
+/// Closes the devices' connections. Call it at the end of a test: a connection that
+/// just vanishes stays parked on the server (XEP-0198) for minutes, and messages for
+/// its account go to it in the next run.
+pub async fn stop_all(devices: impl IntoIterator<Item = Device>) {
+    for device in devices {
+        device.stop().await;
     }
 }

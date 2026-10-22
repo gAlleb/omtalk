@@ -8,7 +8,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use omtalk_testkit::{Device, converge, text};
+use omtalk_testkit::{Device, converge, stop_all, text};
 
 fn docker(args: &[&str]) {
     let status = Command::new("docker")
@@ -57,4 +57,5 @@ async fn conversation_survives_network_loss_and_server_restart() {
     assert_eq!(text(&bob.next_text().await), "написано пока сервер лежал");
     bob.omemo.send(&alice.jid, "сервер вернулся").await.unwrap();
     assert_eq!(text(&alice.next_text().await), "сервер вернулся");
+    stop_all([alice, bob]).await;
 }

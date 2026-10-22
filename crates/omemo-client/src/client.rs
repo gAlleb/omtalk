@@ -110,7 +110,14 @@ impl Omemo {
                 let mut state = self.state.lock().await;
                 if from == self.account.jid() {
                     // Another of our clients published a list without us; it happens
-                    // when two of them publish at once. Put ourselves back.
+                    // when two of them publish at once. The notification may be stale by
+                    // now, and publishing it back would drop whoever came since: read the
+                    // list again, and put ourselves back only if we are still missing.
+                    let list = if list.contains(&self.device_id) {
+                        list
+                    } else {
+                        parse_device_list(&self.account.items(from, DEVICE_LIST_NODE).await?)
+                    };
                     self.ensure_listed(&mut state, list).await?;
                 } else {
                     state.device_lists.insert(from.clone(), list);
@@ -291,38 +298,49 @@ impl Omemo {
                 report.without_omemo.push(jid.clone());
             }
             for device in devices {
-                if jid == &own && device == state.keys.device_id {
-                    continue;
+                if !(jid == &own && device == state.keys.device_id) {
+                    targets.push((jid.clone(), device));
                 }
-                if !state.sessions.contains_key(&(jid.clone(), device)) {
-                    match self.start_session(state, jid, device).await {
-                        Ok(session) => drop(state.sessions.insert((jid.clone(), device), session)),
-                        Err(error) => {
-                            report.failed.push((jid.clone(), device, error));
-                            continue;
-                        }
-                    }
+            }
+        }
+
+        // Bundles of devices without a session, all requested at once: one by one, a
+        // contact with many devices (or dead ones) costs a round trip each.
+        let missing: Vec<_> = targets
+            .iter()
+            .filter(|key| !state.sessions.contains_key(key))
+            .cloned()
+            .collect();
+        let bundles = futures::future::join_all(
+            missing
+                .iter()
+                .map(|(jid, device)| self.fetch_bundle(jid, *device)),
+        )
+        .await;
+        for ((jid, device), bundle) in missing.into_iter().zip(bundles) {
+            let started = bundle.and_then(|bundle| {
+                let session = Session::initiate(&state.keys, &bundle)?;
+                self.record_identity(state, &jid, device, &bundle.identity_key)?;
+                Ok(session)
+            });
+            match started {
+                // Saved once it has encrypted something, in `encrypt_for`.
+                Ok(session) => drop(state.sessions.insert((jid, device), session)),
+                Err(error) => {
+                    targets.retain(|key| key != &(jid.clone(), device));
+                    report.failed.push((jid, device, error));
                 }
-                targets.push((jid.clone(), device));
             }
         }
         Ok(targets)
     }
 
-    async fn start_session(
-        &self,
-        state: &mut State,
-        jid: &BareJid,
-        device: DeviceId,
-    ) -> Result<Session, Error> {
+    async fn fetch_bundle(&self, jid: &BareJid, device: DeviceId) -> Result<omemo::Bundle, Error> {
         let items = self.account.items(jid, &bundle_node(device)).await?;
         let item = items.first().ok_or(Error::NoDevices(jid.clone()))?;
         let bundle = xml::Bundle::try_from(item.payload.clone())
             .map_err(|_| omemo_xml::Error::Malformed("bundle does not parse"))?;
-        let bundle = bundle::from_xml(&bundle)?;
-        let session = Session::initiate(&state.keys, &bundle)?;
-        self.record_identity(state, jid, device, &bundle.identity_key)?;
-        Ok(session)
+        Ok(bundle::from_xml(&bundle)?)
     }
 
     /// Trusts a device's first identity key (BTBV) and refuses a changed one.

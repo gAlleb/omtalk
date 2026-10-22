@@ -7,11 +7,12 @@
 use std::time::Duration;
 
 use omtalk_omemo::Direction;
-use omtalk_testkit::{Device, WAIT, befriend, converge, text, unfriend};
+use omtalk_testkit::{Device, WAIT, befriend, converge, fresh_device_lists, stop_all, strangers, text};
 use tokio::time::timeout;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn three_own_devices_and_two_peer_devices_all_read_everything() {
+    fresh_device_lists(&["u01", "u02"]).await;
     // Started concurrently, as clients coming online together would be.
     let (mut phone, mut laptop, mut desk, mut bob1, mut bob2) = tokio::join!(
         Device::start("u01"),
@@ -76,13 +77,14 @@ async fn three_own_devices_and_two_peer_devices_all_read_everything() {
             assert_eq!(text(&device.next_text().await), from_bob);
         }
     }
+    stop_all([phone, laptop, desk, bob1, bob2]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_added_later_is_included_in_the_next_message() {
+    strangers("u03", "u04").await;
+    fresh_device_lists(&["u03", "u04"]).await;
     let (alice, mut bob) = tokio::join!(Device::start("u03"), Device::start("u04"));
-    // The server keeps rosters until it restarts; start as strangers.
-    unfriend(&alice, &bob).await;
     converge(&[&alice]).await;
     alice.omemo.send(&bob.jid, "before").await.unwrap();
     assert_eq!(text(&bob.next_text().await), "before");
@@ -108,4 +110,5 @@ async fn a_device_added_later_is_included_in_the_next_message() {
     assert!(report.devices.contains(&(bob.jid.clone(), new_id)));
     assert_eq!(text(&bob.next_text().await), "after");
     assert_eq!(text(&bob_new.next_text().await), "after");
+    stop_all([alice, bob, bob_new]).await;
 }
