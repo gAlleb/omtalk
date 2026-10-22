@@ -502,6 +502,12 @@ impl App {
             self.leader_pending = true;
             return Vec::new();
         }
+        if self.focus == Focus::Input
+            && key.code == KeyCode::Enter
+            && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT)
+        {
+            return self.on_paste("\n");
+        }
         if self.focus == Focus::Input && self.edit_key(key) {
             return Vec::new();
         }
@@ -648,6 +654,8 @@ impl App {
                 self.cursor = 0;
             }
             KeyCode::Enter => return self.submit(),
+            // A line break inside the message: Alt+Enter (Shift+Enter where the
+            // terminal reports it), handled in on_key.
             _ => {}
         }
         Vec::new()
@@ -662,14 +670,16 @@ impl App {
     }
 
     fn submit(&mut self) -> Vec<Action> {
-        let text = std::mem::take(&mut self.input).trim().to_owned();
+        let input = std::mem::take(&mut self.input);
         self.cursor = 0;
-        if text.is_empty() {
+        if input.trim().is_empty() {
             return Vec::new();
         }
-        if text.starts_with('/') {
-            return self.command(&text);
+        if input.trim_start().starts_with('/') {
+            return self.command(input.trim());
         }
+        // A pasted block keeps its indentation; only empty lines around it go.
+        let text = input.trim_end().trim_start_matches(['\n', '\r']).to_owned();
         let Some(chat) = self.current_mut() else {
             self.status = "нет открытого чата: /msg JID или /join КОМНАТА".into();
             return Vec::new();
@@ -819,6 +829,25 @@ impl App {
                 })
         });
         local.or(self.active.as_ref()).or(self.accounts.first()).cloned()
+    }
+
+    /// Pasted text goes in at the cursor as it is, line breaks included; in the services
+    /// window's form, into the field being edited, on one line.
+    pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if let Some(services) = self.services.as_mut() {
+            for c in text.chars() {
+                let c = if c == '\n' { ' ' } else { c };
+                services.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            return Vec::new();
+        }
+        self.focus = Focus::Input;
+        self.completion = None;
+        let at = self.byte_at(self.cursor);
+        self.input.insert_str(at, &text);
+        self.cursor += text.chars().count();
+        Vec::new()
     }
 
     /// Line editing as in a shell (readline): Ctrl+W/U/K cut a word, to the start, to the

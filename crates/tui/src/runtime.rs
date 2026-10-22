@@ -317,6 +317,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             event = input.next() => match event {
                 Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Some(Ok(TermEvent::Mouse(mouse))) => app.on_mouse(mouse),
+                // Pasted text arrives whole (bracketed paste), line breaks and all,
+                // instead of as keys where each break would send.
+                Some(Ok(TermEvent::Paste(text))) => app.on_paste(&text),
                 Some(Ok(_)) => Vec::new(),
                 Some(Err(_)) | None => break,
             },

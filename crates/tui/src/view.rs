@@ -322,7 +322,9 @@ fn chat_row(
 }
 
 fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
-    let [messages, input] = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
+    let input_height = input_height(app, area.width).min(area.height.saturating_sub(3).max(3));
+    let [messages, input] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(input_height)]).areas(area);
     app.areas.messages = messages;
     app.areas.input = input;
 
@@ -832,6 +834,15 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         (app.icons.unlocked, theme::WARN)
     };
     let button = format!(" {label} ");
+    // The hint as long as the border has room for beside the lock.
+    let hint = [
+        " Enter ⏎ · Alt+Enter — новая строка ",
+        " ⏎ · Alt+⏎ строка ",
+        " ⏎ ",
+    ]
+    .into_iter()
+    .find(|h| button.width() + h.width() + 4 <= area.width as usize)
+    .unwrap_or("");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -841,8 +852,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(colour).add_modifier(Modifier::BOLD),
         ))
         .title(
-            TextLine::from(Span::styled(" Enter ⏎ ", Style::default().fg(theme::DIM)))
-                .alignment(Alignment::Right),
+            TextLine::from(Span::styled(hint, Style::default().fg(theme::DIM))).alignment(Alignment::Right),
         );
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -860,27 +870,64 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
             inner,
         );
     } else {
-        // Keep the cursor in sight: show the tail of a long line.
-        let before: String = app.input.chars().take(app.cursor).collect();
-        let skip = before
-            .width()
-            .saturating_sub(inner.width.saturating_sub(1) as usize);
-        let mut shown = String::new();
-        let mut skipped = 0;
-        for c in app.input.chars() {
-            if skipped < skip {
-                skipped += c.width().unwrap_or(0);
-                continue;
-            }
-            shown.push(c);
-        }
+        let (rows, (row, col)) = input_rows(&app.input, app.cursor, inner.width as usize);
+        // The rows around the cursor, when there are more than fit.
+        let skip = (row + 1).saturating_sub(inner.height as usize);
+        let shown: Vec<TextLine> = rows
+            .into_iter()
+            .skip(skip)
+            .take(inner.height as usize)
+            .map(TextLine::from)
+            .collect();
         frame.render_widget(Paragraph::new(shown), inner);
+        if app.focus == Focus::Input {
+            frame.set_cursor_position(Position::new(inner.x + col as u16, inner.y + (row - skip) as u16));
+        }
+        return;
     }
     if app.focus == Focus::Input {
-        let before: String = app.input.chars().take(app.cursor).collect();
-        let x = (before.width() as u16).min(inner.width.saturating_sub(1));
-        frame.set_cursor_position(Position::new(inner.x + x, inner.y));
+        frame.set_cursor_position(Position::new(inner.x, inner.y));
     }
+}
+
+/// How many rows the input box wants: its text wrapped, up to a limit.
+pub fn input_height(app: &App, width: u16) -> u16 {
+    let (rows, _) = input_rows(&app.input, app.cursor, width.saturating_sub(2) as usize);
+    rows.len().clamp(1, INPUT_ROWS) as u16 + 2
+}
+
+/// At most this many rows of text in the input box; more scroll.
+const INPUT_ROWS: usize = 8;
+
+/// The input as rows of at most `width` cells (its own line breaks, and wrapping), and
+/// where the cursor (in characters) is among them. The cursor gets a cell of its own at
+/// the end of a full row.
+pub fn input_rows(input: &str, cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
+    let width = width.max(2) - 1;
+    let mut rows = vec![String::new()];
+    let mut place = (0, 0);
+    let mut col = 0;
+    for (index, c) in input.chars().enumerate() {
+        if index == cursor {
+            place = (rows.len() - 1, col);
+        }
+        if c == '\n' {
+            rows.push(String::new());
+            col = 0;
+            continue;
+        }
+        let w = c.width().unwrap_or(0);
+        if col + w > width {
+            rows.push(String::new());
+            col = 0;
+        }
+        rows.last_mut().unwrap().push(c);
+        col += w;
+    }
+    if cursor >= input.chars().count() {
+        place = (rows.len() - 1, col);
+    }
+    (rows, place)
 }
 
 fn side(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1039,6 +1086,23 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
     let hints_width = hints.width() as u16;
+    // Where the accounts' names do not fit beside the hints, their dots do.
+    if TextLine::from(left.clone()).width() + hints_width as usize > area.width as usize {
+        left = app
+            .connection
+            .values()
+            .map(|state| {
+                Span::styled(
+                    "● ",
+                    Style::default().fg(if state == "в сети" {
+                        theme::OK
+                    } else {
+                        theme::WARN
+                    }),
+                )
+            })
+            .collect();
+    }
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hints_width)]).areas(area);
     frame.render_widget(Paragraph::new(TextLine::from(left)), left_area);
@@ -2173,5 +2237,49 @@ mod tests {
         let chat = &app.chats[0];
         assert_eq!(chat.lines.len(), 1, "{:?}", chat.lines);
         assert!(chat.lines[0].notice && chat.lines[0].text.contains("не для этого устройства"));
+    }
+
+    #[test]
+    fn pasted_lines_stay_one_message_and_the_input_grows() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.focus = Focus::Messages;
+
+        app.on_paste("fn main() {\r\n    println!(\"привет\");\r\n}\r\n");
+        assert_eq!(app.focus, Focus::Input, "pasting goes to the input");
+        let text = screen(&mut app, 100, 30);
+        assert!(
+            text.contains("    println!(\"привет\");") && text.contains("fn main() {"),
+            "{text}"
+        );
+        assert!(
+            app.areas.input.height >= 5,
+            "three lines and more show: {:?}",
+            app.areas.input
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let [Action::Send { text, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(
+            text, "fn main() {\n    println!(\"привет\");\n}\nx\ny",
+            "one message, breaks kept"
+        );
+        screen(&mut app, 100, 30);
+        assert_eq!(app.areas.input.height, 3, "back to one row");
+
+        // Wrapping and the cursor: a long word fills rows; the cursor sits after it.
+        let (rows, cursor) = input_rows("абвгдеж", 7, 5);
+        assert_eq!(rows, ["абвг", "деж"]);
+        assert_eq!(cursor, (1, 3));
+        let (rows, cursor) = input_rows("ab\ncd", 3, 10);
+        assert_eq!((rows, cursor), (vec!["ab".to_owned(), "cd".to_owned()], (1, 0)));
     }
 }

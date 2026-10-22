@@ -13,7 +13,9 @@ mod view;
 
 use std::io;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 
@@ -41,9 +43,14 @@ fn main() {
         default_hook(info);
     }));
 
-    if let Err(e) =
-        enable_raw_mode().and_then(|_| execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture))
-    {
+    if let Err(e) = enable_raw_mode().and_then(|_| {
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+    }) {
         eprintln!("cannot take over the terminal: {e}");
         std::process::exit(1);
     }
@@ -61,5 +68,10 @@ fn main() {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = execute!(
+        io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
 }
