@@ -109,7 +109,10 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     app.areas.hide_left = Some(Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1));
 
     let mut y = inner.y;
-    for entry in app.list() {
+    let entries = app.list();
+    let tree = entries.iter().any(|e| matches!(e, Entry::Heading(_)));
+    let mut heading: Option<Group> = None;
+    for (at, entry) in entries.iter().cloned().enumerate() {
         if y >= inner.bottom() {
             break;
         }
@@ -122,15 +125,31 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
                     Group::Folder(name) => folder_row(app, name, folded, inner.width),
                 };
                 frame.render_widget(paragraph, row);
-                app.areas.group_rows.push((row, group));
+                app.areas.group_rows.push((row, group.clone()));
+                heading = Some(group);
             }
             Entry::Chat(index) => {
+                // Under headings the list is a tree: each chat hangs off its heading.
+                let branch = match entries.get(at + 1) {
+                    _ if !tree => "",
+                    Some(Entry::Chat(_)) => "├ ",
+                    _ => "└ ",
+                };
+                // A folder may hold chats of several accounts: say whose each is.
+                let server = match &heading {
+                    Some(Group::Folder(_)) if app.accounts.len() > 1 => {
+                        Some(app.chats[index].account.domain().to_string())
+                    }
+                    _ => None,
+                };
                 frame.render_widget(
                     chat_row(
                         &app.chats[index],
                         app.selected == Some(index),
                         inner.width,
                         app.icons,
+                        branch,
+                        server.as_deref(),
                     ),
                     row,
                 );
@@ -236,7 +255,15 @@ fn folder_row(app: &App, name: &str, folded: bool, width: u16) -> Paragraph<'sta
     ]))
 }
 
-fn chat_row(chat: &Chat, selected: bool, width: u16, icons: theme::Icons) -> Paragraph<'static> {
+fn chat_row(
+    chat: &Chat,
+    selected: bool,
+    width: u16,
+    icons: theme::Icons,
+    branch: &str,
+    server: Option<&str>,
+) -> Paragraph<'static> {
+    let width = width.saturating_sub(branch.width() as u16);
     let icon = if chat.is_room() { "# " } else { "@ " };
     let badge = if chat.unread > 0 {
         format!(" {} ", chat.unread)
@@ -246,7 +273,13 @@ fn chat_row(chat: &Chat, selected: bool, width: u16, icons: theme::Icons) -> Par
     let lock = if chat.omemo { "" } else { icons.chat_unlocked };
     let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + lock.width() + 1);
     let title = truncate(&chat.title(), room_for_title);
-    let gap = (width as usize).saturating_sub(icon.width() + title.width() + lock.width() + badge.width());
+    // The server, if asked for and if it fits.
+    let server = server
+        .map(|s| format!(" {s}"))
+        .filter(|s| title.width() + s.width() <= room_for_title)
+        .unwrap_or_default();
+    let gap = (width as usize)
+        .saturating_sub(icon.width() + title.width() + server.width() + lock.width() + badge.width());
     let base = if selected {
         theme::selected()
     } else if chat.unread > 0 {
@@ -255,11 +288,13 @@ fn chat_row(chat: &Chat, selected: bool, width: u16, icons: theme::Icons) -> Par
         Style::default().fg(theme::TEXT)
     };
     Paragraph::new(TextLine::from(vec![
+        Span::styled(branch.to_owned(), Style::default().fg(theme::BORDER)),
         Span::styled(
             icon,
             base.fg(if chat.is_room() { theme::ACCENT } else { theme::DIM }),
         ),
         Span::styled(title, base),
+        Span::styled(server, base.fg(theme::DIM)),
         Span::styled(lock, base.fg(theme::WARN)),
         Span::styled(" ".repeat(gap), base),
         Span::styled(
@@ -269,7 +304,6 @@ fn chat_row(chat: &Chat, selected: bool, width: u16, icons: theme::Icons) -> Par
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ),
     ]))
-    .style(base)
 }
 
 fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
@@ -1857,5 +1891,40 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.input, "/");
         assert!(screen(&mut app, 120, 30).contains("этот список"));
+    }
+
+    #[test]
+    fn the_chat_list_is_a_tree_and_mixed_folders_name_the_server() {
+        let (home, work) = (jid("me@home.org"), jid("me@work.org"));
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 30, 30);
+        let anna = app.chat(&home, &jid("anna@home.org"), ChatKind::Direct);
+        let boss = app.chat(&work, &jid("boss@work.org"), ChatKind::Direct);
+        app.chat(&home, &jid("carl@home.org"), ChatKind::Direct);
+        app.move_to_folder(anna, Some("Свои"));
+        app.move_to_folder(boss, Some("Свои"));
+        let text = screen(&mut app, 120, 20);
+        let rows: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .take(6)
+            .map(|l| l.split('│').nth(1).unwrap_or("").trim_end())
+            .collect();
+        assert!(rows[0].contains("Свои"), "{rows:#?}");
+        assert!(rows[1].starts_with("├ @ anna home.org"), "{rows:#?}");
+        assert!(rows[2].starts_with("└ @ boss work.org"), "{rows:#?}");
+        assert!(rows[3].contains("me@home.org"), "{rows:#?}");
+        assert!(
+            rows[4].starts_with("└ @ carl") && !rows[4].contains("home.org"),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[5].contains("me@work.org"),
+            "an account with no chats left: {rows:#?}"
+        );
+
+        // One account and no folders: a plain list, no branches.
+        let mut app = App::new(vec![home.clone()], Modifier::Ctrl, 30, 30);
+        app.chat(&home, &jid("anna@home.org"), ChatKind::Direct);
+        assert!(!screen(&mut app, 120, 20).contains("└"));
     }
 }
