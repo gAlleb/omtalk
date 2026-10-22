@@ -223,6 +223,12 @@ enum Msg {
     },
     /// A file to offer for sending (a picture pasted from the clipboard).
     Offer(PathBuf),
+    /// Who belongs to a room.
+    Members {
+        account: BareJid,
+        room: BareJid,
+        members: Vec<BareJid>,
+    },
     /// The keys window's devices, or why not.
     Keys(Result<Vec<crate::keys::KeyRow>, String>),
     /// A device's trust changed: the pane beside that chat reads them again.
@@ -547,6 +553,19 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::Members {
+            account,
+            room,
+            members,
+        } => {
+            if let Some(chat) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == room)
+            {
+                chat.members = members;
+            }
+        }
         Msg::Keys(rows) => {
             if let Some(keys) = app.keys.as_mut() {
                 keys.loaded(rows);
@@ -627,6 +646,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.chats[index].devices = Some(rows);
         }
         Msg::Joined { account, room, nick } => {
+            tokio::spawn(perform(
+                Action::Members {
+                    account: account.clone(),
+                    room: room.clone(),
+                },
+                shared.clone(),
+            ));
             let index = app.chat(&account, &room, ChatKind::Room { nick });
             if app.selected.is_none() {
                 app.select(index);
@@ -1437,6 +1463,27 @@ async fn perform(action: Action, shared: Shared) {
                     }
                 }
             }
+        }
+        Action::Members { account, room } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            // Open rooms may not show their lists to everyone: then nobody is shown away.
+            let mut members = Vec::new();
+            for affiliation in [
+                omtalk_xmpp::Affiliation::Owner,
+                omtalk_xmpp::Affiliation::Admin,
+                omtalk_xmpp::Affiliation::Member,
+            ] {
+                if let Ok(list) = xmpp.affiliated(&room, affiliation).await {
+                    members.extend(list);
+                }
+            }
+            members.sort();
+            members.dedup();
+            tell(Msg::Members {
+                account,
+                room,
+                members,
+            });
         }
         Action::Keys(request) => {
             let account = match &request {

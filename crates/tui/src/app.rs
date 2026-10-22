@@ -134,6 +134,8 @@ pub struct Chat {
     pub scroll: usize,
     /// Room occupants by nick, with the real account when the room shows it.
     pub occupants: BTreeMap<String, Option<BareJid>>,
+    /// A room's members (owners, admins, members), present or not; read when it opens.
+    pub members: Vec<BareJid>,
     /// The peer's devices; `None` until read.
     pub devices: Option<Vec<DeviceRow>>,
     /// The newest message here whose sender asked to learn when it is read, not yet
@@ -155,6 +157,7 @@ impl Chat {
             omemo: true,
             scroll: 0,
             occupants: BTreeMap::new(),
+            members: Vec::new(),
             devices: None,
             markable: None,
             read_up_to: None,
@@ -247,6 +250,8 @@ pub struct Areas {
     pub key_window: Rect,
     pub key_rows: Vec<(Rect, usize)>,
     pub key_buttons: Vec<(Rect, crate::keys::KeyButton)>,
+    /// People in the pane beside a room who are away: a click opens a chat with them.
+    pub people: Vec<(Rect, BareJid)>,
     /// The devices in the pane beside a direct chat: a click opens the keys window.
     pub side_devices: Option<Rect>,
     /// The services window and what is clickable in it.
@@ -335,6 +340,11 @@ pub enum Action {
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
+    /// Read who belongs to a room, present or not.
+    Members {
+        account: BareJid,
+        room: BareJid,
+    },
     /// The keys window asks something of OMEMO.
     Keys(crate::keys::Request),
     /// Put text into the clipboards (ordinary and primary).
@@ -811,6 +821,17 @@ impl App {
         }
     }
 
+    /// A room's members who are not in it now.
+    pub fn away_members(&self, index: usize) -> Vec<BareJid> {
+        let chat = &self.chats[index];
+        let present: Vec<&BareJid> = chat.occupants.values().flatten().collect();
+        chat.members
+            .iter()
+            .filter(|m| **m != chat.account && !present.contains(m))
+            .cloned()
+            .collect()
+    }
+
     /// Whether the account is connected now.
     pub fn connected(&self, account: &BareJid) -> bool {
         self.connection.get(account).is_some_and(|s| s == "в сети")
@@ -927,6 +948,13 @@ impl App {
         actions.extend(self.mark_read(index));
         let chat = &mut self.chats[index];
         chat.unread = 0;
+        // A room's pane lists its members who are away: read afresh on opening.
+        if chat.is_room() {
+            actions.push(Action::Members {
+                account: chat.account.clone(),
+                room: chat.jid.clone(),
+            });
+        }
         // A direct chat's right pane lists the peer's devices; read them afresh each time
         // it is opened, since devices come and go.
         if chat.kind == ChatKind::Direct {
@@ -2209,6 +2237,14 @@ impl App {
                 } else if let Some((_, nick)) = self.areas.nicks.iter().find(|(r, _)| inside(*r)) {
                     let nick = nick.clone();
                     return self.open_private(&nick);
+                } else if let Some((_, person)) = self.areas.people.iter().find(|(r, _)| inside(*r)) {
+                    let person = person.clone();
+                    let Some(account) = self.current().map(|c| c.account.clone()) else {
+                        return Vec::new();
+                    };
+                    let index = self.chat(&account, &person, ChatKind::Direct);
+                    self.focus = Focus::Input;
+                    return self.select(index);
                 } else if inside_opt(self.areas.side_devices) {
                     return self.open_keys(None);
                 } else if let Some((_, link)) = self.areas.fetches.iter().find(|(r, _)| inside(*r)) {

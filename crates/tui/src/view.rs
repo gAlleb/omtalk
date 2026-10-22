@@ -1152,6 +1152,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut rows: Vec<TextLine> = Vec::new();
     let mut nicks = Vec::new();
     let mut devices_from = None;
+    let mut people = Vec::new();
     match &chat.kind {
         ChatKind::Room { .. } => {
             for (nick, real) in &chat.occupants {
@@ -1172,6 +1173,33 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
                 rows.push(TextLine::from(spans));
+            }
+            // Members who are away, below: their account's name, a click away from a chat.
+            let away = app.selected.map(|i| app.away_members(i)).unwrap_or_default();
+            if !away.is_empty() {
+                rows.push(TextLine::default());
+                rows.push(TextLine::from(Span::styled(
+                    format!("не в сети {}", away.len()),
+                    Style::default().fg(theme::dim()),
+                )));
+                for member in away {
+                    let y = inner.y + rows.len() as u16;
+                    if y < inner.bottom() {
+                        people.push((Rect::new(inner.x, y, inner.width, 1), member.clone()));
+                    }
+                    let name = member
+                        .node()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| member.to_string());
+                    rows.push(TextLine::from(vec![
+                        Span::styled("○ ", Style::default().fg(theme::dim())),
+                        Span::styled(name, Style::default().fg(theme::dim())),
+                        Span::styled(
+                            format!(" {}", member.domain()),
+                            Style::default().fg(theme::border_colour()),
+                        ),
+                    ]));
+                }
             }
         }
         ChatKind::Server => {
@@ -1314,6 +1342,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(rows), inner);
     app.areas.nicks.extend(nicks);
+    app.areas.people = people;
 }
 
 fn status_line(frame: &mut Frame, app: &App, area: Rect) {
@@ -3531,5 +3560,48 @@ mod tests {
         line.untrusted = true;
         app.push(bob, line);
         assert!(screen(&mut app, 120, 30).contains("⚠ непроверенное устройство · привет"));
+    }
+
+    #[test]
+    fn a_rooms_members_who_are_away_show_below_and_open_a_chat() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        let opened = app.select(room);
+        assert!(
+            opened.contains(&Action::Members {
+                account: me.clone(),
+                room: jid("team@muc.home.org")
+            }),
+            "{opened:?}"
+        );
+        let chat = &mut app.chats[room];
+        chat.occupants.insert("Алиса".into(), Some(jid("alice@home.org")));
+        chat.occupants.insert("me".into(), Some(me.clone()));
+        chat.members = vec![jid("alice@home.org"), jid("carl@work.org"), me.clone()];
+        let text = screen(&mut app, 120, 24);
+        assert!(
+            text.contains("не в сети 1") && text.contains("○ carl work.org"),
+            "{text}"
+        );
+        assert_eq!(
+            app.away_members(room),
+            [jid("carl@work.org")],
+            "not the present, not oneself"
+        );
+
+        let (place, _) = app.areas.people[0].clone();
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: place.x + 2,
+            row: place.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.current().unwrap().jid, jid("carl@work.org"));
     }
 }
