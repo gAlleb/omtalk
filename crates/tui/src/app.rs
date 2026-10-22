@@ -76,6 +76,8 @@ pub struct MediaSlot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaState {
+    /// Not fetched by itself (auto_download = false): a click fetches it.
+    Offered,
     Loading,
     Ready(PathBuf),
     Failed(String),
@@ -229,6 +231,8 @@ pub struct Areas {
     pub group_rows: Vec<(Rect, Group)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
+    /// Files not fetched yet, to fetch with a click: their links.
+    pub fetches: Vec<(Rect, String)>,
     /// The conversation's rows on screen and their text, for selecting it.
     pub message_rows: Vec<(Rect, String)>,
     /// Senders' names in a room and its participants: a click opens a chat with them.
@@ -325,6 +329,8 @@ pub enum Action {
     PastePrimary,
     /// Paste the ordinary clipboard (its text).
     PasteClipboard,
+    /// Fetch the shared file at this link, asked for by a click.
+    Fetch(String),
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
     Quit,
@@ -2002,7 +2008,8 @@ impl App {
         }
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
-            || self.areas.files.iter().any(|(r, _)| inside(*r));
+            || self.areas.files.iter().any(|(r, _)| inside(*r))
+            || self.areas.fetches.iter().any(|(r, _)| inside(*r));
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if inside(self.areas.messages) && !on_link => {
                 self.focus = Focus::Messages;
@@ -2071,6 +2078,8 @@ impl App {
                 } else if let Some((_, nick)) = self.areas.nicks.iter().find(|(r, _)| inside(*r)) {
                     let nick = nick.clone();
                     return self.open_private(&nick);
+                } else if let Some((_, link)) = self.areas.fetches.iter().find(|(r, _)| inside(*r)) {
+                    return vec![Action::Fetch(link.clone())];
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {

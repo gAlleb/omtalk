@@ -23,6 +23,7 @@
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! typing = true         # let chats see that one is typing
 //! bell = true           # ring the bell for a message while the window is behind
+//! auto_download = true  # false: shared files wait for a click ("скачать")
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -147,6 +148,8 @@ pub struct Ui {
     pub typing: bool,
     /// Ring the terminal's bell for a message while the window is not in front.
     pub bell: bool,
+    /// Fetch shared files and pictures as they come; `false`: on a click.
+    pub auto_download: bool,
 }
 
 impl Default for Ui {
@@ -162,6 +165,7 @@ impl Default for Ui {
             mouse: true,
             typing: true,
             bell: true,
+            auto_download: true,
         }
     }
 }
@@ -333,5 +337,11 @@ mod tests {
             toml::from_str::<Config>("[theme]\naccnt = \"red\"").is_err(),
             "a misspelt role is said"
         );
+        assert!(
+            empty.ui.auto_download,
+            "files come by themselves unless asked not to"
+        );
+        let manual: Config = toml::from_str("[ui]\nauto_download = false").unwrap();
+        assert!(!manual.ui.auto_download);
     }
 }

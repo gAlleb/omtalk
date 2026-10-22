@@ -464,6 +464,10 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                         }
                         _ => {}
                     }
+                } else if let Some(link) = &row.fetch {
+                    app.areas
+                        .fetches
+                        .push((Rect::new(inner.x, y, inner.width, 1), link.clone()));
                 } else if let Some((nick, width)) = &row.who {
                     app.areas
                         .nicks
@@ -735,6 +739,8 @@ pub struct Row {
     pub picture: Option<PictureRow>,
     /// A sender's name heading this row, and its width: a click on it opens a chat.
     pub who: Option<(String, u16)>,
+    /// A file not fetched yet: a click on this row fetches it, from this link.
+    pub fetch: Option<String>,
 }
 
 /// One of the rows a picture covers.
@@ -753,6 +759,7 @@ impl From<TextLine<'static>> for Row {
             open: None,
             picture: None,
             who: None,
+            fetch: None,
         }
     }
 }
@@ -848,12 +855,18 @@ pub fn message_rows(
                             row,
                         }),
                         who: None,
+                        fetch: None,
                     });
                 }
                 push_delivery(&mut rows, line, body_width, true);
                 continue;
             }
             let (icon, state, colour) = match &slot.state {
+                MediaState::Offered => (
+                    if slot.image { icons.picture } else { icons.file },
+                    "скачать".to_owned(),
+                    theme::accent(),
+                ),
                 MediaState::Loading => (
                     if slot.image { icons.picture } else { icons.file },
                     "загружается…".to_owned(),
@@ -877,6 +890,7 @@ pub fn message_rows(
                 open: path,
                 picture: None,
                 who: None,
+                fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
             });
             push_delivery(&mut rows, line, body_width, false);
             continue;
@@ -3163,5 +3177,33 @@ mod tests {
         app.bell = false;
         app.on_focus(false);
         assert!(!app.rings(&from_bob("3")), "turned off");
+    }
+
+    #[test]
+    fn a_file_not_fetched_by_itself_is_fetched_with_a_click() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        let link = "https://up.home.org/x/отчёт.pdf";
+        app.push(
+            bob,
+            Line::message(1_700_000_000, "bob".into(), link.into(), true, false),
+        );
+        app.media_done(link, crate::app::MediaState::Offered);
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("отчёт.pdf скачать"), "{text}");
+        let (row, _) = app.areas.fetches[0].clone();
+        let clicked = app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 3,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(clicked, [Action::Fetch(link.into())]);
+        app.media_done(link, crate::app::MediaState::Loading);
+        assert!(screen(&mut app, 100, 20).contains("загружается…"));
+        assert!(app.areas.fetches.is_empty(), "nothing to click while it comes");
     }
 }

@@ -257,6 +257,8 @@ struct Shared {
     cache: PathBuf,
     /// The program that shows a file outside the terminal.
     viewer: String,
+    /// Fetch shared files as they come; else on a click.
+    auto_download: bool,
     store: Store,
     tx: mpsc::UnboundedSender<Msg>,
 }
@@ -276,6 +278,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         accounts: HashMap::new(),
         cache: config::cache_dir().join("media"),
         viewer: options.config.ui.viewer.clone(),
+        auto_download: options.config.ui.auto_download,
         store: store.clone(),
         tx,
     };
@@ -1377,6 +1380,15 @@ async fn perform(action: Action, shared: Shared) {
                 Err(e) => tell(Msg::Status(e)),
             }
         }
+        Action::Fetch(link) => {
+            if let Some(media) = omtalk_media::Media::from_text(&link) {
+                tell(Msg::Media {
+                    url: media.url().to_owned(),
+                    state: MediaState::Loading,
+                });
+            }
+            fetch_media(link, shared.clone()).await;
+        }
         Action::Open(path) => {
             // Detached and silent: the viewer must not write over the interface.
             let opened = std::process::Command::new(&shared.viewer)
@@ -1413,9 +1425,18 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encr
 }
 
 fn fetch_if_media(text: &str, shared: &Shared) {
-    if omtalk_media::Media::from_text(text).is_some() {
-        tokio::spawn(fetch_media(text.trim().to_owned(), shared.clone()));
+    let Some(media) = omtalk_media::Media::from_text(text) else {
+        return;
+    };
+    // Not by itself: what is here already shows, the rest waits for a click.
+    if !shared.auto_download && !media.cache_path(&shared.cache).exists() {
+        let _ = shared.tx.send(Msg::Media {
+            url: media.url().to_owned(),
+            state: MediaState::Offered,
+        });
+        return;
     }
+    tokio::spawn(fetch_media(text.trim().to_owned(), shared.clone()));
 }
 
 /// Fetches (and decrypts) a shared file into the cache, and tells the interface.
