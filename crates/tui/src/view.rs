@@ -4914,11 +4914,22 @@ mod tests {
             let x = row[..row.find(what).unwrap()].chars().count();
             &buffer[(x as u16, y as u16)]
         };
-        assert!(find("жирный").modifier.contains(ratatui::style::Modifier::BOLD), "strong");
-        assert!(find("старое").modifier.contains(ratatui::style::Modifier::CROSSED_OUT), "strike");
+        assert!(
+            find("жирный").modifier.contains(ratatui::style::Modifier::BOLD),
+            "strong"
+        );
+        assert!(
+            find("старое")
+                .modifier
+                .contains(ratatui::style::Modifier::CROSSED_OUT),
+            "strike"
+        );
         assert_eq!(find("код").fg, theme::accent(), "code");
         assert_eq!(find("*жирный").fg, theme::dim(), "the directive stays, dimmed");
-        assert!(!find("текст").modifier.contains(ratatui::style::Modifier::BOLD), "plain");
+        assert!(
+            !find("текст").modifier.contains(ratatui::style::Modifier::BOLD),
+            "plain"
+        );
         assert_eq!(find("▎ цитата").fg, theme::accent(), "a quote has its bar");
         assert!(
             !find("ы*").modifier.contains(ratatui::style::Modifier::BOLD),

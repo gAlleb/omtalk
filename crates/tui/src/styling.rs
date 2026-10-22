@@ -153,9 +153,8 @@ mod tests {
         assert_eq!(show("a*b*"), "a*b*", "opening only at the start or after a space");
         assert_eq!(show("`*x*`"), "|[c:*][c:x][c:*]|", "nothing styled inside code");
         assert_eq!(show("*_y_*"), "||[se:y]||", "spans nest");
-        assert_eq!(
-            show("*a\nb*").contains('|'),
-            false,
+        assert!(
+            !show("*a\nb*").contains('|'),
             "not across lines (one line at a time)"
         );
         assert_eq!(show("2*3*4 = 24"), "2*3*4 = 24");
