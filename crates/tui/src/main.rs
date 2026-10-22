@@ -13,6 +13,7 @@ mod notify;
 mod runtime;
 mod services;
 mod settings;
+mod styling;
 mod theme;
 mod view;
 

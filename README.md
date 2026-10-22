@@ -139,6 +139,13 @@ Closing a room leaves it.
 other clients do, so all clients of one account count as one participant in the room. A
 new room is added to the bookmarks automatically.
 
+## Message styling
+
+Messages are styled as in Conversations, Gajim, Monal and Dino (XEP-0393): `*strong*`,
+`_emphasis_`, `~strike~`, `` `code` ``, a block of preformatted text between ```` ``` ````
+lines, and `>` quotes anywhere in a message. The directives stay visible, dimmed, so
+copied text is what was written; nothing is styled inside code.
+
 ## Files and pictures
 
 Sending: `/upload path` (Tab completes the path), the paperclip by the input line, a file

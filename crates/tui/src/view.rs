@@ -992,36 +992,65 @@ pub fn message_rows(
         {
             quote.remove(0);
         }
-        for text in quote
-            .iter()
-            .flat_map(|q| wrap(q, text_width.saturating_sub(2).max(1)))
-        {
-            rows.push(
-                TextLine::from(vec![
+        let quoted = Style::default().fg(theme::dim());
+        for q in &quote {
+            for styled in styled_wrap(q, text_width.saturating_sub(2).max(1), quoted) {
+                let mut spans = vec![
                     Span::raw("  "),
                     Span::styled("▎ ", Style::default().fg(theme::accent())),
-                    Span::styled(text, Style::default().fg(theme::dim())),
-                ])
-                .into(),
-            );
+                ];
+                spans.extend(styled);
+                rows.push(TextLine::from(spans).into());
+            }
         }
-        for text in wrap(said, text_width) {
-            let mut spans = vec![Span::raw("  ")];
-            if !line.encrypted && first {
-                spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
-            } else if !line.encrypted {
-                spans.push(Span::raw(" ".repeat(marker.width())));
+        // The rest as XEP-0393 has it: styled text, quotes, preformatted blocks.
+        for block in crate::styling::blocks(said) {
+            let (lead, parts): (Vec<Span<'static>>, Vec<Vec<Span<'static>>>) = match block {
+                crate::styling::Block::Text(text) => (
+                    Vec::new(),
+                    styled_wrap(text, text_width, Style::default().fg(theme::text())),
+                ),
+                crate::styling::Block::Quote(depth, text) => (
+                    vec![Span::styled(
+                        "▎ ".repeat(depth),
+                        Style::default().fg(theme::accent()),
+                    )],
+                    styled_wrap(text, text_width.saturating_sub(2 * depth).max(1), quoted),
+                ),
+                crate::styling::Block::Pre(text) => (
+                    vec![Span::raw("  ")],
+                    wrap(text, text_width.saturating_sub(2).max(1))
+                        .into_iter()
+                        .map(|t| vec![Span::styled(t, Style::default().fg(theme::accent()))])
+                        .collect(),
+                ),
+                crate::styling::Block::Fence(text) => (
+                    Vec::new(),
+                    wrap(text, text_width)
+                        .into_iter()
+                        .map(|t| vec![Span::styled(t, Style::default().fg(theme::dim()))])
+                        .collect(),
+                ),
+            };
+            for styled in parts {
+                let mut spans = vec![Span::raw("  ")];
+                if !line.encrypted && first {
+                    spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
+                } else if !line.encrypted {
+                    spans.push(Span::raw(" ".repeat(marker.width())));
+                }
+                // From a device refused or not decided on.
+                if line.untrusted && first {
+                    spans.push(Span::styled(
+                        "⚠ непроверенное устройство · ",
+                        Style::default().fg(theme::warn()),
+                    ));
+                }
+                spans.extend(lead.iter().cloned());
+                spans.extend(styled);
+                rows.push(TextLine::from(spans).into());
+                first = false;
             }
-            // From a device refused or not decided on.
-            if line.untrusted && first {
-                spans.push(Span::styled(
-                    "⚠ непроверенное устройство · ",
-                    Style::default().fg(theme::warn()),
-                ));
-            }
-            spans.push(Span::styled(text, Style::default().fg(theme::text())));
-            rows.push(TextLine::from(spans).into());
-            first = false;
         }
         push_delivery(&mut rows, line, body_width, false);
     }
@@ -1131,6 +1160,61 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         out.push(line);
     }
     out
+}
+
+/// `text` (one line of a message) wrapped to `width`, each row as spans styled by
+/// XEP-0393 over `base`: strong bold, emphasis italic, strike crossed out, code in the
+/// accent colour, the directives dimmed.
+fn styled_wrap(text: &str, width: usize, base: Style) -> Vec<Vec<Span<'static>>> {
+    let marks = crate::styling::marks(text);
+    let chars: Vec<char> = text.chars().collect();
+    let style = |m: crate::styling::Mark| {
+        let mut style = base;
+        if m.directive {
+            return style.fg(theme::dim());
+        }
+        if m.strong {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if m.emphasis {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if m.strike {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        if m.code {
+            style = style.fg(theme::accent());
+        }
+        style
+    };
+    let mut at = 0;
+    wrap(text, width)
+        .into_iter()
+        .map(|row| {
+            // Where wrap broke the line, the spaces it dropped.
+            if !row.is_empty() && !row.starts_with(' ') {
+                while chars.get(at) == Some(&' ') {
+                    at += 1;
+                }
+            }
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut run = String::new();
+            let mut run_mark = None;
+            for c in row.chars() {
+                let mark = marks.get(at).copied().unwrap_or_default();
+                at += 1;
+                if run_mark.is_some_and(|m| m != mark) {
+                    spans.push(Span::styled(std::mem::take(&mut run), style(run_mark.unwrap())));
+                }
+                run_mark = Some(mark);
+                run.push(c);
+            }
+            if let Some(mark) = run_mark {
+                spans.push(Span::styled(run, style(mark)));
+            }
+            spans
+        })
+        .collect()
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -4793,5 +4877,53 @@ mod tests {
         // In a direct chat there is nobody to pick: Tab goes round without them.
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.focus, Focus::Chats);
+    }
+
+    #[test]
+    fn messages_are_styled_as_conversations_styles_them() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.push(
+            bob,
+            Line::message(
+                1_700_000_000,
+                "bob".into(),
+                "*жирный* и ~старое~ `код`\nтекст\n> цитата\n```\nlet *ы* = 1;\n```".into(),
+                true,
+                false,
+            ),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let find = |what: &str| {
+            let text: Vec<String> = buffer
+                .content
+                .chunks(120)
+                .map(|row| row.iter().map(|c| c.symbol()).collect())
+                .collect();
+            let (y, row) = text
+                .iter()
+                .enumerate()
+                .find(|(_, r)| r.contains(what))
+                .unwrap_or_else(|| panic!("{what}"));
+            let x = row[..row.find(what).unwrap()].chars().count();
+            &buffer[(x as u16, y as u16)]
+        };
+        assert!(find("жирный").modifier.contains(ratatui::style::Modifier::BOLD), "strong");
+        assert!(find("старое").modifier.contains(ratatui::style::Modifier::CROSSED_OUT), "strike");
+        assert_eq!(find("код").fg, theme::accent(), "code");
+        assert_eq!(find("*жирный").fg, theme::dim(), "the directive stays, dimmed");
+        assert!(!find("текст").modifier.contains(ratatui::style::Modifier::BOLD), "plain");
+        assert_eq!(find("▎ цитата").fg, theme::accent(), "a quote has its bar");
+        assert!(
+            !find("ы*").modifier.contains(ratatui::style::Modifier::BOLD),
+            "nothing styled in a block of code"
+        );
+        assert_eq!(find("let").fg, theme::accent());
     }
 }
