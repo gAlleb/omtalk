@@ -209,7 +209,9 @@ pub enum Action {
     Join {
         account: BareJid,
         room: BareJid,
-        nick: String,
+        /// `None`: the nick the other clients use there (the bookmark), else the
+        /// account's name.
+        nick: Option<String>,
     },
     Leave {
         account: BareJid,
@@ -246,6 +248,19 @@ pub enum Action {
     Quit,
 }
 
+/// The keys after the leader, as the list shows them; [`App::shortcut`] does them.
+pub const LEADER_KEYS: &[(&str, &str)] = &[
+    ("o", "OMEMO в этом чате вкл/выкл"),
+    ("s", "сервисы сервера"),
+    ("b", "список чатов скрыть/показать"),
+    ("r", "правую панель скрыть/показать"),
+    ("z", "только текущий аккаунт / все"),
+    ("↑ ↓ / k j", "предыдущий / следующий чат"),
+    ("← →", "уже / шире список чатов"),
+    ("q", "выход"),
+    ("Esc", "отмена"),
+];
+
 pub struct App {
     pub accounts: Vec<BareJid>,
     /// Account → connection state, as shown in the status line.
@@ -269,6 +284,12 @@ pub struct App {
     pub dragging_chat: Option<usize>,
     /// A Tab completion being cycled through in the input line.
     pub completion: Option<Completion>,
+    /// What Ctrl+W/U/K cut last, for Ctrl+Y.
+    pub killed: String,
+    /// The prefix key; after it, one letter from [`LEADER_KEYS`].
+    pub leader: (KeyCode, KeyModifiers),
+    /// The prefix was pressed: the next key is a shortcut.
+    pub leader_pending: bool,
     /// The services window, over the chat while open.
     pub services: Option<Services>,
     /// Headings whose chats are folded away in the list.
@@ -288,6 +309,7 @@ impl App {
             Modifier::Ctrl => KeyModifiers::CONTROL,
             Modifier::Alt => KeyModifiers::ALT,
             Modifier::Super => KeyModifiers::SUPER,
+            Modifier::None => KeyModifiers::NONE,
         };
         Self {
             connection: accounts
@@ -312,6 +334,9 @@ impl App {
             dragging_chat: None,
             services: None,
             completion: None,
+            killed: String::new(),
+            leader: (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            leader_pending: false,
             collapsed: BTreeSet::new(),
             folders: Vec::new(),
             active: None,
@@ -375,6 +400,9 @@ impl App {
     }
 
     pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) {
+        if message.not_for_this_device {
+            return self.not_for_this_device(account, message, at);
+        }
         let Some(text) = &message.text else { return };
         let kind = match &message.nick {
             Some(_) => ChatKind::Room { nick: String::new() },
@@ -394,6 +422,34 @@ impl App {
             message.direction == Direction::Outgoing,
         );
         self.push(index, line);
+    }
+
+    /// Someone wrote, encrypted, but not for this device: said once in the chat, not for
+    /// every such message.
+    fn not_for_this_device(&mut self, account: &BareJid, message: &Incoming, at: i64) {
+        let kind = match &message.nick {
+            Some(_) => ChatKind::Room { nick: String::new() },
+            None => ChatKind::Direct,
+        };
+        let index = self.chat(account, &message.peer, kind);
+        let who = match (&message.nick, message.direction) {
+            (Some(nick), _) => nick.clone(),
+            (None, Direction::Outgoing) => "ваше другое устройство".to_owned(),
+            (None, Direction::Incoming) => message.sender.to_string(),
+        };
+        let text = format!(
+            "{who}: сообщение зашифровано не для этого устройства — клиент отправителя его не знает \
+             или ему не доверяет (отметьте доверие к устройству omtalk там, например в Gajim)"
+        );
+        let said = self.chats[index]
+            .lines
+            .iter()
+            .rev()
+            .take(20)
+            .any(|l| l.notice && l.text == text);
+        if !said {
+            self.notice(Some(index), text, at);
+        }
     }
 
     /// The fetch of a shared file ended; every line showing that link learns how.
@@ -434,7 +490,22 @@ impl App {
             let outcome = services.on_key(key);
             return self.services_outcome(outcome);
         }
-        if key.modifiers.contains(self.modifier) {
+        // The prefix, then one key: as tmux, and free of what the input line needs.
+        if self.leader_pending {
+            self.leader_pending = false;
+            return match key.code {
+                KeyCode::Esc => Vec::new(),
+                code => self.shortcut(code),
+            };
+        }
+        if (key.code, key.modifiers) == self.leader {
+            self.leader_pending = true;
+            return Vec::new();
+        }
+        if self.focus == Focus::Input && self.edit_key(key) {
+            return Vec::new();
+        }
+        if !self.modifier.is_empty() && key.modifiers.contains(self.modifier) {
             return self.shortcut(key.code);
         }
         match key.code {
@@ -480,6 +551,10 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('s') => self.open_services(None),
+            KeyCode::Char('z') => {
+                self.focus_group();
+                Vec::new()
+            }
             KeyCode::Char('b') => {
                 self.show_left = !self.show_left;
                 Vec::new()
@@ -640,10 +715,7 @@ impl App {
                 return actions;
             }
             ("/join", Some(room)) => {
-                let nick = args
-                    .get(1)
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| account.node().map(|n| n.to_string()).unwrap_or_default());
+                let nick = args.get(1).map(|n| n.to_string());
                 Ok(vec![Action::Join { account, room, nick }])
             }
             ("/leave", _) => match self.current() {
@@ -706,6 +778,10 @@ impl App {
                 }
             }
             // The list shows while a command is being typed: start one.
+            ("/quit", _) => {
+                self.quit = true;
+                return vec![Action::Quit];
+            }
             ("/help", _) => {
                 self.input = "/".into();
                 self.cursor = 1;
@@ -745,6 +821,68 @@ impl App {
         local.or(self.active.as_ref()).or(self.accounts.first()).cloned()
     }
 
+    /// Line editing as in a shell (readline): Ctrl+W/U/K cut a word, to the start, to the
+    /// end; Ctrl+Y puts back what was cut; Ctrl+A/E go to the start and end; Ctrl+←/→
+    /// and Alt+B/F go by words; Ctrl+H and Ctrl+D delete a character. They win over the
+    /// held-modifier shortcuts while typing (the leader key reaches all of those). With
+    /// Alt as the modifier, Alt+B/F stay its shortcuts. `false` for any other key.
+    fn edit_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT) && self.modifier != KeyModifiers::ALT;
+        let chars: Vec<char> = self.input.chars().collect();
+        let word_back = |from: usize| {
+            let mut at = from;
+            while at > 0 && chars[at - 1].is_whitespace() {
+                at -= 1;
+            }
+            while at > 0 && !chars[at - 1].is_whitespace() {
+                at -= 1;
+            }
+            at
+        };
+        let word_forward = |from: usize| {
+            let mut at = from;
+            while at < chars.len() && chars[at].is_whitespace() {
+                at += 1;
+            }
+            while at < chars.len() && !chars[at].is_whitespace() {
+                at += 1;
+            }
+            at
+        };
+        let cursor = self.cursor;
+        let mut cut = |from: usize, to: usize| {
+            self.killed = chars[from..to].iter().collect();
+            self.input = chars[..from].iter().chain(&chars[to..]).collect();
+            self.cursor = from;
+        };
+        match (key.code, ctrl, alt) {
+            (KeyCode::Char('w'), true, _) | (KeyCode::Backspace, true, _) | (KeyCode::Backspace, _, true) => {
+                cut(word_back(cursor), cursor)
+            }
+            (KeyCode::Char('u'), true, _) => cut(0, cursor),
+            (KeyCode::Char('k'), true, _) => cut(cursor, chars.len()),
+            (KeyCode::Char('h'), true, _) if cursor > 0 => cut(cursor - 1, cursor),
+            (KeyCode::Char('d'), true, _) if cursor < chars.len() => cut(cursor, cursor + 1),
+            (KeyCode::Char('y'), true, _) => {
+                let killed: Vec<char> = self.killed.chars().collect();
+                self.input = chars[..cursor]
+                    .iter()
+                    .chain(&killed)
+                    .chain(&chars[cursor..])
+                    .collect();
+                self.cursor = cursor + killed.len();
+            }
+            (KeyCode::Char('a'), true, _) => self.cursor = 0,
+            (KeyCode::Char('e'), true, _) => self.cursor = chars.len(),
+            (KeyCode::Left, true, _) | (KeyCode::Char('b'), _, true) => self.cursor = word_back(cursor),
+            (KeyCode::Right, true, _) | (KeyCode::Char('f'), _, true) => self.cursor = word_forward(cursor),
+            _ => return false,
+        }
+        self.completion = None;
+        true
+    }
+
     /// What Tab can complete here.
     fn completion_context(&self) -> complete::Context {
         let mut context = complete::Context::default();
@@ -769,6 +907,14 @@ impl App {
             }
         }
         let account = self.account_for(None);
+        let mut servers: Vec<String> = self.accounts.iter().map(|a| a.domain().to_string()).collect();
+        for room in self.chats.iter().filter(|c| c.is_room()) {
+            let domain = room.jid.domain().to_string();
+            if !servers.contains(&domain) {
+                servers.push(domain);
+            }
+        }
+        context.servers = servers;
         context.folders = self
             .folders
             .iter()
@@ -1333,7 +1479,7 @@ mod tests {
             [Action::Join {
                 account: jid("me@example.org"),
                 room: jid("room@muc.example.org"),
-                nick: "Алиса".into()
+                nick: Some("Алиса".into())
             }]
         );
         assert!(type_text(&mut app, "/join").is_empty());
@@ -1377,6 +1523,7 @@ mod tests {
             encrypted: true,
             text: Some("hi".into()),
             at: None,
+            not_for_this_device: false,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);
         app.on_incoming(&me, &incoming("carol@example.org"), 0);

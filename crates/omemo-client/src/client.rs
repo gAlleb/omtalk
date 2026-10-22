@@ -56,6 +56,10 @@ pub struct Incoming {
     /// When the server got it (Unix seconds), for a message read from an archive;
     /// `None` for one that arrives live, which is now.
     pub at: Option<i64>,
+    /// Encrypted text with no key for this device (`text` is `None`): the sender's
+    /// client does not know this device, or does not trust it. Worth saying, since
+    /// otherwise someone wrote and nothing shows.
+    pub not_for_this_device: bool,
 }
 
 /// One published device of an account, as [`Omemo::devices`] reports it.
@@ -247,6 +251,20 @@ impl Omemo {
                     encrypted: false,
                     text: Some(text),
                     at: None,
+                    not_for_this_device: false,
+                }));
+            }
+            Content::Omemo(_) if self.has_no_key(&envelope) => {
+                return Ok(Some(Incoming {
+                    peer: envelope.peer,
+                    sender: envelope.sender,
+                    nick: envelope.nick,
+                    device: None,
+                    direction: envelope.direction,
+                    encrypted: true,
+                    text: None,
+                    at: None,
+                    not_for_this_device: true,
                 }));
             }
             Content::Omemo(encrypted) => encrypted,
@@ -317,6 +335,7 @@ impl Omemo {
                 .plaintext
                 .map(|p| String::from_utf8_lossy(&p).into_owned()),
             at: None,
+            not_for_this_device: false,
         })
     }
 
@@ -694,19 +713,53 @@ fn parse_device_list(items: &[PepItem]) -> BTreeSet<DeviceId> {
         .unwrap_or_default()
 }
 
-fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, with_body: bool) -> Message {
-    let mut message = Message::new_with_type(type_, Some(to.into()))
-        .with_payload(encrypted)
-        .with_payload(ExplicitMessageEncryption {
-            namespace: omemo::NAMESPACE.into(),
-            name: Some("OMEMO".into()),
-        });
+/// An OMEMO message. One with `content` (text) says so twice for clients that cannot
+/// read it: the encryption mark (XEP-0380) and a fallback body. A key exchange answer or
+/// heartbeat carries neither: it reaches every device of the account but concerns one,
+/// and the mark alone makes the others show "could not be decrypted" for nothing.
+fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, content: bool) -> Message {
+    let mut message = Message::new_with_type(type_, Some(to.into())).with_payload(encrypted);
     // Archive it (MAM) and keep it for offline delivery even without a body.
     message
         .payloads
         .push(Element::builder("store", "urn:xmpp:hints").build());
-    if with_body {
-        message = message.with_body(Lang::default(), FALLBACK_BODY.into());
+    if content {
+        message = message
+            .with_payload(ExplicitMessageEncryption {
+                namespace: omemo::NAMESPACE.into(),
+                name: Some("OMEMO".into()),
+            })
+            .with_body(Lang::default(), FALLBACK_BODY.into());
     }
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encrypted(payload: bool) -> xml::Encrypted {
+        xml::Encrypted {
+            header: xml::Header {
+                sid: 1,
+                keys: Vec::new(),
+                iv: xml::IV { data: vec![0; 12] },
+            },
+            payload: payload.then(|| xml::Payload { data: vec![1, 2, 3] }),
+        }
+    }
+
+    #[test]
+    fn only_messages_with_text_carry_the_encryption_mark_and_fallback() {
+        let to: BareJid = "bob@example.org".parse().unwrap();
+        let eme = |m: &Message| m.payloads.iter().any(|p| p.is("encryption", "urn:xmpp:eme:0"));
+        let text = stanza(MessageType::Chat, to.clone(), encrypted(true), true);
+        assert!(eme(&text) && !text.bodies.is_empty());
+        let empty = stanza(MessageType::Chat, to, encrypted(false), false);
+        assert!(!eme(&empty) && empty.bodies.is_empty(), "{empty:?}");
+        assert!(
+            empty.payloads.iter().any(|p| p.is("store", "urn:xmpp:hints")),
+            "still kept for offline"
+        );
+    }
 }

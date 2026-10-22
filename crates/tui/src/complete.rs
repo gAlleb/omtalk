@@ -64,6 +64,11 @@ pub const COMMANDS: &[Command] = &[
         args: "",
         about: "этот список",
     },
+    Command {
+        name: "/quit",
+        args: "",
+        about: "выйти из omtalk",
+    },
 ];
 
 pub fn about(name: &str) -> Option<&'static Command> {
@@ -79,6 +84,8 @@ pub struct Context {
     pub people: Vec<String>,
     pub rooms: Vec<String>,
     pub folders: Vec<String>,
+    /// Servers and their services: the accounts' own, and those of open rooms.
+    pub servers: Vec<String>,
 }
 
 /// A completion being cycled through with Tab.
@@ -121,6 +128,9 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
         }
         Some("/join") if is_first_argument(&before, start_byte) => {
             matching(context.rooms.iter().map(String::as_str), typed, " ")
+        }
+        Some("/services") if is_first_argument(&before, start_byte) => {
+            matching(context.servers.iter().map(String::as_str), typed, "")
         }
         Some(c) if c.starts_with('/') => Vec::new(),
         // A nick: at the start of the line it addresses someone.
@@ -170,6 +180,7 @@ mod tests {
             people: vec!["anna@home.org".into(), "boss@work.org".into()],
             rooms: vec!["team@muc.home.org".into()],
             folders: vec!["Работа".into(), "Рабочие дела".into()],
+            servers: vec!["home.org".into(), "muc.home.org".into()],
         }
     }
 
@@ -215,6 +226,8 @@ mod tests {
             None,
             "the text after the address is free"
         );
+        assert_eq!(complete("/services m"), Some((10, vec!["muc.home.org".into()])));
+        assert_eq!(complete("/services ").unwrap().1, ["home.org", "muc.home.org"]);
         assert_eq!(
             complete("/folder Раб").unwrap(),
             (8, vec!["Работа".into(), "Рабочие дела".into()])

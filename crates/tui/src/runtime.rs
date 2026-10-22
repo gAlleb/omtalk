@@ -220,6 +220,9 @@ struct Shared {
     tx: mpsc::UnboundedSender<Msg>,
 }
 
+/// How long a message stays in the status line.
+const STATUS_FADE: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -250,6 +253,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
 
     let ui = &options.config.ui;
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
+    app.leader = config::parse_key(&ui.leader)?;
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -295,11 +299,21 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| e.to_string())?;
     terminal.clear().map_err(|e| e.to_string())?;
     let mut input = EventStream::new();
+    // A message in the status line fades after a while; a new one starts the clock again.
+    let mut status = (String::new(), tokio::time::Instant::now());
     loop {
         terminal
             .draw(|frame| view::draw(frame, &mut app, &mut pictures))
             .map_err(|e| e.to_string())?;
+        if app.status != status.0 {
+            status = (app.status.clone(), tokio::time::Instant::now());
+        }
+        let fades = !app.status.is_empty();
         let actions = tokio::select! {
+            _ = tokio::time::sleep_until(status.1 + STATUS_FADE), if fades => {
+                app.status.clear();
+                Vec::new()
+            }
             event = input.next() => match event {
                 Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Some(Ok(TermEvent::Mouse(mouse))) => app.on_mouse(mouse),
@@ -580,8 +594,8 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             text: format!("архив: {e}"),
         }),
     }
-    for (room, nick) in shared.store.rooms(&account).unwrap_or_default() {
-        join(&account, &xmpp, &omemo, &shared, room, nick).await;
+    for (room, _) in shared.store.rooms(&account).unwrap_or_default() {
+        join(&account, &xmpp, &omemo, &shared, room, None).await;
     }
 }
 
@@ -591,12 +605,37 @@ async fn join(
     omemo: &Omemo,
     shared: &Shared,
     room: BareJid,
-    nick: String,
+    nick: Option<String>,
 ) {
     let tell = |msg| drop(shared.tx.send(msg));
+    // The nick: as asked, else the one the account's other clients use in this room (its
+    // bookmark, so they all count as one occupant), else the last one used here, else
+    // the account's name.
+    let bookmarks = xmpp.bookmarks().await.unwrap_or_default();
+    let bookmark = bookmarks.iter().find(|b| b.room == room);
+    let nick = nick
+        .or_else(|| bookmark.and_then(|b| b.nick.clone()))
+        .or_else(|| {
+            let rooms = shared.store.rooms(account).unwrap_or_default();
+            rooms.into_iter().find(|(r, _)| *r == room).map(|(_, nick)| nick)
+        })
+        .unwrap_or_else(|| account.node().map(|n| n.to_string()).unwrap_or_default());
     match xmpp.join(&room, &nick).await {
         Ok(()) => {
             let _ = shared.store.remember_room(account, &room, &nick);
+            // A room new to the account goes into its bookmarks, as Gajim does, so its
+            // other clients know it and the nick.
+            if bookmark.is_none() {
+                let entry = omtalk_xmpp::bookmarks::Bookmark {
+                    room: room.clone(),
+                    name: None,
+                    nick: Some(nick.clone()),
+                    autojoin: true,
+                };
+                if let Err(e) = xmpp.bookmark(&entry).await {
+                    tell(Msg::Status(format!("закладка для {room} не сохранилась: {e}")));
+                }
+            }
             tell(Msg::Joined {
                 account: account.clone(),
                 room: room.clone(),

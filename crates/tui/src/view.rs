@@ -18,7 +18,9 @@ use omtalk_xmpp::BareJid;
 use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
 use xmpp_parsers::data_forms::FieldType;
 
-use crate::app::{App, Areas, Chat, ChatKind, Entry, Focus, Group, Line, MediaState, ServiceButton};
+use crate::app::{
+    App, Areas, Chat, ChatKind, Entry, Focus, Group, LEADER_KEYS, Line, MediaState, ServiceButton,
+};
 use crate::complete;
 use crate::services::FieldState;
 use crate::theme;
@@ -299,10 +301,16 @@ fn chat_row(
         Span::styled(branch.to_owned(), Style::default().fg(theme::BORDER)),
         Span::styled(
             icon,
-            base.fg(if chat.is_room() { theme::ACCENT } else { theme::DIM }),
+            if selected {
+                base
+            } else {
+                base.fg(if chat.is_room() { theme::ACCENT } else { theme::DIM })
+            },
         ),
         Span::styled(title, base),
-        Span::styled(lock, base.fg(theme::WARN)),
+        // On the selected row the colours are swapped: a coloured lock would turn into a
+        // coloured block there.
+        Span::styled(lock, if selected { base } else { base.fg(theme::WARN) }),
         Span::styled(" ".repeat(gap), base),
         Span::styled(
             badge,
@@ -406,6 +414,78 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     }
     input_box(frame, app, input);
     suggestions(frame, app, input, messages);
+    leader_keys(frame, app, input);
+}
+
+/// The leader key's name, as "Ctrl+X".
+pub fn leader_label(app: &App) -> String {
+    let (code, modifiers) = app.leader;
+    let mut label = String::new();
+    for (flag, name) in [
+        (KeyModifiers::CONTROL, "Ctrl+"),
+        (KeyModifiers::ALT, "Alt+"),
+        (KeyModifiers::SUPER, "Super+"),
+    ] {
+        if modifiers.contains(flag) {
+            label.push_str(name);
+        }
+    }
+    match code {
+        crossterm::event::KeyCode::Char(' ') => label.push_str("Space"),
+        crossterm::event::KeyCode::Char(c) => label.extend(c.to_uppercase()),
+        crossterm::event::KeyCode::F(n) => label.push_str(&format!("F{n}")),
+        other => label.push_str(&format!("{other:?}")),
+    }
+    label
+}
+
+/// After the leader key: what the next key does, as which-key in an editor.
+fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
+    if !app.leader_pending {
+        return;
+    }
+    let left = LEADER_KEYS.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
+    let width = (LEADER_KEYS
+        .iter()
+        .map(|(_, a)| left + 3 + a.width())
+        .max()
+        .unwrap_or(0) as u16
+        + 2)
+    .min(input.width);
+    let height = (LEADER_KEYS.len() as u16 + 2).min(input.y.saturating_sub(1));
+    if height < 3 {
+        return;
+    }
+    let area = Rect::new(
+        input.x + input.width.saturating_sub(width),
+        input.y.saturating_sub(height),
+        width,
+        height,
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border(true))
+        .title(Span::styled(
+            format!(" {} … ", leader_label(app)),
+            Style::default().fg(theme::ACCENT),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    let lines: Vec<TextLine> = LEADER_KEYS
+        .iter()
+        .map(|(key, about)| {
+            TextLine::from(vec![
+                Span::styled(
+                    format!("{key:<left$}"),
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("   {about}"), Style::default().fg(theme::DIM)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Over the bottom of the chat, just above the input: the commands that fit what is
@@ -894,23 +974,23 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     let key = |k: &str| {
-        let prefix = if app.modifier == KeyModifiers::ALT {
-            "M-"
+        let text = if app.modifier == KeyModifiers::ALT {
+            format!("M-{k}")
         } else if app.modifier == KeyModifiers::SUPER {
-            "◆"
+            format!("◆{k}")
+        } else if app.modifier.is_empty() {
+            format!("{} {}", leader_label(app), k.to_lowercase())
         } else {
-            "^"
+            format!("^{k}")
         };
-        Span::styled(format!("{prefix}{k}"), Style::default().fg(theme::ACCENT))
+        Span::styled(text, Style::default().fg(theme::ACCENT))
     };
     let dim = |t: &str| Span::styled(t.to_owned(), Style::default().fg(theme::DIM));
     let hints = TextLine::from(vec![
+        Span::styled(leader_label(app), Style::default().fg(theme::ACCENT)),
+        dim(" клавиши  "),
         key("O"),
         dim(" OMEMO  "),
-        key("B"),
-        dim("/"),
-        key("R"),
-        dim(" панели  "),
         Span::styled("Tab", Style::default().fg(theme::ACCENT)),
         dim(" дописать/фокус  "),
         Span::styled("/", Style::default().fg(theme::ACCENT)),
@@ -918,6 +998,33 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         key("Q"),
         dim(" выход "),
     ]);
+    // A message for the user takes the line: first, in full, in place of the hints and
+    // with the connections down to their dots. It fades after a while (the runtime
+    // clears it).
+    if !app.status.is_empty() {
+        let mut spans: Vec<Span> = app
+            .connection
+            .values()
+            .map(|state| {
+                Span::styled(
+                    "●",
+                    Style::default().fg(if state == "в сети" {
+                        theme::OK
+                    } else {
+                        theme::WARN
+                    }),
+                )
+            })
+            .collect();
+        spans.push(Span::raw(" "));
+        let room = (area.width as usize).saturating_sub(spans.iter().map(|s| s.width()).sum());
+        spans.push(Span::styled(
+            truncate(&app.status, room),
+            Style::default().fg(theme::WARN),
+        ));
+        frame.render_widget(Paragraph::new(TextLine::from(spans)), area);
+        return;
+    }
     let mut left = Vec::new();
     for (account, state) in &app.connection {
         let colour = if state == "в сети" {
@@ -929,12 +1036,6 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         left.push(Span::styled(
             format!("{account} {state}  "),
             Style::default().fg(theme::DIM),
-        ));
-    }
-    if !app.status.is_empty() {
-        left.push(Span::styled(
-            format!("{}  ", app.status),
-            Style::default().fg(theme::WARN),
         ));
     }
     let hints_width = hints.width() as u16;
@@ -1974,5 +2075,103 @@ mod tests {
         let mut app = App::new(vec![home.clone()], Modifier::Ctrl, 30, 30);
         app.chat(&home, &jid("anna@home.org"), ChatKind::Direct);
         assert!(!screen(&mut app, 120, 20).contains("└"));
+    }
+
+    #[test]
+    fn the_input_line_edits_as_in_a_shell_and_the_leader_opens_a_key_list() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.focus = Focus::Input;
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let typed = |app: &mut App, text: &str| {
+            text.chars()
+                .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))))
+        };
+
+        typed(&mut app, "один два три");
+        app.on_key(ctrl('w'));
+        assert_eq!(app.input, "один два ");
+        app.on_key(ctrl('a'));
+        assert_eq!(app.cursor, 0);
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(app.cursor, 4, "by words");
+        app.on_key(ctrl('k'));
+        assert_eq!(app.input, "один");
+        app.on_key(ctrl('y'));
+        assert_eq!(app.input, "один два ", "what was cut comes back");
+        app.on_key(ctrl('u'));
+        assert_eq!((app.input.as_str(), app.cursor), ("", 0));
+        assert!(
+            app.show_left && app.selected == Some(bob),
+            "Ctrl+B/K are text keys here, not shortcuts"
+        );
+
+        // The leader, then a key: the list shows in between; Ctrl+O still works held.
+        app.on_key(ctrl('x'));
+        assert!(app.leader_pending);
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("Ctrl+X") && text.contains("сервисы сервера"),
+            "{text}"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(!app.show_left && !app.leader_pending);
+        app.on_key(ctrl('x'));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_left && !app.leader_pending, "Esc just cancels");
+        app.on_key(ctrl('o'));
+        assert!(!app.chats[bob].omemo);
+
+        // The lock of a chat without OMEMO, on the selected row, is not a red block.
+        app.show_left = true;
+        screen(&mut app, 120, 30);
+        let (row, _) = app
+            .areas
+            .chat_rows
+            .iter()
+            .find(|(_, i)| *i == bob)
+            .cloned()
+            .unwrap();
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut pictures = Pictures::new();
+        terminal.draw(|f| draw(f, &mut app, &mut pictures)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for x in row.x..row.x + row.width {
+            assert_ne!(buffer[(x, row.y)].fg, theme::WARN, "cell {x} of the selected row");
+        }
+
+        // /quit leaves.
+        app.focus = Focus::Input;
+        typed(&mut app, "/quit");
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            [Action::Quit]
+        );
+    }
+
+    #[test]
+    fn text_not_for_this_device_is_said_once_per_chat() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let missed = omtalk_omemo::Incoming {
+            peer: jid("bob@home.org"),
+            sender: jid("bob@home.org"),
+            nick: None,
+            device: None,
+            direction: omtalk_omemo::Direction::Incoming,
+            encrypted: true,
+            text: None,
+            at: None,
+            not_for_this_device: true,
+        };
+        app.on_incoming(&me, &missed, 1);
+        app.on_incoming(&me, &missed, 2);
+        let chat = &app.chats[0];
+        assert_eq!(chat.lines.len(), 1, "{:?}", chat.lines);
+        assert!(chat.lines[0].notice && chat.lines[0].text.contains("не для этого устройства"));
     }
 }

@@ -152,6 +152,31 @@ impl Device {
         .ok()
     }
 
+    /// The next message `wanted` picks; the others are skipped.
+    pub async fn next_where(&mut self, wanted: impl Fn(&Incoming) -> bool) -> Incoming {
+        timeout(WAIT, async {
+            loop {
+                let incoming = self
+                    .inbox
+                    .recv()
+                    .await
+                    .unwrap()
+                    .expect("decryption must not fail");
+                if wanted(&incoming) {
+                    return incoming;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "device {} of {} got no such message",
+                self.omemo.device_id(),
+                self.jid
+            )
+        })
+    }
+
     /// The next message with text; empty handshake answers are skipped.
     pub async fn next_text(&mut self) -> Incoming {
         timeout(WAIT, async {

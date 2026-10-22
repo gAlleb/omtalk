@@ -20,6 +20,8 @@ const PUBLISH_OPTIONS_FORM: &str = "http://jabber.org/protocol/pubsub#publish-op
 pub enum Access {
     Open,
     Presence,
+    /// The account itself only: bookmarks and other private data.
+    Owner,
 }
 
 impl Access {
@@ -27,6 +29,7 @@ impl Access {
         match self {
             Access::Open => "open",
             Access::Presence => "presence",
+            Access::Owner => "whitelist",
         }
     }
 }

@@ -6,6 +6,7 @@
 
 mod account;
 mod accounts;
+pub mod bookmarks;
 mod config;
 mod disco;
 mod error;

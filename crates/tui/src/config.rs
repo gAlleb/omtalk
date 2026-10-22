@@ -8,7 +8,8 @@
 //! # direct_tls = "xmpp.example.org:5223"
 //!
 //! [ui]
-//! modifier = "ctrl"     # ctrl, alt or super: the key for every shortcut
+//! leader = "ctrl+x"    # press it, let go, then a letter (as tmux's prefix); a list shows
+//! modifier = "ctrl"     # ctrl, alt, super or none: held with a letter, the same shortcuts
 //! icons = "nerd"        # nerd (Nerd Font glyphs) or text
 //! viewer = "xdg-open"   # opens a shared file on click
 //! left = 26             # width of the chat list
@@ -49,6 +50,8 @@ pub enum Modifier {
     Ctrl,
     Alt,
     Super,
+    /// Shortcuts only through the leader key.
+    None,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -65,6 +68,8 @@ pub enum IconSet {
 #[serde(deny_unknown_fields, default)]
 pub struct Ui {
     pub modifier: Modifier,
+    /// The prefix key, as "ctrl+x", "alt+a" or "ctrl+space".
+    pub leader: String,
     pub icons: IconSet,
     pub left: u16,
     pub right: u16,
@@ -76,12 +81,39 @@ impl Default for Ui {
     fn default() -> Self {
         Self {
             modifier: Modifier::Ctrl,
+            leader: "ctrl+x".into(),
             icons: IconSet::Nerd,
             left: 26,
             right: 30,
             viewer: "xdg-open".into(),
         }
     }
+}
+
+/// A key as written in the config: "ctrl+x", "alt+a", "ctrl+space", "f2".
+pub fn parse_key(text: &str) -> Result<(crossterm::event::KeyCode, crossterm::event::KeyModifiers), String> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let mut modifiers = KeyModifiers::NONE;
+    let lower = text.trim().to_lowercase();
+    let mut parts: Vec<&str> = lower.split('+').collect();
+    let key = parts.pop().unwrap_or_default();
+    for part in parts {
+        modifiers |= match part {
+            "ctrl" | "control" | "c" => KeyModifiers::CONTROL,
+            "alt" | "meta" | "m" => KeyModifiers::ALT,
+            "super" => KeyModifiers::SUPER,
+            "shift" => KeyModifiers::SHIFT,
+            other => return Err(format!("leader = {text:?}: неизвестный модификатор {other:?}")),
+        };
+    }
+    let code = match key {
+        "space" => KeyCode::Char(' '),
+        "esc" | "escape" => KeyCode::Esc,
+        f if f.starts_with('f') && f[1..].parse::<u8>().is_ok() => KeyCode::F(f[1..].parse().unwrap()),
+        c if c.chars().count() == 1 => KeyCode::Char(c.chars().next().unwrap()),
+        _ => return Err(format!("leader = {text:?}: не понимаю клавишу {key:?}")),
+    };
+    Ok((code, modifiers))
 }
 
 pub fn config_dir() -> PathBuf {
@@ -172,5 +204,21 @@ mod tests {
     #[test]
     fn a_typo_is_an_error_not_a_silent_default() {
         assert!(toml::from_str::<Config>("[ui]\nmodifer = \"alt\"").is_err());
+    }
+
+    #[test]
+    fn keys_in_the_config_are_read() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        assert_eq!(
+            parse_key("ctrl+x"),
+            Ok((KeyCode::Char('x'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_key("Ctrl+Space"),
+            Ok((KeyCode::Char(' '), KeyModifiers::CONTROL))
+        );
+        assert_eq!(parse_key("alt+a"), Ok((KeyCode::Char('a'), KeyModifiers::ALT)));
+        assert_eq!(parse_key("f2"), Ok((KeyCode::F(2), KeyModifiers::NONE)));
+        assert!(parse_key("hyper+x").is_err() && parse_key("ctrl+xx").is_err());
     }
 }

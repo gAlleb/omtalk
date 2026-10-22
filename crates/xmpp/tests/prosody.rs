@@ -511,3 +511,32 @@ async fn services_are_discovered_and_commands_run_step_by_step() {
         .unwrap();
     assert_eq!(done.status, CommandStatus::Completed, "notes: {:?}", done.notes);
 }
+
+#[tokio::test]
+async fn bookmarks_are_written_read_and_private() {
+    use omtalk_xmpp::bookmarks::Bookmark;
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u18")).await;
+    let other = accounts.add(config("u19")).await;
+    online(&mut events, &[&owner, &other]).await;
+
+    let room: BareJid = format!("bm-{}@muc.localhost", std::process::id())
+        .parse()
+        .unwrap();
+    let bookmark = Bookmark {
+        room: room.clone(),
+        name: Some("Комната".into()),
+        nick: Some("mrak".into()),
+        autojoin: true,
+    };
+    owner.bookmark(&bookmark).await.unwrap();
+    let read = owner.bookmarks().await.unwrap();
+    assert!(read.contains(&bookmark), "{read:?}");
+
+    // Another account sees none of them.
+    let theirs = other.items(owner.jid(), omtalk_xmpp::bookmarks::NODE).await;
+    assert!(
+        theirs.is_err() || theirs.unwrap().is_empty(),
+        "bookmarks are private"
+    );
+}
