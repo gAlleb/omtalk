@@ -42,7 +42,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
         screen: area,
         ..Areas::default()
     };
-    frame.render_widget(Block::default().style(Style::default().fg(theme::TEXT)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::text()).bg(theme::background())),
+        area,
+    );
 
     let [main, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     let show_left = app.show_left && area.width >= FOLD_LEFT_BELOW;
@@ -87,7 +90,10 @@ fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
         height: 1,
         ..area
     };
-    frame.render_widget(Paragraph::new(arrow).style(Style::default().fg(theme::DIM)), mid);
+    frame.render_widget(
+        Paragraph::new(arrow).style(Style::default().fg(theme::dim())),
+        mid,
+    );
 }
 
 fn pane(title: &str, focused: bool) -> Block<'_> {
@@ -97,13 +103,13 @@ fn pane(title: &str, focused: bool) -> Block<'_> {
         .border_style(theme::border(focused))
         .title(Span::styled(
             format!(" {title} "),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         ))
 }
 
 fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = pane("omtalk", app.focus == Focus::Chats).title(
-        TextLine::from(Span::styled(" ‹ ", Style::default().fg(theme::DIM))).alignment(Alignment::Right),
+        TextLine::from(Span::styled(" ‹ ", Style::default().fg(theme::dim()))).alignment(Alignment::Right),
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -176,8 +182,8 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.chats.is_empty() && inner.height > 2 {
         let hint = Paragraph::new(vec![
-            TextLine::from(Span::styled("нет чатов", Style::default().fg(theme::DIM))),
-            TextLine::from(Span::styled("/msg или /join", Style::default().fg(theme::DIM))),
+            TextLine::from(Span::styled("нет чатов", Style::default().fg(theme::dim()))),
+            TextLine::from(Span::styled("/msg или /join", Style::default().fg(theme::dim()))),
         ]);
         // Below the headings, if any.
         if y + 2 <= inner.bottom() {
@@ -206,14 +212,14 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
     let name = truncate(&account.to_string(), room);
     let gap = (width as usize).saturating_sub(mark.width() + 2 + name.width() + badge.width());
     Paragraph::new(TextLine::from(vec![
-        Span::styled(mark, Style::default().fg(theme::DIM)),
+        Span::styled(mark, Style::default().fg(theme::dim())),
         Span::styled(
             "● ",
-            Style::default().fg(if online { theme::OK } else { theme::DIM }),
+            Style::default().fg(if online { theme::ok() } else { theme::dim() }),
         ),
         Span::styled(name, {
             // The account commands go to stands out.
-            let style = Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+            let style = Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD);
             if app.active.as_ref() == Some(account) {
                 style.add_modifier(Modifier::UNDERLINED)
             } else {
@@ -224,7 +230,7 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
         Span::styled(
             badge,
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::accent())
                 .add_modifier(Modifier::REVERSED | Modifier::BOLD),
         ),
     ]))
@@ -263,18 +269,18 @@ fn folder_row(
     let name = truncate(name, room);
     let gap = (width as usize).saturating_sub(mark.width() + icon.width() + name.width() + badge.width());
     Paragraph::new(TextLine::from(vec![
-        Span::styled(branch.to_owned(), Style::default().fg(theme::BORDER)),
-        Span::styled(mark, Style::default().fg(theme::DIM)),
-        Span::styled(icon, Style::default().fg(theme::ACCENT)),
+        Span::styled(branch.to_owned(), Style::default().fg(theme::border_colour())),
+        Span::styled(mark, Style::default().fg(theme::dim())),
+        Span::styled(icon, Style::default().fg(theme::accent())),
         Span::styled(
             name,
-            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::text()).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(gap)),
         Span::styled(
             badge,
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::accent())
                 .add_modifier(Modifier::REVERSED | Modifier::BOLD),
         ),
     ]))
@@ -313,12 +319,12 @@ fn chat_row(
     let base = if selected {
         theme::selected()
     } else if chat.unread > 0 {
-        Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme::text()).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::TEXT)
+        Style::default().fg(theme::text())
     };
     Paragraph::new(TextLine::from(vec![
-        Span::styled(branch.to_owned(), Style::default().fg(theme::BORDER)),
+        Span::styled(branch.to_owned(), Style::default().fg(theme::border_colour())),
         Span::styled(
             icon,
             if selected {
@@ -326,9 +332,9 @@ fn chat_row(
             } else {
                 // A person's mark is green while any of their clients is online.
                 base.fg(match chat.kind {
-                    ChatKind::Room { .. } => theme::ACCENT,
-                    ChatKind::Direct if online => theme::OK,
-                    _ => theme::DIM,
+                    ChatKind::Room { .. } => theme::accent(),
+                    ChatKind::Direct if online => theme::ok(),
+                    _ => theme::dim(),
                 })
             },
         ),
@@ -340,16 +346,16 @@ fn chat_row(
             if selected {
                 base
             } else if typing {
-                base.fg(theme::ACCENT)
+                base.fg(theme::accent())
             } else {
-                base.fg(theme::WARN)
+                base.fg(theme::warn())
             },
         ),
         Span::styled(" ".repeat(gap), base),
         Span::styled(
             badge,
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ),
     ]))
@@ -383,7 +389,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     let mut block = pane(&title, app.focus == Focus::Messages).title(
         TextLine::from(Span::styled(
             format!(" {subtitle} "),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ))
         .alignment(Alignment::Right),
     );
@@ -391,7 +397,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         block = block.title_bottom(
             TextLine::from(Span::styled(
                 " ↓ ещё ниже — End ",
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ))
             .alignment(Alignment::Center),
         );
@@ -408,7 +414,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             block = block.title_bottom(
                 TextLine::from(Span::styled(
                     format!(" {} {verb}… ", names.join(", ")),
-                    Style::default().fg(theme::ACCENT),
+                    Style::default().fg(theme::accent()),
                 ))
                 .alignment(Alignment::Left),
             );
@@ -456,7 +462,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                         _ if first_visible => {
                             text = TextLine::from(Span::styled(
                                 format!("  {} — прокрутите, чтобы увидеть", picture.name),
-                                Style::default().fg(theme::DIM),
+                                Style::default().fg(theme::dim()),
                             ));
                         }
                         _ => {}
@@ -495,9 +501,9 @@ fn client_rows(rows: &mut Vec<TextLine<'static>>, clients: &[&omtalk_xmpp::prese
     for client in clients {
         let state = client.state.unwrap_or(State::Online);
         let colour = match state {
-            State::Chat | State::Online => theme::OK,
-            State::Away | State::Xa => theme::ACCENT,
-            State::Dnd => theme::WARN,
+            State::Chat | State::Online => theme::ok(),
+            State::Away | State::Xa => theme::accent(),
+            State::Dnd => theme::warn(),
         };
         let mut words = state.words().to_owned();
         if let Some(status) = &client.status {
@@ -531,6 +537,15 @@ fn highlight_selection(frame: &mut Frame, app: &App) {
             cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
         }
     }
+}
+
+/// Empties an area for a window over the rest, in the theme's background.
+fn clear(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::text()).bg(theme::background())),
+        area,
+    );
 }
 
 /// The leader key's name, as "Ctrl+X".
@@ -584,10 +599,10 @@ fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
         .border_style(theme::border(true))
         .title(Span::styled(
             format!(" {} … ", leader_label(app)),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ));
     let inner = block.inner(area);
-    frame.render_widget(Clear, area);
+    clear(frame, area);
     frame.render_widget(block, area);
     let lines: Vec<TextLine> = LEADER_KEYS
         .iter()
@@ -595,9 +610,9 @@ fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
             TextLine::from(vec![
                 Span::styled(
                     format!("{key:<left$}"),
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("   {about}"), Style::default().fg(theme::DIM)),
+                Span::styled(format!("   {about}"), Style::default().fg(theme::dim())),
             ])
         })
         .collect();
@@ -652,9 +667,12 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border(true))
-        .title(Span::styled(" Tab — дописать ", Style::default().fg(theme::DIM)));
+        .title(Span::styled(
+            " Tab — дописать ",
+            Style::default().fg(theme::dim()),
+        ));
     let inner = block.inner(area);
-    frame.render_widget(Clear, area);
+    clear(frame, area);
     frame.render_widget(block, area);
     let room = (inner.width as usize).saturating_sub(left + 3);
     let lines: Vec<TextLine> = rows
@@ -663,13 +681,13 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
             let style = if chosen {
                 theme::selected()
             } else {
-                Style::default().fg(theme::ACCENT)
+                Style::default().fg(theme::accent())
             };
             TextLine::from(vec![
                 Span::styled(format!("{text:<left$}"), style),
                 Span::styled(
                     format!("   {}", truncate(about, room)),
-                    Style::default().fg(theme::DIM),
+                    Style::default().fg(theme::dim()),
                 ),
             ])
         })
@@ -681,20 +699,20 @@ fn empty_state(frame: &mut Frame, area: Rect) {
     let lines = vec![
         TextLine::from(Span::styled(
             "omtalk",
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         )),
         TextLine::from(""),
         TextLine::from(Span::styled(
             "/msg имя@сервер — написать",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         TextLine::from(Span::styled(
             "/join комната@conference.сервер — войти в группу",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
         TextLine::from(Span::styled(
             "/help — все команды",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         )),
     ];
     let height = lines.len() as u16;
@@ -766,7 +784,7 @@ pub fn message_rows(
                             "─".repeat(side),
                             "─".repeat(width.saturating_sub(side + label.width()))
                         ),
-                        Style::default().fg(theme::BORDER),
+                        Style::default().fg(theme::border_colour()),
                     ))
                     .into(),
                 );
@@ -780,7 +798,7 @@ pub fn message_rows(
                 rows.push(
                     TextLine::from(Span::styled(
                         format!("  · {text}"),
-                        Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC),
+                        Style::default().fg(theme::dim()).add_modifier(Modifier::ITALIC),
                     ))
                     .into(),
                 );
@@ -793,7 +811,9 @@ pub fn message_rows(
         });
         if !same_group {
             let who_style = if line.outgoing {
-                Style::default().fg(theme::OUTGOING).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme::outgoing())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 theme::nick(&line.who)
             };
@@ -806,7 +826,7 @@ pub fn message_rows(
                     },
                     who_style,
                 ),
-                Span::styled(format!("  {clock}"), Style::default().fg(theme::DIM)),
+                Span::styled(format!("  {clock}"), Style::default().fg(theme::dim())),
             ]));
             if !line.outgoing && !line.who.is_empty() {
                 header.who = Some((line.who.clone(), line.who.width() as u16));
@@ -840,21 +860,21 @@ pub fn message_rows(
                 MediaState::Loading => (
                     if slot.image { icons.picture } else { icons.file },
                     "загружается…".to_owned(),
-                    theme::DIM,
+                    theme::dim(),
                 ),
                 MediaState::Ready(_) if slot.image => {
-                    (icons.picture, "открыть — клик".to_owned(), theme::ACCENT)
+                    (icons.picture, "открыть — клик".to_owned(), theme::accent())
                 }
-                MediaState::Ready(_) => (icons.file, "открыть — клик".to_owned(), theme::ACCENT),
-                MediaState::Failed(e) => (icons.file, format!("не загрузилось: {e}"), theme::WARN),
+                MediaState::Ready(_) => (icons.file, "открыть — клик".to_owned(), theme::accent()),
+                MediaState::Failed(e) => (icons.file, format!("не загрузилось: {e}"), theme::warn()),
             };
             let mut spans = vec![Span::raw("  ")];
             if !line.encrypted {
-                spans.push(Span::styled(marker, Style::default().fg(theme::WARN)));
+                spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
             }
             spans.push(Span::styled(
                 format!("{icon} {} ", slot.name),
-                Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme::text()).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(state, Style::default().fg(colour)));
             rows.push(Row {
@@ -875,11 +895,11 @@ pub fn message_rows(
         for text in wrap(&line.text, text_width) {
             let mut spans = vec![Span::raw("  ")];
             if !line.encrypted && first {
-                spans.push(Span::styled(marker, Style::default().fg(theme::WARN)));
+                spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
             } else if !line.encrypted {
                 spans.push(Span::raw(" ".repeat(marker.width())));
             }
-            spans.push(Span::styled(text, Style::default().fg(theme::TEXT)));
+            spans.push(Span::styled(text, Style::default().fg(theme::text())));
             rows.push(TextLine::from(spans).into());
             first = false;
         }
@@ -907,7 +927,7 @@ fn push_delivery(rows: &mut Vec<Row>, line: &Line, body_width: usize, below: boo
 /// The sign for how far a message got: ⋯ being sent, ✓ on the server, ✓✓ delivered,
 /// ✓✓ in the accent colour read, ✗ with the reason when it failed.
 fn delivery_mark(delivery: &Delivery) -> (String, Style) {
-    let dim = Style::default().fg(theme::DIM);
+    let dim = Style::default().fg(theme::dim());
     match delivery {
         Delivery::Uploading(percent) => (format!("⇡ {percent}%"), dim),
         Delivery::Sending => ("⋯".into(), dim),
@@ -915,11 +935,11 @@ fn delivery_mark(delivery: &Delivery) -> (String, Style) {
         Delivery::Delivered => ("✓✓".into(), dim),
         Delivery::Read => (
             "✓✓".into(),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         ),
         Delivery::Failed(reason) => (
             format!("✗ не отправлено: {reason}"),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ),
     }
 }
@@ -982,9 +1002,9 @@ fn truncate(text: &str, width: usize) -> String {
 fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     let omemo = app.current().is_none_or(|c| c.omemo);
     let (label, colour) = if omemo {
-        (app.icons.locked, theme::OK)
+        (app.icons.locked, theme::ok())
     } else {
-        (app.icons.unlocked, theme::WARN)
+        (app.icons.unlocked, theme::warn())
     };
     let button = format!(" {label} ");
     let attach = format!(" {} ", app.icons.attach);
@@ -1005,12 +1025,12 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
             button.clone(),
             Style::default().fg(colour).add_modifier(Modifier::BOLD),
         ))
-        .title(Span::styled(attach.clone(), Style::default().fg(theme::ACCENT)))
+        .title(Span::styled(attach.clone(), Style::default().fg(theme::accent())))
         .title(
-            TextLine::from(Span::styled(hint, Style::default().fg(theme::DIM))).alignment(Alignment::Right),
+            TextLine::from(Span::styled(hint, Style::default().fg(theme::dim()))).alignment(Alignment::Right),
         );
     let inner = block.inner(area);
-    frame.render_widget(Clear, area);
+    clear(frame, area);
     frame.render_widget(block, area);
     app.areas.omemo_button = Rect::new(area.x + 1, area.y, button.width() as u16, 1);
     app.areas.attach_button = Rect::new(
@@ -1027,7 +1047,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
             "/msg имя@сервер или /join комната"
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(theme::DIM))),
+            Paragraph::new(Span::styled(hint, Style::default().fg(theme::dim()))),
             inner,
         );
     } else {
@@ -1099,7 +1119,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
         None => "—".to_owned(),
     };
     let block = pane(&title, false).title(
-        TextLine::from(Span::styled(" › ", Style::default().fg(theme::DIM))).alignment(Alignment::Right),
+        TextLine::from(Span::styled(" › ", Style::default().fg(theme::dim()))).alignment(Alignment::Right),
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1117,13 +1137,16 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                     nicks.push((Rect::new(inner.x, y, inner.width, 1), nick.clone()));
                 }
                 let mut spans = vec![
-                    Span::styled("● ", Style::default().fg(theme::OK)),
+                    Span::styled("● ", Style::default().fg(theme::ok())),
                     Span::styled(nick.clone(), theme::nick(nick)),
                 ];
                 if let Some(real) = real
                     && real.node().is_some_and(|n| n.as_str() != nick)
                 {
-                    spans.push(Span::styled(format!(" {real}"), Style::default().fg(theme::DIM)));
+                    spans.push(Span::styled(
+                        format!(" {real}"),
+                        Style::default().fg(theme::dim()),
+                    ));
                 }
                 rows.push(TextLine::from(spans));
             }
@@ -1131,9 +1154,9 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
         ChatKind::Server => {
             let state = app.connection.get(&chat.account).cloned().unwrap_or_default();
             let colour = if state == "в сети" {
-                theme::OK
+                theme::ok()
             } else {
-                theme::WARN
+                theme::warn()
             };
             rows.push(TextLine::from(vec![
                 Span::styled("● ", Style::default().fg(colour)),
@@ -1144,7 +1167,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
             ]));
             rows.push(TextLine::from(Span::styled(
                 format!("  {state}"),
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             )));
             rows.push(TextLine::default());
             let chats = app.chats.iter().filter(|c| c.account == chat.account);
@@ -1152,7 +1175,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
             let direct = chats.filter(|c| c.kind == ChatKind::Direct).count();
             let label = |name: &str, value: String| {
                 TextLine::from(vec![
-                    Span::styled(format!("{name:<8}"), Style::default().fg(theme::DIM)),
+                    Span::styled(format!("{name:<8}"), Style::default().fg(theme::dim())),
                     Span::raw(value),
                 ])
             };
@@ -1163,13 +1186,13 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
             for command in ["/services", "/add адрес", "/join комната"] {
                 rows.push(TextLine::from(Span::styled(
                     command,
-                    Style::default().fg(theme::ACCENT),
+                    Style::default().fg(theme::accent()),
                 )));
             }
             rows.push(TextLine::default());
             rows.push(TextLine::from(Span::styled(
                 "свои клиенты",
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             )));
             let own = app.own_resource.get(&chat.account);
             let mut clients: Vec<omtalk_xmpp::presence::Online> = app
@@ -1187,34 +1210,37 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
         ChatKind::Direct => {
             rows.push(TextLine::from(Span::styled(
                 "в сети",
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             )));
             let clients = app.clients(&chat.account, &chat.jid);
             if clients.is_empty() {
                 rows.push(TextLine::from(Span::styled(
                     "  никого",
-                    Style::default().fg(theme::DIM),
+                    Style::default().fg(theme::dim()),
                 )));
             }
             client_rows(&mut rows, &clients, inner.width);
             rows.push(TextLine::default());
             rows.push(TextLine::from(Span::styled(
                 "устройства OMEMO",
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             )));
             let devices = match &chat.devices {
                 None => {
-                    rows.push(TextLine::from(Span::styled("…", Style::default().fg(theme::DIM))));
+                    rows.push(TextLine::from(Span::styled(
+                        "…",
+                        Style::default().fg(theme::dim()),
+                    )));
                     &[][..]
                 }
                 Some(devices) if devices.is_empty() => {
                     rows.push(TextLine::from(Span::styled(
                         "нет OMEMO-устройств:",
-                        Style::default().fg(theme::WARN),
+                        Style::default().fg(theme::warn()),
                     )));
                     rows.push(TextLine::from(Span::styled(
                         "пишите без шифрования (^O)",
-                        Style::default().fg(theme::DIM),
+                        Style::default().fg(theme::dim()),
                     )));
                     &[][..]
                 }
@@ -1222,18 +1248,18 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             for device in devices {
                 let (dot, colour) = match (&device.fingerprint, device.has_session) {
-                    (None, _) => ("○", theme::DIM),
-                    (Some(_), true) => ("●", theme::OK),
-                    (Some(_), false) => ("●", theme::ACCENT),
+                    (None, _) => ("○", theme::dim()),
+                    (Some(_), true) => ("●", theme::ok()),
+                    (Some(_), false) => ("●", theme::accent()),
                 };
                 let mut header = vec![
                     Span::styled(format!("{dot} "), Style::default().fg(colour)),
-                    Span::styled(device.device.to_string(), Style::default().fg(theme::TEXT)),
+                    Span::styled(device.device.to_string(), Style::default().fg(theme::text())),
                 ];
                 if device.this_device {
                     header.push(Span::styled(
                         " это устройство",
-                        Style::default().fg(theme::ACCENT),
+                        Style::default().fg(theme::accent()),
                     ));
                 }
                 rows.push(TextLine::from(header));
@@ -1244,7 +1270,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect) {
                 for part in wrap(&detail, inner.width.saturating_sub(2) as usize) {
                     rows.push(TextLine::from(Span::styled(
                         format!("  {part}"),
-                        Style::default().fg(theme::DIM),
+                        Style::default().fg(theme::dim()),
                     )));
                 }
             }
@@ -1265,17 +1291,17 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("^{k}")
         };
-        Span::styled(text, Style::default().fg(theme::ACCENT))
+        Span::styled(text, Style::default().fg(theme::accent()))
     };
-    let dim = |t: &str| Span::styled(t.to_owned(), Style::default().fg(theme::DIM));
+    let dim = |t: &str| Span::styled(t.to_owned(), Style::default().fg(theme::dim()));
     let hints = TextLine::from(vec![
-        Span::styled(leader_label(app), Style::default().fg(theme::ACCENT)),
+        Span::styled(leader_label(app), Style::default().fg(theme::accent())),
         dim(" клавиши  "),
         key("O"),
         dim(" OMEMO  "),
-        Span::styled("Tab", Style::default().fg(theme::ACCENT)),
+        Span::styled("Tab", Style::default().fg(theme::accent())),
         dim(" дописать/фокус  "),
-        Span::styled("/", Style::default().fg(theme::ACCENT)),
+        Span::styled("/", Style::default().fg(theme::accent())),
         dim(" команды  "),
         key("Q"),
         dim(" выход "),
@@ -1291,9 +1317,9 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     "●",
                     Style::default().fg(if state == "в сети" {
-                        theme::OK
+                        theme::ok()
                     } else {
-                        theme::WARN
+                        theme::warn()
                     }),
                 )
             })
@@ -1302,7 +1328,7 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         let room = (area.width as usize).saturating_sub(spans.iter().map(|s| s.width()).sum());
         spans.push(Span::styled(
             truncate(&app.status, room),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ));
         frame.render_widget(Paragraph::new(TextLine::from(spans)), area);
         return;
@@ -1310,14 +1336,14 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     let mut left = Vec::new();
     for (account, state) in &app.connection {
         let colour = if state == "в сети" {
-            theme::OK
+            theme::ok()
         } else {
-            theme::WARN
+            theme::warn()
         };
         left.push(Span::styled("● ", Style::default().fg(colour)));
         left.push(Span::styled(
             format!("{account} {state}  "),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ));
     }
     let hints_width = hints.width() as u16;
@@ -1330,9 +1356,9 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     "● ",
                     Style::default().fg(if state == "в сети" {
-                        theme::OK
+                        theme::ok()
                     } else {
-                        theme::WARN
+                        theme::warn()
                     }),
                 )
             })
@@ -1358,7 +1384,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         height,
     };
     app.areas.service_window = area;
-    frame.render_widget(Clear, area);
+    clear(frame, area);
     let place = match &services.node {
         Some(node) => format!("{} · {node}", services.jid),
         None => services.jid.to_string(),
@@ -1387,8 +1413,8 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     };
 
     let (status, problem_style) = match (&services.problem, services.loading) {
-        (Some(text), _) => (text.clone(), Style::default().fg(theme::WARN)),
-        (None, true) => ("загрузка…".to_owned(), Style::default().fg(theme::DIM)),
+        (Some(text), _) => (text.clone(), Style::default().fg(theme::warn())),
+        (None, true) => ("загрузка…".to_owned(), Style::default().fg(theme::dim())),
         (None, false) => (String::new(), Style::default()),
     };
     frame.render_widget(Paragraph::new(format!(" {status}")).style(problem_style), problem);
@@ -1408,7 +1434,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                             Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
                             Span::styled(
                                 format!("  {}/{}", identity.category, identity.kind),
-                                Style::default().fg(theme::DIM),
+                                Style::default().fg(theme::dim()),
                             ),
                         ]),
                         None,
@@ -1428,7 +1454,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 lines.push((
                     TextLine::styled(
                         heading,
-                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
                     ),
                     None,
                 ));
@@ -1446,7 +1472,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                     let mut line = TextLine::from(vec![
                         Span::raw(format!(" {icon} ")),
                         Span::raw(name),
-                        Span::styled(address, Style::default().fg(theme::DIM)),
+                        Span::styled(address, Style::default().fg(theme::dim())),
                     ]);
                     if row == services.cursor {
                         line = line.style(theme::selected());
@@ -1457,7 +1483,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             }
             if services.listing.is_some() && row == 0 && services.problem.is_none() {
                 lines.push((
-                    TextLine::styled("здесь ничего нет", Style::default().fg(theme::DIM)),
+                    TextLine::styled("здесь ничего нет", Style::default().fg(theme::dim())),
                     None,
                 ));
             }
@@ -1494,13 +1520,13 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             let instructions = form.step.form.as_ref().and_then(|f| f.instructions.clone());
             for text in instructions.into_iter() {
                 for part in wrap(&text, body.width as usize) {
-                    lines.push((TextLine::styled(part, Style::default().fg(theme::DIM)), None));
+                    lines.push((TextLine::styled(part, Style::default().fg(theme::dim())), None));
                 }
             }
             for note in form.notes() {
                 let style = match note.kind {
                     NoteKind::Info => Style::default(),
-                    NoteKind::Warn | NoteKind::Error => Style::default().fg(theme::WARN),
+                    NoteKind::Warn | NoteKind::Error => Style::default().fg(theme::warn()),
                 };
                 for part in wrap(&note.text, body.width as usize) {
                     lines.push((TextLine::styled(part, style), None));
@@ -1525,7 +1551,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 let focused = running && index == form.focus;
                 if field.kind == FieldType::Fixed {
                     for part in wrap(&field.value, body.width as usize) {
-                        lines.push((TextLine::styled(part, Style::default().fg(theme::DIM)), None));
+                        lines.push((TextLine::styled(part, Style::default().fg(theme::dim())), None));
                     }
                     continue;
                 }
@@ -1533,9 +1559,9 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 let label = format!("{}{mark}", field.label);
                 let value = field_value(field, focused, running);
                 let label_style = if focused {
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::DIM)
+                    Style::default().fg(theme::dim())
                 };
                 let value_style = if focused {
                     Style::default().add_modifier(Modifier::UNDERLINED)
@@ -1628,14 +1654,14 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         let style = if default {
             theme::selected()
         } else {
-            Style::default().fg(theme::ACCENT)
+            Style::default().fg(theme::accent())
         };
         frame.render_widget(Paragraph::new(text).style(style), place);
         button_areas.push((place, button));
         x += w + 1;
     }
     frame.render_widget(
-        Paragraph::new(format!(" {hint_text}")).style(Style::default().fg(theme::DIM)),
+        Paragraph::new(format!(" {hint_text}")).style(Style::default().fg(theme::dim())),
         hint,
     );
     app.areas.service_rows = row_areas;
@@ -2443,7 +2469,11 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app, &mut pictures)).unwrap();
         let buffer = terminal.backend().buffer();
         for x in row.x..row.x + row.width {
-            assert_ne!(buffer[(x, row.y)].fg, theme::WARN, "cell {x} of the selected row");
+            assert_ne!(
+                buffer[(x, row.y)].fg,
+                theme::warn(),
+                "cell {x} of the selected row"
+            );
         }
 
         // /quit leaves.

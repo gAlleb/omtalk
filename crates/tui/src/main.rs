@@ -28,6 +28,15 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // A mistake in the colours is said before the screen is taken over, as one in the
+    // accounts is.
+    match options.config.theme.palette() {
+        Ok(palette) => theme::set(palette),
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
     // Passwords are asked for before the screen is taken over.
     let accounts = match runtime::prepare_accounts(&options) {
         Ok(accounts) => accounts,

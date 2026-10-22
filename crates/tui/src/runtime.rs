@@ -33,7 +33,7 @@ use crate::view::{self, Pictures};
 const HISTORY: usize = 300;
 
 pub struct Options {
-    config: Config,
+    pub config: Config,
     db: PathBuf,
 }
 

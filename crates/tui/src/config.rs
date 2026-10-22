@@ -14,6 +14,11 @@
 //! viewer = "xdg-open"   # opens a shared file on click
 //! left = 26             # width of the chat list
 //! right = 30            # width of the participants pane
+//!
+//! [theme]               # optional: any role in a colour of one's own; the rest stay
+//! accent = "#7aa2f7"    # the terminal's (pywal and the like keep working for them)
+//! # text, background, dim, border, ok, warn, outgoing = names ("bright-red"),
+//! # "#rrggbb" or 0–255; selection_text + selection_background; nicks = ["red", …]
 //! read_markers = true   # let senders see that their messages were read
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! typing = true         # let chats see that one is typing
@@ -30,6 +35,60 @@ pub struct Config {
     pub accounts: Vec<AccountEntry>,
     #[serde(default)]
     pub ui: Ui,
+    #[serde(default)]
+    pub theme: ThemeConfig,
+}
+
+/// `[theme]`: colours of one's own for any role; the rest stay the terminal's.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeConfig {
+    pub accent: Option<String>,
+    pub text: Option<String>,
+    pub background: Option<String>,
+    pub dim: Option<String>,
+    pub border: Option<String>,
+    pub ok: Option<String>,
+    pub warn: Option<String>,
+    pub outgoing: Option<String>,
+    /// The selected row; both or neither.
+    pub selection_text: Option<String>,
+    pub selection_background: Option<String>,
+    pub nicks: Option<Vec<String>>,
+}
+
+impl ThemeConfig {
+    pub fn palette(&self) -> Result<crate::theme::Palette, String> {
+        use crate::theme::parse_colour;
+        let mut palette = crate::theme::Palette::default();
+        let roles = [
+            (&self.accent, &mut palette.accent),
+            (&self.text, &mut palette.text),
+            (&self.background, &mut palette.background),
+            (&self.dim, &mut palette.dim),
+            (&self.border, &mut palette.border),
+            (&self.ok, &mut palette.ok),
+            (&self.warn, &mut palette.warn),
+            (&self.outgoing, &mut palette.outgoing),
+        ];
+        for (written, colour) in roles {
+            if let Some(written) = written {
+                *colour = parse_colour(written).map_err(|e| format!("[theme]: {e}"))?;
+            }
+        }
+        palette.selection = match (&self.selection_text, &self.selection_background) {
+            (Some(fg), Some(bg)) => Some((parse_colour(fg)?, parse_colour(bg)?)),
+            (None, None) => None,
+            _ => return Err("[theme]: selection_text и selection_background задаются вместе".into()),
+        };
+        if let Some(nicks) = &self.nicks {
+            if nicks.is_empty() {
+                return Err("[theme]: nicks — хотя бы один цвет".into());
+            }
+            palette.nicks = nicks.iter().map(|n| parse_colour(n)).collect::<Result<_, _>>()?;
+        }
+        Ok(palette)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -233,5 +292,42 @@ mod tests {
         assert_eq!(parse_key("alt+a"), Ok((KeyCode::Char('a'), KeyModifiers::ALT)));
         assert_eq!(parse_key("f2"), Ok((KeyCode::F(2), KeyModifiers::NONE)));
         assert!(parse_key("hyper+x").is_err() && parse_key("ctrl+xx").is_err());
+    }
+
+    #[test]
+    fn a_theme_sets_roles_of_ones_own_and_leaves_the_rest_to_the_terminal() {
+        use ratatui::style::Color;
+        let config: Config = toml::from_str(
+            r##"
+            [theme]
+            accent = "#7aa2f7"
+            warn = "bright-red"
+            dim = "244"
+            background = "default"
+            selection_text = "black"
+            selection_background = "yellow"
+            nicks = ["cyan", "#ff8800"]
+            "##,
+        )
+        .unwrap();
+        let palette = config.theme.palette().unwrap();
+        assert_eq!(palette.accent, Color::Rgb(0x7a, 0xa2, 0xf7));
+        assert_eq!(palette.warn, Color::LightRed);
+        assert_eq!(palette.dim, Color::Indexed(244));
+        assert_eq!(palette.background, Color::Reset);
+        assert_eq!(palette.selection, Some((Color::Black, Color::Yellow)));
+        assert_eq!(palette.nicks, [Color::Cyan, Color::Rgb(0xff, 0x88, 0x00)]);
+        assert_eq!(palette.ok, Color::Green, "unset: the terminal's green");
+
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.theme.palette().unwrap(), crate::theme::Palette::default());
+        let wrong: Config = toml::from_str("[theme]\naccent = \"blurple\"").unwrap();
+        assert!(wrong.theme.palette().unwrap_err().contains("blurple"));
+        let half: Config = toml::from_str("[theme]\nselection_text = \"black\"").unwrap();
+        assert!(half.theme.palette().is_err(), "a selection is two colours");
+        assert!(
+            toml::from_str::<Config>("[theme]\naccnt = \"red\"").is_err(),
+            "a misspelt role is said"
+        );
     }
 }

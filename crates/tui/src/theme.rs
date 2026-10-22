@@ -1,49 +1,129 @@
 //! Colours and symbols, in one place.
 //!
-//! Only the terminal's own palette is used: the 16 ANSI colours and the default
-//! foreground and background. Tools like pywal recolour exactly those, so omtalk follows
-//! the wallpaper with the rest of the desktop. No fixed RGB values here.
+//! By default only the terminal's own palette is used: the 16 ANSI colours and the
+//! default foreground and background. Tools like pywal recolour exactly those, so omtalk
+//! follows the wallpaper with the rest of the desktop. `[theme]` in the config sets any
+//! role to a colour of one's own (a name, `#rrggbb`, or 0–255); the rest stay the
+//! terminal's.
+
+use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
 
-pub const ACCENT: Color = Color::Blue;
-pub const TEXT: Color = Color::Reset;
-pub const DIM: Color = Color::DarkGray;
-pub const BORDER: Color = Color::DarkGray;
-pub const OK: Color = Color::Green;
-pub const WARN: Color = Color::Red;
-pub const OUTGOING: Color = Color::Cyan;
-
-/// A selected row: the terminal's own colours, swapped.
-pub fn selected() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+/// The colour of each role.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Palette {
+    pub accent: Color,
+    pub text: Color,
+    /// `Reset`: the terminal's own background.
+    pub background: Color,
+    pub dim: Color,
+    pub border: Color,
+    pub ok: Color,
+    pub warn: Color,
+    pub outgoing: Color,
+    /// `None`: the selected row is the terminal's colours swapped.
+    pub selection: Option<(Color, Color)>,
+    /// One per name, the same on every start.
+    pub nicks: Vec<Color>,
 }
 
-/// Nick colours: one per name, the same on every start.
-const NICKS: [Color; 10] = [
-    Color::Red,
-    Color::Green,
-    Color::Yellow,
-    Color::Blue,
-    Color::Magenta,
-    Color::Cyan,
-    Color::LightRed,
-    Color::LightGreen,
-    Color::LightYellow,
-    Color::LightMagenta,
-];
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            accent: Color::Blue,
+            text: Color::Reset,
+            background: Color::Reset,
+            dim: Color::DarkGray,
+            border: Color::DarkGray,
+            ok: Color::Green,
+            warn: Color::Red,
+            outgoing: Color::Cyan,
+            selection: None,
+            nicks: vec![
+                Color::Red,
+                Color::Green,
+                Color::Yellow,
+                Color::Blue,
+                Color::Magenta,
+                Color::Cyan,
+                Color::LightRed,
+                Color::LightGreen,
+                Color::LightYellow,
+                Color::LightMagenta,
+            ],
+        }
+    }
+}
+
+static PALETTE: OnceLock<Palette> = OnceLock::new();
+
+/// Sets the colours, once, at start; later calls change nothing.
+pub fn set(palette: Palette) {
+    let _ = PALETTE.set(palette);
+}
+
+fn palette() -> &'static Palette {
+    PALETTE.get_or_init(Palette::default)
+}
+
+pub fn accent() -> Color {
+    palette().accent
+}
+pub fn text() -> Color {
+    palette().text
+}
+pub fn background() -> Color {
+    palette().background
+}
+pub fn dim() -> Color {
+    palette().dim
+}
+pub fn border_colour() -> Color {
+    palette().border
+}
+pub fn ok() -> Color {
+    palette().ok
+}
+pub fn warn() -> Color {
+    palette().warn
+}
+pub fn outgoing() -> Color {
+    palette().outgoing
+}
+
+/// A colour as written in the config: a name ("blue", "bright-red", "gray"), "#rrggbb",
+/// a number 0–255, or "default" for the terminal's own.
+pub fn parse_colour(text: &str) -> Result<Color, String> {
+    let lower = text.trim().to_lowercase();
+    if lower == "default" || lower == "terminal" {
+        return Ok(Color::Reset);
+    }
+    lower
+        .parse()
+        .map_err(|_| format!("не понимаю цвет {text:?}: имя (blue, bright-red), #rrggbb или 0–255"))
+}
+
+/// A selected row: the terminal's own colours swapped, or the theme's selection colours.
+pub fn selected() -> Style {
+    match palette().selection {
+        Some((fg, bg)) => Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        None => Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+    }
+}
 
 pub fn nick(name: &str) -> Style {
     let hash = name
         .bytes()
         .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b.into()));
+    let nicks = &palette().nicks;
     Style::default()
-        .fg(NICKS[hash as usize % NICKS.len()])
+        .fg(nicks[hash as usize % nicks.len().max(1)])
         .add_modifier(Modifier::BOLD)
 }
 
 pub fn border(focused: bool) -> Style {
-    Style::default().fg(if focused { ACCENT } else { BORDER })
+    Style::default().fg(if focused { accent() } else { border_colour() })
 }
 
 /// Symbols drawn in the text colour, so they follow the theme like the rest. Nerd Font
