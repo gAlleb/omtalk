@@ -596,12 +596,28 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 && let Some(text) = &message.text
             {
                 let (who, room) = app.notice_names(&account, &message);
-                crate::notify::run(&crate::notify::desktop(
-                    message.peer.as_str(),
-                    &who,
-                    room.as_deref(),
-                    text,
-                ));
+                let (person, room_avatar) = app.notice_avatars(&account, &message);
+                let (chat, text) = (message.peer.to_string(), text.clone());
+                // The icon is made aside (once per pair of avatars), then the notification goes.
+                tokio::task::spawn_blocking(move || {
+                    let avatars = config::cache_dir().join("avatars");
+                    let icon = crate::avatar::notice_icon(
+                        &avatars,
+                        &avatars.join("notify"),
+                        person.as_deref(),
+                        room_avatar.as_deref(),
+                    );
+                    crate::notify::run_blocking(&crate::notify::desktop(
+                        &chat,
+                        &who,
+                        room.as_deref(),
+                        &text,
+                        icon.as_deref(),
+                    ));
+                });
+            }
+            if let Some(action) = app.ask_writer_avatar(&account, &message) {
+                tokio::spawn(perform(action, shared.clone()));
             }
             for action in app.on_incoming(&account, &message, at) {
                 tokio::spawn(perform(action, shared.clone()));

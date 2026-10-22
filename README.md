@@ -254,7 +254,9 @@ or room's avatar is shown at the top of the right pane. It comes from where othe
 get it: PEP (XEP-0084, changes arrive by themselves), otherwise the vCard
 (XEP-0054/0153); a room's comes from its vCard. Downloaded avatars are kept in
 `~/.cache/omtalk/avatars` under their SHA-1. Avatars are round: in kitty a real picture,
-in Alacritty a circle of half blocks.
+in Alacritty a circle of half blocks. Desktop notifications carry them too: the person's
+from a direct chat, the room's with the writer's small in its corner from a room (when the
+room tells who wrote).
 
 ## Services
 

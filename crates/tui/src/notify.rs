@@ -159,22 +159,44 @@ pub fn run(command: &[String]) {
     }
 }
 
-/// The notify-send command for a message from `who` (in `room`, if one). One chat's
-/// notifications replace each other where the daemon can (dunst's stack tag), not pile up.
-pub fn desktop(chat: &str, who: &str, room: Option<&str>, text: &str) -> Vec<String> {
+/// As [`run`], from a thread that may wait: the command is waited for there.
+pub fn run_blocking(command: &[String]) {
+    let Some((program, args)) = command.split_first() else {
+        return;
+    };
+    let _ = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// The notify-send command for a message from `who` (in `room`, if one), with `icon`
+/// (an avatar) if there is one. One chat's notifications replace each other where the
+/// daemon can (dunst's stack tag), not pile up.
+pub fn desktop(
+    chat: &str,
+    who: &str,
+    room: Option<&str>,
+    text: &str,
+    icon: Option<&std::path::Path>,
+) -> Vec<String> {
     let title = match room {
         Some(room) => format!("{who} · {room}"),
         None => who.to_owned(),
     };
     let body: String = text.chars().take(200).collect();
-    vec![
+    let mut command = vec![
         "notify-send".into(),
         "--app-name=omtalk".into(),
         format!("--hint=string:x-dunst-stack-tag:omtalk {chat}"),
-        "--".into(),
-        title,
-        body,
-    ]
+    ];
+    if let Some(icon) = icon {
+        command.push(format!("--icon={}", icon.display()));
+    }
+    command.extend(["--".into(), title, body]);
+    command
 }
 
 #[cfg(test)]

@@ -4538,8 +4538,47 @@ mod tests {
             "the middle"
         );
 
+        // A room's notice: the room's avatar and, when the room tells who wrote, theirs,
+        // fetched once.
+        app.avatars.insert(jid("team@muc.home.org"), "room".into());
+        app.chats[room]
+            .occupants
+            .insert("Алиса".into(), Some(jid("alice@home.org")));
+        let said = omtalk_omemo::Incoming {
+            peer: jid("team@muc.home.org"),
+            sender: jid("team@muc.home.org"),
+            nick: Some("Алиса".into()),
+            device: None,
+            direction: omtalk_omemo::Direction::Incoming,
+            encrypted: true,
+            text: Some("привет".into()),
+            at: None,
+            not_for_this_device: false,
+            id: None,
+            markable: false,
+            archive_id: None,
+            untrusted: false,
+            reply_to: None,
+        };
+        assert_eq!(app.notice_avatars(&me, &said), (None, Some("room".into())));
+        assert_eq!(
+            app.ask_writer_avatar(&me, &said),
+            Some(Action::Avatar {
+                account: me.clone(),
+                jid: jid("alice@home.org"),
+                room: false
+            })
+        );
+        assert_eq!(app.ask_writer_avatar(&me, &said), None, "once");
+        app.avatars.insert(jid("alice@home.org"), "alice".into());
+        assert_eq!(
+            app.notice_avatars(&me, &said),
+            (Some("alice".into()), Some("room".into()))
+        );
+
         // Turned off: not drawn.
         app.show_avatars = false;
+        assert_eq!(app.notice_avatars(&me, &said), (None, None), "nor on notices");
         assert_eq!(app.avatar_of(&jid("bob@home.org")), None);
     }
 

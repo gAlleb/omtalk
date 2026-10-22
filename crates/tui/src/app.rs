@@ -863,6 +863,52 @@ impl App {
         (nick.clone(), Some(room))
     }
 
+    /// The avatars a notification of `message` shows, as hashes: the writer's (in a room,
+    /// when the room tells who it is) and, from a room, the room's.
+    pub fn notice_avatars(&self, account: &BareJid, message: &Incoming) -> (Option<String>, Option<String>) {
+        if !self.show_avatars {
+            return (None, None);
+        }
+        let chat = self
+            .chats
+            .iter()
+            .find(|c| &c.account == account && c.jid == message.peer);
+        match &message.nick {
+            None => (self.avatars.get(&message.sender).cloned(), None),
+            Some(nick) => {
+                let person = chat
+                    .and_then(|c| c.occupants.get(nick).cloned().flatten())
+                    .and_then(|real| self.avatars.get(&real).cloned());
+                (person, self.avatars.get(&message.peer).cloned())
+            }
+        }
+    }
+
+    /// The avatar of whoever wrote in a room, asked for once while avatars are shown:
+    /// for notifications. Only where the room tells who the writer is.
+    pub fn ask_writer_avatar(&mut self, account: &BareJid, message: &Incoming) -> Option<Action> {
+        let nick = message.nick.as_ref()?;
+        let real = self
+            .chats
+            .iter()
+            .find(|c| &c.account == account && c.jid == message.peer)?
+            .occupants
+            .get(nick)
+            .cloned()
+            .flatten()?;
+        if !self.show_avatars
+            || real == *account
+            || !self.avatars_asked.insert((account.clone(), real.clone()))
+        {
+            return None;
+        }
+        Some(Action::Avatar {
+            account: account.clone(),
+            jid: real,
+            room: false,
+        })
+    }
+
     /// Called now and then: typing that stopped for 10 s is "paused", as clients do.
     pub fn typing_tick(&mut self, now: i64) -> Vec<Action> {
         // A typist who went silent long ago (a client that closed mid-word) is let go.

@@ -32,6 +32,51 @@ pub fn round(image: &DynamicImage) -> RgbaImage {
     out
 }
 
+/// The icon of a desktop notification, made once into `dir` and kept: the person's
+/// avatar round; from a room, the room's round with the person's small in its corner,
+/// as messengers show it. Either alone when only one is known. Named by both hashes.
+pub fn notice_icon(
+    avatars: &std::path::Path,
+    dir: &std::path::Path,
+    person: Option<&str>,
+    room: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    const SIZE: u32 = 96;
+    let name = match (room, person) {
+        (None, None) => return None,
+        (Some(room), Some(person)) => format!("{room}-{person}.png"),
+        (Some(one), None) | (None, Some(one)) => format!("{one}.png"),
+    };
+    let path = dir.join(name);
+    if path.is_file() {
+        return Some(path);
+    }
+    let open = |hash: &str| -> Option<DynamicImage> {
+        let image = image::ImageReader::open(avatars.join(hash))
+            .ok()?
+            .with_guessed_format()
+            .ok()?;
+        let image = image.decode().ok()?;
+        Some(square(&image))
+    };
+    let round_at = |image: &DynamicImage, side: u32| {
+        round(&image.resize_exact(side, side, image::imageops::FilterType::Lanczos3))
+    };
+    let icon = match (room.and_then(open), person.and_then(open)) {
+        (Some(room), Some(person)) => {
+            let mut icon = round_at(&room, SIZE);
+            let small = round_at(&person, SIZE / 2);
+            image::imageops::overlay(&mut icon, &small, (SIZE / 2) as i64, (SIZE / 2) as i64);
+            icon
+        }
+        (Some(one), None) | (None, Some(one)) => round_at(&one, SIZE),
+        (None, None) => return None,
+    };
+    std::fs::create_dir_all(dir).ok()?;
+    icon.save(&path).ok()?;
+    Some(path)
+}
+
 /// Draws `image` round into `area` with half blocks: two pixels a cell, one above the
 /// other. Half cells outside the circle keep the terminal's background.
 pub fn draw_blocks(image: &DynamicImage, area: Rect, buffer: &mut Buffer) {
@@ -65,6 +110,50 @@ pub fn draw_blocks(image: &DynamicImage, area: Rect, buffer: &mut Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_room_notice_shows_the_room_with_the_writer_in_its_corner() {
+        let dir = tempfile::tempdir().unwrap();
+        let save = |name: &str, colour: [u8; 4]| {
+            RgbaImage::from_pixel(40, 30, Rgba(colour))
+                .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+                .unwrap()
+        };
+        save("room", [0, 0, 255, 255]);
+        save("bob", [255, 0, 0, 255]);
+        let out = dir.path().join("notify");
+        let icon = notice_icon(dir.path(), &out, Some("bob"), Some("room")).expect("made");
+        assert_eq!(icon, out.join("room-bob.png"));
+        let icon = image::open(&icon).unwrap().to_rgba8();
+        assert_eq!(icon.dimensions(), (96, 96));
+        assert_eq!(icon.get_pixel(30, 30).0, [0, 0, 255, 255], "the room");
+        assert_eq!(
+            icon.get_pixel(72, 72).0,
+            [255, 0, 0, 255],
+            "the writer, in the corner"
+        );
+        assert_eq!(icon.get_pixel(1, 1).0[3], 0, "round");
+
+        assert_eq!(
+            notice_icon(dir.path(), &out, Some("bob"), None),
+            Some(out.join("bob.png")),
+            "a direct chat: the person alone"
+        );
+        assert_eq!(notice_icon(dir.path(), &out, None, None), None);
+        assert_eq!(
+            notice_icon(dir.path(), &out, Some("nobody"), None),
+            None,
+            "not fetched"
+        );
+
+        let command = crate::notify::desktop("bob@home.org", "bob", None, "hi", Some(&out.join("bob.png")));
+        assert!(
+            command
+                .iter()
+                .any(|a| a.starts_with("--icon=") && a.ends_with("bob.png")),
+            "{command:?}"
+        );
+    }
 
     #[test]
     fn corners_are_cut_and_the_middle_kept() {
