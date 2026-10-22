@@ -190,8 +190,15 @@ fn connect(config: &AccountConfig) -> Client {
         .with_resource_str(&config.resource)
         .expect("a resource string from the config is a valid resource");
     let password = config.password.clone();
+    // Every way in gets the keepalive. tokio-xmpp's own constructor for the usual case
+    // (SRV records) uses its defaults, five minutes of silence plus five for an answer:
+    // a laptop whose network went away stayed "online" for up to ten, and missed what
+    // came meanwhile. That was Client::new here once.
     match &config.server {
-        Server::Auto => Client::new(jid, password),
+        Server::Auto => {
+            let dns = DnsConfig::srv_default_client(config.jid.domain().as_str());
+            Client::new_starttls(jid, password, dns, config.timeouts())
+        }
         Server::StartTls { host, port } => {
             Client::new_starttls(jid, password, DnsConfig::no_srv(host, *port), config.timeouts())
         }

@@ -32,8 +32,9 @@ impl AccountConfig {
             resource: format!("omtalk.{suffix}"),
             server: Server::Auto,
             iq_timeout: Duration::from_secs(30),
-            keepalive: Duration::from_secs(60),
-            keepalive_answer: Duration::from_secs(30),
+            // A dropped network (a closed laptop, a lost Wi-Fi) shows in under a minute.
+            keepalive: Duration::from_secs(30),
+            keepalive_answer: Duration::from_secs(15),
         }
     }
 }
