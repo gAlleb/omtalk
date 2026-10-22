@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **The interface speaks English by default**; `[ui] language = "ru"` or the settings window switches it to Russian, at once.
+- **Message styling (XEP-0393)** as in Conversations: `*strong*`, `_emphasis_`, `~strike~`, `` `code` ``, preformatted blocks and `>` quotes.
+- **Avatars in desktop notifications**: the person's, or the room's with the writer's in its corner.
+- **When each OMEMO device last wrote**, in the keys window and beside a chat.
+- **Delivery ticks survive a restart.**
+- **A direct chat new to this device reads its history** from the server's archive; what was encrypted before the device existed is counted.
+- **Room participants can be picked with the keyboard** (Tab after the input line).
+- **Leaving is clean** on a closed terminal window (SIGHUP) or SIGTERM, and each device keeps one resource: omtalk no longer lingers online for contacts.
+- **A password changed elsewhere stops the account and says so**, instead of reconnecting forever.
+- **The services window wraps** long rows, values and notes; results show each value on its own row.
+- Notifications: history loaded from the archive no longer notifies; a mention in a room sounds again; a room is named by its title.
+
 ## 0.1.0 — 2026-10-22
 
 The first release of omtalk, a terminal XMPP client with OMEMO for direct and group chats.
