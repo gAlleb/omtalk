@@ -121,6 +121,9 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.tree();
     // Whether the branch at each depth goes on below the current row.
     let mut open: Vec<bool> = Vec::new();
+    // Whether the heading at each depth is a folder: its chats hang from under its
+    // symbol, a step in from where the folder's own branch is.
+    let mut folder: Vec<bool> = Vec::new();
     for (at, (entry, depth)) in rows.iter().cloned().enumerate() {
         if y >= inner.bottom() {
             break;
@@ -132,18 +135,26 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
             .find(|(_, d)| *d <= depth)
             .is_none_or(|(_, d)| *d < depth);
         let mut branch = String::new();
-        if depth > 0 {
-            for level in 1..depth {
-                branch.push_str(if open.get(level).copied().unwrap_or(false) {
+        for level in 1..=depth {
+            if folder.get(level - 1).copied().unwrap_or(false) {
+                branch.push_str("  ");
+            }
+            branch.push_str(if level < depth {
+                if open.get(level).copied().unwrap_or(false) {
                     "│ "
                 } else {
                     "  "
-                });
-            }
-            branch.push_str(if last { "└ " } else { "├ " });
+                }
+            } else if last {
+                "└ "
+            } else {
+                "├ "
+            });
         }
         open.resize(depth + 1, false);
         open[depth] = !last;
+        folder.resize(depth + 1, false);
+        folder[depth] = matches!(entry, Entry::Heading(Group::Folder(..)));
         let row = Rect::new(inner.x, y, inner.width, 1);
         match entry {
             Entry::Heading(group) => {
@@ -2730,12 +2741,12 @@ mod tests {
         let want = [
             "▾ ● me@home.org",
             "├ ▾ \u{f07b} Свои",
-            "│ ├ @ anna",
-            "│ └ @ bert",
+            "│   ├ @ anna",
+            "│   └ @ bert",
             "└ @ carl",
             "▾ ● me@work.org",
             "└ ▾ \u{f07b} Свои",
-            "  └ @ boss",
+            "    └ @ boss",
         ];
         for (row, want) in rows.iter().zip(want) {
             assert!(
@@ -3589,7 +3600,10 @@ mod tests {
         // nick known: the mention after it is still one.
         app.on_incoming(&me, &said("всем привет"), 1);
         assert_eq!(app.chats[room].kind, ChatKind::Room { nick: "me".into() });
-        assert!(app.alert_for(&me, &said("me")).sound, "a one-letter-short nick alone");
+        assert!(
+            app.alert_for(&me, &said("me")).sound,
+            "a one-letter-short nick alone"
+        );
         let named = app.alert_for(&me, &said("me, глянь"));
         assert!(named.bell && named.sound && named.desktop, "{named:?}");
         // History read from the archive (a room's, on entering): nothing at all.
