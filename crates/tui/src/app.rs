@@ -143,11 +143,11 @@ pub enum Splitter {
 }
 
 /// Where things were drawn last, for the mouse.
-/// A heading in the chat list: one of the user's folders, or an account with the chats
-/// in no folder.
+/// A heading in the chat list: an account, or one of the user's folders inside it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
-    Folder(String),
+    /// A folder inside an account.
+    Folder(BareJid, String),
     Account(BareJid),
 }
 
@@ -768,7 +768,13 @@ impl App {
                 }
             }
         }
-        context.folders = self.folders.iter().map(|f| f.name.clone()).collect();
+        let account = self.account_for(None);
+        context.folders = self
+            .folders
+            .iter()
+            .filter(|f| Some(&f.account) == account.as_ref())
+            .map(|f| f.name.clone())
+            .collect();
         context
     }
 
@@ -940,53 +946,65 @@ impl App {
         let chat = &self.chats[index];
         self.folders
             .iter()
-            .position(|f| f.chats.iter().any(|(a, j)| *a == chat.account && *j == chat.jid))
+            .position(|f| f.account == chat.account && f.chats.contains(&chat.jid))
     }
 
     /// The heading a chat is listed under.
     pub fn group_of(&self, index: usize) -> Group {
         match self.folder_of(index) {
-            Some(folder) => Group::Folder(self.folders[folder].name.clone()),
+            Some(folder) => Group::Folder(
+                self.folders[folder].account.clone(),
+                self.folders[folder].name.clone(),
+            ),
             None => Group::Account(self.chats[index].account.clone()),
         }
     }
 
-    /// The chat list as shown: folders first, then each account with its other chats.
-    /// Account headings only when there is more than one account or any folder.
-    pub fn list(&self) -> Vec<Entry> {
-        let mut entries = Vec::new();
-        let mut placed = vec![false; self.chats.len()];
-        for folder in &self.folders {
-            let group = Group::Folder(folder.name.clone());
-            let folded = self.collapsed.contains(&group);
-            entries.push(Entry::Heading(group));
-            for (account, jid) in &folder.chats {
-                if let Some(index) = self
-                    .chats
-                    .iter()
-                    .position(|c| c.account == *account && c.jid == *jid)
-                {
-                    placed[index] = true;
-                    if !folded {
-                        entries.push(Entry::Chat(index));
+    /// The chat list as a tree, each row with its depth: accounts, in each its folders
+    /// with their chats, then its other chats. Account headings only when there is more
+    /// than one account or any folder.
+    pub fn tree(&self) -> Vec<(Entry, usize)> {
+        let mut rows = Vec::new();
+        let headings = self.accounts.len() > 1 || !self.folders.is_empty();
+        let base = usize::from(headings);
+        for account in &self.accounts {
+            let group = Group::Account(account.clone());
+            if headings {
+                rows.push((Entry::Heading(group.clone()), 0));
+                if self.collapsed.contains(&group) {
+                    continue;
+                }
+            }
+            let mut placed = Vec::new();
+            for folder in self.folders.iter().filter(|f| &f.account == account) {
+                let group = Group::Folder(account.clone(), folder.name.clone());
+                let folded = self.collapsed.contains(&group);
+                rows.push((Entry::Heading(group), base));
+                for jid in &folder.chats {
+                    if let Some(index) = self
+                        .chats
+                        .iter()
+                        .position(|c| &c.account == account && &c.jid == jid)
+                    {
+                        placed.push(index);
+                        if !folded {
+                            rows.push((Entry::Chat(index), base + 1));
+                        }
                     }
                 }
             }
-        }
-        let headings = self.accounts.len() > 1 || !self.folders.is_empty();
-        for account in &self.accounts {
-            let group = Group::Account(account.clone());
-            let folded = headings && self.collapsed.contains(&group);
-            if headings {
-                entries.push(Entry::Heading(group));
-            }
             for (index, chat) in self.chats.iter().enumerate() {
-                if &chat.account == account && !placed[index] && !folded {
-                    entries.push(Entry::Chat(index));
+                if &chat.account == account && !placed.contains(&index) {
+                    rows.push((Entry::Chat(index), base));
                 }
             }
         }
-        entries
+        rows
+    }
+
+    /// The chat list as shown, without the depths.
+    pub fn list(&self) -> Vec<Entry> {
+        self.tree().into_iter().map(|(entry, _)| entry).collect()
     }
 
     /// Chats in the order the list shows them, folded ones left out.
@@ -1007,63 +1025,83 @@ impl App {
         }
     }
 
-    /// Folds every heading but the current chat's: to look at one folder or server
-    /// only. Again, and all are open.
+    /// Folds every account but the current chat's: to look at one server only. Again,
+    /// and all are open.
     pub fn focus_group(&mut self) {
-        let Some(current) = self.selected.map(|i| self.group_of(i)) else {
+        let Some(current) = self.current().map(|c| Group::Account(c.account.clone())) else {
             return;
         };
         let others: BTreeSet<Group> = self
-            .list()
-            .into_iter()
-            .filter_map(|e| match e {
-                Entry::Heading(g) if g != current => Some(g),
-                _ => None,
-            })
-            .chain(self.collapsed.iter().filter(|g| **g != current).cloned())
+            .accounts
+            .iter()
+            .map(|a| Group::Account(a.clone()))
+            .filter(|g| *g != current)
             .collect();
-        if !others.is_empty() && self.collapsed == others {
-            self.collapsed.clear();
-        } else {
-            self.collapsed = others;
+        let folded: BTreeSet<Group> = self
+            .collapsed
+            .iter()
+            .filter(|g| matches!(g, Group::Account(_)))
+            .cloned()
+            .collect();
+        self.collapsed.retain(|g| !matches!(g, Group::Account(_)));
+        if folded != others {
+            self.collapsed.extend(others);
         }
     }
 
-    /// Puts a chat into a folder, made if new, or (with `None`) takes it out of its own.
-    /// A folder left empty goes.
+    /// Puts a chat into a folder of its account, made if new, or (with `None`) takes it
+    /// out of its own. A folder left empty goes.
     pub fn move_to_folder(&mut self, index: usize, folder: Option<&str>) -> Vec<Action> {
         let Some(chat) = self.chats.get(index) else {
             return Vec::new();
         };
-        let key = (chat.account.clone(), chat.jid.clone());
-        for f in &mut self.folders {
-            f.chats.retain(|c| *c != key);
+        let (account, jid) = (chat.account.clone(), chat.jid.clone());
+        for f in self.folders.iter_mut().filter(|f| f.account == account) {
+            f.chats.retain(|c| *c != jid);
         }
         if let Some(name) = folder {
-            match self.folders.iter_mut().find(|f| f.name == name) {
-                Some(f) => f.chats.push(key),
+            match self
+                .folders
+                .iter_mut()
+                .find(|f| f.account == account && f.name == name)
+            {
+                Some(f) => f.chats.push(jid),
                 None => self.folders.push(Folder {
+                    account: account.clone(),
                     name: name.to_owned(),
-                    chats: vec![key],
+                    chats: vec![jid],
                 }),
             }
             // Where it went stays open, so the chat does not vanish from sight.
-            self.collapsed.remove(&Group::Folder(name.to_owned()));
+            self.collapsed
+                .remove(&Group::Folder(account.clone(), name.to_owned()));
+            self.collapsed.remove(&Group::Account(account));
         }
         self.folders.retain(|f| !f.chats.is_empty());
         vec![Action::SaveFolders(self.folders.clone())]
     }
 
+    /// Renames a folder of the account commands act for.
     fn rename_folder(&mut self, old: &str, new: &str) -> Result<Vec<Action>, String> {
-        if self.folders.iter().any(|f| f.name == new) {
+        let Some(account) = self.account_for(None) else {
+            return Err("нет аккаунта".to_owned());
+        };
+        if self.folders.iter().any(|f| f.account == account && f.name == new) {
             return Err(format!("папка «{new}» уже есть"));
         }
-        let Some(folder) = self.folders.iter_mut().find(|f| f.name == old) else {
-            return Err(format!("нет папки «{old}»"));
+        let Some(folder) = self
+            .folders
+            .iter_mut()
+            .find(|f| f.account == account && f.name == old)
+        else {
+            return Err(format!("в {account} нет папки «{old}»"));
         };
         folder.name = new.to_owned();
-        if self.collapsed.remove(&Group::Folder(old.to_owned())) {
-            self.collapsed.insert(Group::Folder(new.to_owned()));
+        if self
+            .collapsed
+            .remove(&Group::Folder(account.clone(), old.to_owned()))
+        {
+            self.collapsed.insert(Group::Folder(account, new.to_owned()));
         }
         Ok(vec![Action::SaveFolders(self.folders.clone())])
     }
@@ -1174,14 +1212,14 @@ impl App {
                 });
                 match dropped {
                     Some((index, group)) if group != self.group_of(index) => match group {
-                        Group::Folder(name) => self.move_to_folder(index, Some(&name)),
+                        Group::Folder(account, name) if account == self.chats[index].account => {
+                            self.move_to_folder(index, Some(&name))
+                        }
                         Group::Account(account) if account == self.chats[index].account => {
                             self.move_to_folder(index, None)
                         }
-                        Group::Account(_) => {
-                            self.status =
-                                "чат другого аккаунта: его можно положить в папку, но не в чужой аккаунт"
-                                    .into();
+                        _ => {
+                            self.status = "чат другого аккаунта: папки у каждого аккаунта свои".into();
                             Vec::new()
                         }
                     },

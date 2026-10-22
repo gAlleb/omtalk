@@ -63,6 +63,7 @@ const MIGRATIONS: &[&str] = &[
 ",
     history::MIGRATION,
     folders::MIGRATION,
+    folders::MIGRATION_PER_ACCOUNT,
 ];
 
 #[derive(Clone)]

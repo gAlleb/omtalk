@@ -258,9 +258,14 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     app.folders = store.folders().map_err(|e| e.to_string())?;
     // A chat put in a folder stays in the list, also before anyone wrote in it.
     for folder in app.folders.clone() {
-        for (account, chat) in folder.chats {
-            if jids.contains(&account) && !app.chats.iter().any(|c| c.account == account && c.jid == chat) {
-                app.chat(&account, &chat, ChatKind::Direct);
+        for chat in folder.chats {
+            if jids.contains(&folder.account)
+                && !app
+                    .chats
+                    .iter()
+                    .any(|c| c.account == folder.account && c.jid == chat)
+            {
+                app.chat(&folder.account, &chat, ChatKind::Direct);
             }
         }
     }

@@ -109,47 +109,53 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     app.areas.hide_left = Some(Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1));
 
     let mut y = inner.y;
-    let entries = app.list();
-    let tree = entries.iter().any(|e| matches!(e, Entry::Heading(_)));
-    let mut heading: Option<Group> = None;
-    for (at, entry) in entries.iter().cloned().enumerate() {
+    let rows = app.tree();
+    // Whether the branch at each depth goes on below the current row.
+    let mut open: Vec<bool> = Vec::new();
+    for (at, (entry, depth)) in rows.iter().cloned().enumerate() {
         if y >= inner.bottom() {
             break;
         }
+        // Each row hangs off the heading above it: ├ while siblings follow, └ for the
+        // last, │ where a branch above goes on past it.
+        let last = rows[at + 1..]
+            .iter()
+            .find(|(_, d)| *d <= depth)
+            .is_none_or(|(_, d)| *d < depth);
+        let mut branch = String::new();
+        if depth > 0 {
+            for level in 1..depth {
+                branch.push_str(if open.get(level).copied().unwrap_or(false) {
+                    "│ "
+                } else {
+                    "  "
+                });
+            }
+            branch.push_str(if last { "└ " } else { "├ " });
+        }
+        open.resize(depth + 1, false);
+        open[depth] = !last;
         let row = Rect::new(inner.x, y, inner.width, 1);
         match entry {
             Entry::Heading(group) => {
                 let folded = app.collapsed.contains(&group);
                 let paragraph = match &group {
                     Group::Account(account) => account_row(app, account, folded, inner.width),
-                    Group::Folder(name) => folder_row(app, name, folded, inner.width),
+                    Group::Folder(account, name) => {
+                        folder_row(app, account, name, folded, inner.width, &branch)
+                    }
                 };
                 frame.render_widget(paragraph, row);
                 app.areas.group_rows.push((row, group.clone()));
-                heading = Some(group);
             }
             Entry::Chat(index) => {
-                // Under headings the list is a tree: each chat hangs off its heading.
-                let branch = match entries.get(at + 1) {
-                    _ if !tree => "",
-                    Some(Entry::Chat(_)) => "├ ",
-                    _ => "└ ",
-                };
-                // A folder may hold chats of several accounts: say whose each is.
-                let server = match &heading {
-                    Some(Group::Folder(_)) if app.accounts.len() > 1 => {
-                        Some(app.chats[index].account.domain().to_string())
-                    }
-                    _ => None,
-                };
                 frame.render_widget(
                     chat_row(
                         &app.chats[index],
                         app.selected == Some(index),
                         inner.width,
                         app.icons,
-                        branch,
-                        server.as_deref(),
+                        &branch,
                     ),
                     row,
                 );
@@ -215,17 +221,25 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
 }
 
 /// A folder's heading: fold mark, its symbol and name, and while folded its unread count.
-fn folder_row(app: &App, name: &str, folded: bool, width: u16) -> Paragraph<'static> {
+fn folder_row(
+    app: &App,
+    account: &BareJid,
+    name: &str,
+    folded: bool,
+    width: u16,
+    branch: &str,
+) -> Paragraph<'static> {
+    let width = width.saturating_sub(branch.width() as u16);
     let mark = if folded { "▸ " } else { "▾ " };
     let icon = format!("{} ", app.icons.folder);
     let unread: usize = app
         .folders
         .iter()
-        .find(|f| f.name == name)
+        .find(|f| &f.account == account && f.name == name)
         .map(|f| {
             app.chats
                 .iter()
-                .filter(|c| f.chats.iter().any(|(a, j)| *a == c.account && *j == c.jid))
+                .filter(|c| c.account == f.account && f.chats.contains(&c.jid))
                 .map(|c| c.unread)
                 .sum()
         })
@@ -239,6 +253,7 @@ fn folder_row(app: &App, name: &str, folded: bool, width: u16) -> Paragraph<'sta
     let name = truncate(name, room);
     let gap = (width as usize).saturating_sub(mark.width() + icon.width() + name.width() + badge.width());
     Paragraph::new(TextLine::from(vec![
+        Span::styled(branch.to_owned(), Style::default().fg(theme::BORDER)),
         Span::styled(mark, Style::default().fg(theme::DIM)),
         Span::styled(icon, Style::default().fg(theme::ACCENT)),
         Span::styled(
@@ -261,7 +276,6 @@ fn chat_row(
     width: u16,
     icons: theme::Icons,
     branch: &str,
-    server: Option<&str>,
 ) -> Paragraph<'static> {
     let width = width.saturating_sub(branch.width() as u16);
     let icon = if chat.is_room() { "# " } else { "@ " };
@@ -273,13 +287,7 @@ fn chat_row(
     let lock = if chat.omemo { "" } else { icons.chat_unlocked };
     let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + lock.width() + 1);
     let title = truncate(&chat.title(), room_for_title);
-    // The server, if asked for and if it fits.
-    let server = server
-        .map(|s| format!(" {s}"))
-        .filter(|s| title.width() + s.width() <= room_for_title)
-        .unwrap_or_default();
-    let gap = (width as usize)
-        .saturating_sub(icon.width() + title.width() + server.width() + lock.width() + badge.width());
+    let gap = (width as usize).saturating_sub(icon.width() + title.width() + lock.width() + badge.width());
     let base = if selected {
         theme::selected()
     } else if chat.unread > 0 {
@@ -294,7 +302,6 @@ fn chat_row(
             base.fg(if chat.is_room() { theme::ACCENT } else { theme::DIM }),
         ),
         Span::styled(title, base),
-        Span::styled(server, base.fg(theme::DIM)),
         Span::styled(lock, base.fg(theme::WARN)),
         Span::styled(" ".repeat(gap), base),
         Span::styled(
@@ -1742,9 +1749,9 @@ mod tests {
         assert_eq!(
             app.list(),
             [
-                Entry::Heading(Group::Folder("Рабочие дела".into())),
-                Entry::Chat(boss),
                 Entry::Heading(Group::Account(me.clone())),
+                Entry::Heading(Group::Folder(me.clone(), "Рабочие дела".into())),
+                Entry::Chat(boss),
                 Entry::Chat(anna),
                 Entry::Chat(team),
             ]
@@ -1759,7 +1766,7 @@ mod tests {
         let row_of = |app: &App, index| app.areas.chat_rows.iter().find(|(_, i)| *i == index).unwrap().0;
         let heading =
             |app: &App, group: &Group| app.areas.group_rows.iter().find(|(_, g)| g == group).unwrap().0;
-        let folder = Group::Folder("Рабочие дела".into());
+        let folder = Group::Folder(me.clone(), "Рабочие дела".into());
         app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row_of(&app, team)));
         app.on_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
@@ -1793,9 +1800,7 @@ mod tests {
         assert!(app.collapsed.contains(&folder));
         app.collapsed.clear();
 
-        // z: only the current chat's heading open; again, all.
-        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
-        assert_eq!(app.visible_chats(), [boss, team]);
+        // z folds other accounts; with one there are none, and nothing hides.
         app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
         assert_eq!(app.visible_chats(), [boss, team, anna]);
 
@@ -1894,33 +1899,76 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_list_is_a_tree_and_mixed_folders_name_the_server() {
+    fn the_chat_list_is_a_tree_of_servers_folders_and_chats() {
         let (home, work) = (jid("me@home.org"), jid("me@work.org"));
         let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 30, 30);
         let anna = app.chat(&home, &jid("anna@home.org"), ChatKind::Direct);
-        let boss = app.chat(&work, &jid("boss@work.org"), ChatKind::Direct);
+        let bert = app.chat(&home, &jid("bert@home.org"), ChatKind::Direct);
         app.chat(&home, &jid("carl@home.org"), ChatKind::Direct);
+        let boss = app.chat(&work, &jid("boss@work.org"), ChatKind::Direct);
         app.move_to_folder(anna, Some("Свои"));
+        app.move_to_folder(bert, Some("Свои"));
         app.move_to_folder(boss, Some("Свои"));
         let text = screen(&mut app, 120, 20);
-        let rows: Vec<&str> = text
+        // The pane's own border is │ too: cut it off by width, not by the character.
+        let rows: Vec<String> = text
             .lines()
             .skip(1)
-            .take(6)
-            .map(|l| l.split('│').nth(1).unwrap_or("").trim_end())
+            .take(9)
+            .map(|l| {
+                l.chars()
+                    .skip(1)
+                    .take(28)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
             .collect();
-        assert!(rows[0].contains("Свои"), "{rows:#?}");
-        assert!(rows[1].starts_with("├ @ anna home.org"), "{rows:#?}");
-        assert!(rows[2].starts_with("└ @ boss work.org"), "{rows:#?}");
-        assert!(rows[3].contains("me@home.org"), "{rows:#?}");
+        let want = [
+            "▾ ● me@home.org",
+            "├ ▾ \u{f07b} Свои",
+            "│ ├ @ anna",
+            "│ └ @ bert",
+            "└ @ carl",
+            "▾ ● me@work.org",
+            "└ ▾ \u{f07b} Свои",
+            "  └ @ boss",
+        ];
+        for (row, want) in rows.iter().zip(want) {
+            assert!(
+                row.starts_with(want),
+                "{row:?} should start with {want:?}\n{rows:#?}"
+            );
+        }
+
+        // Each account's folders are its own: a chat of another account does not go in.
+        let (heading, _) = app
+            .areas
+            .group_rows
+            .iter()
+            .find(|(_, g)| *g == Group::Folder(home.clone(), "Свои".into()))
+            .cloned()
+            .unwrap();
+        let (row, _) = app
+            .areas
+            .chat_rows
+            .iter()
+            .find(|(_, i)| *i == boss)
+            .cloned()
+            .unwrap();
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mouse = |kind, area: Rect| MouseEvent {
+            kind,
+            column: area.x + 3,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row));
         assert!(
-            rows[4].starts_with("└ @ carl") && !rows[4].contains("home.org"),
-            "{rows:#?}"
+            app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), heading))
+                .is_empty()
         );
-        assert!(
-            rows[5].contains("me@work.org"),
-            "an account with no chats left: {rows:#?}"
-        );
+        assert!(app.status.contains("свои"), "{}", app.status);
 
         // One account and no folders: a plain list, no branches.
         let mut app = App::new(vec![home.clone()], Modifier::Ctrl, 30, 30);
