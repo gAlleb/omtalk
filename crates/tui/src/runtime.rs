@@ -191,6 +191,13 @@ enum Msg {
     },
     /// A line for the status bar, about no account in particular.
     Status(String),
+    /// Someone's typing state in a chat.
+    Typing {
+        account: BareJid,
+        chat: BareJid,
+        who: String,
+        state: omtalk_xmpp::chatstates::ChatState,
+    },
     /// A client of someone (or one's own) came, went or changed.
     Online {
         account: BareJid,
@@ -288,6 +295,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     app.leader = config::parse_key(&ui.leader)?;
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
+    app.send_typing = ui.typing;
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -360,7 +368,14 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             status = (app.status.clone(), tokio::time::Instant::now());
         }
         let fades = !app.status.is_empty();
+        // While someone types here, or this side types, look again every two seconds:
+        // "paused" goes out, and a silent typist's word goes away.
+        let typing = matches!(
+            app.typing_out,
+            Some((_, omtalk_xmpp::chatstates::ChatState::Composing))
+        ) || app.typing_in.values().any(|t| !t.is_empty());
         let actions = tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)), if typing => app.typing_tick(now()),
             _ = tokio::time::sleep_until(status.1 + STATUS_FADE), if fades => {
                 app.status.clear();
                 Vec::new()
@@ -477,7 +492,17 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
-        Msg::Paste(text) => drop(app.on_paste(&text)),
+        Msg::Paste(text) => {
+            for action in app.on_paste(&text) {
+                tokio::spawn(perform(action, shared.clone()));
+            }
+        }
+        Msg::Typing {
+            account,
+            chat,
+            who,
+            state,
+        } => app.typing(&account, &chat, who, state, now()),
         Msg::Uploaded { account, id, link } => app.uploaded(&account, &id, &link),
         Msg::Offer(path) => {
             app.input = format!("/upload {}", path.display());
@@ -613,6 +638,18 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 text: format!("{from} хочет видеть ваш статус: /accept {from} или /refuse {from}"),
             }),
             Event::Message(message) => {
+                // Someone typing; one's own other clients' carbons say nothing here.
+                if let Some((chat, nick, state)) = omtalk_xmpp::chatstates::state_of(message)
+                    && chat != account
+                {
+                    let who = nick.unwrap_or_else(|| chat.node().map(|n| n.to_string()).unwrap_or_default());
+                    tell(Msg::Typing {
+                        account: account.clone(),
+                        chat,
+                        who,
+                        state,
+                    });
+                }
                 for mark in receipts::marks(message) {
                     let (id, state) = match mark {
                         receipts::Mark::Received(id) => (id, Delivery::Delivered),
@@ -1045,6 +1082,15 @@ async fn perform(action: Action, shared: Shared) {
                     Err(e) => delivery(Delivery::Failed(e.to_string())),
                 }
             }
+        }
+        Action::ChatState {
+            account,
+            to,
+            room,
+            state,
+        } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let _ = xmpp.send(omtalk_xmpp::chatstates::notice(&to, room, state)).await;
         }
         Action::Displayed {
             account,

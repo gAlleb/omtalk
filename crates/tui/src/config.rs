@@ -16,6 +16,7 @@
 //! right = 30            # width of the participants pane
 //! read_markers = true   # let senders see that their messages were read
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
+//! typing = true         # let chats see that one is typing
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -82,6 +83,8 @@ pub struct Ui {
     /// The mouse is omtalk's; `false` leaves it to the terminal (and tmux), which then
     /// selects and pastes as for any program. The leader key and m switch it.
     pub mouse: bool,
+    /// Tell chats that one is typing (XEP-0085).
+    pub typing: bool,
 }
 
 impl Default for Ui {
@@ -95,6 +98,7 @@ impl Default for Ui {
             viewer: "xdg-open".into(),
             read_markers: true,
             mouse: true,
+            typing: true,
         }
     }
 }

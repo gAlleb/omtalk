@@ -7,6 +7,7 @@
 mod account;
 mod accounts;
 pub mod bookmarks;
+pub mod chatstates;
 mod config;
 mod disco;
 mod error;

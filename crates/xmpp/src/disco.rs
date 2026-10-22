@@ -25,6 +25,7 @@ const FEATURES: &[&str] = &[
     ns::RECEIPTS,
     ns::DISPLAYED_MARKERS,
     "urn:xmpp:mds:displayed:0+notify",
+    ns::CHATSTATES,
 ];
 
 pub fn info() -> DiscoInfoResult {

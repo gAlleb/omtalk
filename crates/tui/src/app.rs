@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use omtalk_omemo::{Direction, Incoming};
+use omtalk_xmpp::chatstates::ChatState;
 use omtalk_xmpp::presence::Online;
 use omtalk_xmpp::services::CommandAction;
 use omtalk_xmpp::{BareJid, Jid};
@@ -285,6 +286,13 @@ pub enum Action {
         /// The command's title, for the form that comes back.
         title: String,
     },
+    /// Tell chat `to` whether one is typing there (XEP-0085).
+    ChatState {
+        account: BareJid,
+        to: BareJid,
+        room: bool,
+        state: ChatState,
+    },
     /// Chat `to` was read here: tell the sender (`marker`, the message's id, XEP-0333;
     /// not in rooms) and one's own other clients (`archive_id`, XEP-0490).
     Displayed {
@@ -425,6 +433,14 @@ pub struct App {
     pub killed: String,
     /// Whether peers learn that their messages were read here.
     pub read_markers: bool,
+    /// Whether chats learn that one is typing.
+    pub send_typing: bool,
+    /// The typing state last told, and to which chat.
+    pub typing_out: Option<((BareJid, BareJid), ChatState)>,
+    /// When the input last changed (Unix seconds): typing pauses after a while.
+    pub typed_at: i64,
+    /// Who is typing where: (account, chat) → who → since when.
+    pub typing_in: BTreeMap<(BareJid, BareJid), BTreeMap<String, i64>>,
     /// The mouse is omtalk's (clicks, dragging, its own selection); off, the terminal
     /// and tmux select and paste as for any program.
     pub mouse: bool,
@@ -487,6 +503,10 @@ impl App {
             completion: None,
             killed: String::new(),
             read_markers: true,
+            send_typing: true,
+            typing_out: None,
+            typed_at: 0,
+            typing_in: BTreeMap::new(),
             mouse: true,
             selection: None,
             selecting: false,
@@ -588,6 +608,100 @@ impl App {
         let index = self.server_chat(account);
         self.notice(Some(index), text.clone(), at);
         self.status = text;
+    }
+
+    /// After the input changed: the open chat learns that one is typing, or that one
+    /// stopped, once per change of state. Commands are not typing.
+    fn after_edit(&mut self) -> Vec<Action> {
+        self.typed_at = chrono::Utc::now().timestamp();
+        let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
+            return Vec::new();
+        };
+        let key = (chat.account.clone(), chat.jid.clone());
+        let room = chat.is_room();
+        let typing = !self.input.trim().is_empty() && !self.input.trim_start().starts_with('/');
+        let state = if typing {
+            ChatState::Composing
+        } else {
+            ChatState::Active
+        };
+        let told = self
+            .typing_out
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, s)| s.clone());
+        // Nothing told yet and nothing typed: nothing to say.
+        if !self.send_typing || told.as_ref() == Some(&state) || (told.is_none() && !typing) {
+            return Vec::new();
+        }
+        self.typing_out = Some((key.clone(), state.clone()));
+        vec![Action::ChatState {
+            account: key.0,
+            to: key.1,
+            room,
+            state,
+        }]
+    }
+
+    /// Called now and then: typing that stopped for 10 s is "paused", as clients do.
+    pub fn typing_tick(&mut self, now: i64) -> Vec<Action> {
+        // A typist who went silent long ago (a client that closed mid-word) is let go.
+        for typing in self.typing_in.values_mut() {
+            typing.retain(|_, at| now - *at < 30);
+        }
+        self.typing_in.retain(|_, t| !t.is_empty());
+        match &self.typing_out {
+            Some((key, ChatState::Composing)) if now - self.typed_at >= 10 => {
+                let key = key.clone();
+                let room = self
+                    .chats
+                    .iter()
+                    .any(|c| c.account == key.0 && c.jid == key.1 && c.is_room());
+                self.typing_out = Some((key.clone(), ChatState::Paused));
+                vec![Action::ChatState {
+                    account: key.0,
+                    to: key.1,
+                    room,
+                    state: ChatState::Paused,
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Someone's typing state in a chat.
+    pub fn typing(&mut self, account: &BareJid, chat: &BareJid, who: String, state: ChatState, at: i64) {
+        // A room tells one's own state back under one's own nick.
+        let own = self
+            .chats
+            .iter()
+            .find(|c| &c.account == account && &c.jid == chat)
+            .and_then(|c| match &c.kind {
+                ChatKind::Room { nick } => Some(nick.clone()),
+                _ => None,
+            });
+        if own.as_ref() == Some(&who) {
+            return;
+        }
+        let typing = self.typing_in.entry((account.clone(), chat.clone())).or_default();
+        if state == ChatState::Composing {
+            typing.insert(who, at);
+        } else {
+            typing.remove(&who);
+        }
+    }
+
+    /// Who is typing in a chat now; one who said so long ago and went silent is not.
+    pub fn typing_now(&self, account: &BareJid, chat: &BareJid, now: i64) -> Vec<String> {
+        self.typing_in
+            .get(&(account.clone(), chat.clone()))
+            .map(|t| {
+                t.iter()
+                    .filter(|(_, at)| now - **at < 30)
+                    .map(|(who, _)| who.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// A line in the account's server channel only: news, not a problem.
@@ -701,9 +815,26 @@ impl App {
         if index >= self.chats.len() {
             return Vec::new();
         }
+        let mut actions = Vec::new();
+        // Leaving a chat mid-word: it learns the typing paused.
+        if let Some(((account, to), ChatState::Composing)) = self.typing_out.clone()
+            && (self.chats[index].account != account || self.chats[index].jid != to)
+        {
+            let room = self
+                .chats
+                .iter()
+                .any(|c| c.account == account && c.jid == to && c.is_room());
+            self.typing_out = None;
+            actions.push(Action::ChatState {
+                account,
+                to,
+                room,
+                state: ChatState::Paused,
+            });
+        }
         self.selected = Some(index);
         self.active = Some(self.chats[index].account.clone());
-        let mut actions = self.mark_read(index);
+        actions.extend(self.mark_read(index));
         let chat = &mut self.chats[index];
         chat.unread = 0;
         // A direct chat's right pane lists the peer's devices; read them afresh each time
@@ -741,6 +872,13 @@ impl App {
             None => ChatKind::Direct,
         };
         let index = self.chat(account, &message.peer, kind);
+        let who = message
+            .nick
+            .clone()
+            .unwrap_or_else(|| message.sender.node().map(|n| n.to_string()).unwrap_or_default());
+        if let Some(typing) = self.typing_in.get_mut(&(account.clone(), message.peer.clone())) {
+            typing.remove(&who);
+        }
         // A room sends one's message back: the line sent from here is that message,
         // which has now arrived.
         if message.direction == Direction::Outgoing
@@ -840,6 +978,15 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let before = self.input.clone();
+        let mut actions = self.handle_key(key);
+        if self.input != before {
+            actions.extend(self.after_edit());
+        }
+        actions
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
         // Ctrl+C always leaves, whatever the modifier, as in any terminal program.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -1120,6 +1267,8 @@ impl App {
         }
         chat.scroll = 0;
         let id = omtalk_xmpp::receipts::new_id();
+        // The message itself says "active" now.
+        self.typing_out = None;
         let action = Action::Send {
             account: chat.account.clone(),
             to: chat.jid.clone(),
@@ -1281,6 +1430,15 @@ impl App {
     /// Pasted text goes in at the cursor as it is, line breaks included; in the services
     /// window's form, into the field being edited, on one line.
     pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        let before = self.input.clone();
+        let mut actions = self.paste(text);
+        if self.input != before {
+            actions.extend(self.after_edit());
+        }
+        actions
+    }
+
+    fn paste(&mut self, text: &str) -> Vec<Action> {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if let Some(services) = self.services.as_mut() {
             for c in text.chars() {
@@ -1993,6 +2151,8 @@ mod tests {
             actions.extend(app.on_key(key(KeyCode::Char(c))));
         }
         actions.extend(app.on_key(key(KeyCode::Enter)));
+        // Typing states are the typing test's business.
+        actions.retain(|a| !matches!(a, Action::ChatState { .. }));
         actions
     }
 

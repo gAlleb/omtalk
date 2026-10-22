@@ -56,6 +56,10 @@ pub fn mark_outgoing(message: &mut Message, id: &str) {
             .attr(xml_ncname!("id").into(), id)
             .build(),
     );
+    // Writing is over once the message is out (XEP-0085).
+    message
+        .payloads
+        .push(Element::from(xmpp_parsers::chatstates::ChatState::Active));
     if message.type_ == MessageType::Chat {
         message
             .payloads

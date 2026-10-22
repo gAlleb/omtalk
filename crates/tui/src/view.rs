@@ -160,6 +160,12 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
                         &branch,
                         !app.clients(&app.chats[index].account, &app.chats[index].jid)
                             .is_empty(),
+                        !app.typing_now(
+                            &app.chats[index].account,
+                            &app.chats[index].jid,
+                            chrono::Utc::now().timestamp(),
+                        )
+                        .is_empty(),
                     ),
                     row,
                 );
@@ -281,6 +287,7 @@ fn chat_row(
     icons: theme::Icons,
     branch: &str,
     online: bool,
+    typing: bool,
 ) -> Paragraph<'static> {
     let width = width.saturating_sub(branch.width() as u16);
     let icon = match chat.kind {
@@ -294,6 +301,12 @@ fn chat_row(
         String::new()
     };
     let lock = if chat.omemo { "" } else { icons.chat_unlocked };
+    // Someone types there: a mark after the name.
+    let lock = if typing {
+        format!(" …{lock}")
+    } else {
+        lock.to_owned()
+    };
     let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + lock.width() + 1);
     let title = truncate(&chat.title(), room_for_title);
     let gap = (width as usize).saturating_sub(icon.width() + title.width() + lock.width() + badge.width());
@@ -322,7 +335,16 @@ fn chat_row(
         Span::styled(title, base),
         // On the selected row the colours are swapped: a coloured lock would turn into a
         // coloured block there.
-        Span::styled(lock, if selected { base } else { base.fg(theme::WARN) }),
+        Span::styled(
+            lock,
+            if selected {
+                base
+            } else if typing {
+                base.fg(theme::ACCENT)
+            } else {
+                base.fg(theme::WARN)
+            },
+        ),
         Span::styled(" ".repeat(gap), base),
         Span::styled(
             badge,
@@ -373,6 +395,24 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             ))
             .alignment(Alignment::Center),
         );
+    }
+    // Who is typing here, at the foot of the conversation.
+    if let Some(chat) = app.current() {
+        let names = app.typing_now(&chat.account, &chat.jid, chrono::Utc::now().timestamp());
+        if !names.is_empty() {
+            let verb = if names.len() == 1 {
+                "печатает"
+            } else {
+                "печатают"
+            };
+            block = block.title_bottom(
+                TextLine::from(Span::styled(
+                    format!(" {} {verb}… ", names.join(", ")),
+                    Style::default().fg(theme::ACCENT),
+                ))
+                .alignment(Alignment::Left),
+            );
+        }
     }
     let inner = block.inner(messages);
     frame.render_widget(block, messages);
@@ -2944,5 +2984,106 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(app.input, "/upload ");
+    }
+
+    #[test]
+    fn typing_is_told_once_per_change_and_shown_when_others_type() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        use omtalk_xmpp::chatstates::ChatState;
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        let anna = app.chat(&me, &jid("anna@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.focus = Focus::Input;
+        let key = |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let state = |state| Action::ChatState {
+            account: me.clone(),
+            to: jid("bob@home.org"),
+            room: false,
+            state,
+        };
+
+        assert_eq!(key(&mut app, 'п'), [state(ChatState::Composing)]);
+        assert!(key(&mut app, 'р').is_empty(), "once, not per key");
+        // Ten seconds without a key: paused; typing again: composing again.
+        assert_eq!(app.typing_tick(app.typed_at + 10), [state(ChatState::Paused)]);
+        assert!(app.typing_tick(app.typed_at + 20).is_empty());
+        assert_eq!(key(&mut app, 'и'), [state(ChatState::Composing)]);
+        // Sent: the message itself says "active".
+        let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&sent[..], [Action::Send { .. }]), "{sent:?}");
+        // A command is not typing.
+        assert!("/help".chars().all(|c| {
+            !key(&mut app, c)
+                .iter()
+                .any(|a| matches!(a, Action::ChatState { .. }))
+        }));
+        app.input.clear();
+        // Leaving a chat mid-word tells it the typing paused.
+        key(&mut app, 'x');
+        let left = app.select(anna);
+        assert!(left.contains(&state(ChatState::Paused)), "{left:?}");
+        app.input.clear();
+        app.send_typing = false;
+        app.select(bob);
+        assert!(key(&mut app, 'y').is_empty(), "turned off");
+
+        // Bob types: at the foot of his chat and beside it in the list; his message ends it.
+        app.typing(
+            &me,
+            &jid("bob@home.org"),
+            "bob".into(),
+            ChatState::Composing,
+            chrono::Utc::now().timestamp(),
+        );
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("bob печатает…") && text.contains("bob …"), "{text}");
+        let from_bob = omtalk_omemo::Incoming {
+            peer: jid("bob@home.org"),
+            sender: jid("bob@home.org"),
+            nick: None,
+            device: Some(1),
+            direction: omtalk_omemo::Direction::Incoming,
+            encrypted: true,
+            text: Some("вот".into()),
+            at: None,
+            not_for_this_device: false,
+            id: None,
+            markable: false,
+            archive_id: None,
+        };
+        app.on_incoming(&me, &from_bob, 1);
+        assert!(!screen(&mut app, 100, 20).contains("печатает"));
+        // Silent for 30 s after saying so: no longer.
+        app.typing(
+            &me,
+            &jid("bob@home.org"),
+            "bob".into(),
+            ChatState::Composing,
+            1000,
+        );
+        assert!(app.typing_now(&me, &jid("bob@home.org"), 1031).is_empty());
+        // In a room, one's own state told back is not someone typing.
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.typing(
+            &me,
+            &jid("team@muc.home.org"),
+            "me".into(),
+            ChatState::Composing,
+            5,
+        );
+        app.typing(
+            &me,
+            &jid("team@muc.home.org"),
+            "Алиса".into(),
+            ChatState::Composing,
+            5,
+        );
+        assert_eq!(app.typing_now(&me, &app.chats[room].jid.clone(), 6), ["Алиса"]);
     }
 }
