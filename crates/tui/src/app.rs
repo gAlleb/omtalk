@@ -201,6 +201,15 @@ pub enum Focus {
     Chats,
     Messages,
     Input,
+    /// A room's participants on the right: picked with the arrows, opened with Enter.
+    People,
+}
+
+/// Someone in a room's pane: present under a nick, or a member who is away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Person {
+    Here(String),
+    Away(BareJid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,6 +604,8 @@ pub struct App {
     /// Avatars drawn here with block characters (a terminal without pictures): the
     /// square picture by its key; with pictures, they are among the view's pictures.
     pub avatar_blocks: BTreeMap<String, image::DynamicImage>,
+    /// The participant picked in a room's pane, while it has the focus.
+    pub people_cursor: usize,
     /// Direct chats whose history was asked of the archive already.
     pub history_asked: BTreeSet<(BareJid, BareJid)>,
     /// Whose avatars were asked for already, by account.
@@ -653,6 +664,7 @@ impl App {
             avatars: BTreeMap::new(),
             avatars_asked: BTreeSet::new(),
             history_asked: BTreeSet::new(),
+            people_cursor: 0,
             avatar_blocks: BTreeMap::new(),
             config_ui: crate::config::Ui {
                 left,
@@ -1405,17 +1417,22 @@ impl App {
                 self.complete(key.code == KeyCode::Tab);
                 Vec::new()
             }
+            // A room's participants take their turn too, when the pane shows them.
             KeyCode::Tab => {
+                let people = self.people_pane();
                 self.focus = match self.focus {
                     Focus::Chats => Focus::Messages,
                     Focus::Messages => Focus::Input,
-                    Focus::Input => Focus::Chats,
+                    Focus::Input if people => Focus::People,
+                    Focus::Input | Focus::People => Focus::Chats,
                 };
                 Vec::new()
             }
             KeyCode::BackTab => {
+                let people = self.people_pane();
                 self.focus = match self.focus {
-                    Focus::Chats => Focus::Input,
+                    Focus::Chats if people => Focus::People,
+                    Focus::Chats | Focus::People => Focus::Input,
                     Focus::Messages => Focus::Chats,
                     Focus::Input => Focus::Messages,
                 };
@@ -1427,6 +1444,7 @@ impl App {
                 Focus::Chats => self.chats_key(key.code),
                 Focus::Messages => self.messages_key(key.code),
                 Focus::Input => self.input_key(key.code),
+                Focus::People => self.people_key(key.code),
             },
         }
     }
@@ -1511,6 +1529,55 @@ impl App {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Who the current room's pane lists, in its order: those here, then members away.
+    pub fn room_people(&self) -> Vec<Person> {
+        let Some(index) = self.selected.filter(|&i| self.chats[i].is_room()) else {
+            return Vec::new();
+        };
+        let here = self.chats[index].occupants.keys().cloned().map(Person::Here);
+        here.chain(self.away_members(index).into_iter().map(Person::Away))
+            .collect()
+    }
+
+    /// Whether the right pane shows a room's participants to pick from.
+    fn people_pane(&self) -> bool {
+        self.show_right && !self.room_people().is_empty()
+    }
+
+    fn people_key(&mut self, code: KeyCode) -> Vec<Action> {
+        let people = self.room_people();
+        if people.is_empty() {
+            self.focus = Focus::Input;
+            return Vec::new();
+        }
+        let last = people.len() - 1;
+        self.people_cursor = self.people_cursor.min(last);
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.people_cursor = self.people_cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.people_cursor = (self.people_cursor + 1).min(last),
+            KeyCode::Home | KeyCode::Char('g') => self.people_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.people_cursor = last,
+            KeyCode::Esc => self.focus = Focus::Input,
+            // As a click on them: a direct chat.
+            KeyCode::Enter => {
+                return match people[self.people_cursor].clone() {
+                    Person::Here(nick) => {
+                        self.focus = Focus::Input;
+                        self.open_private(&nick)
+                    }
+                    Person::Away(member) => {
+                        let account = self.chats[self.selected.expect("a room")].account.clone();
+                        let index = self.chat(&account, &member, ChatKind::Direct);
+                        self.focus = Focus::Input;
+                        self.select(index)
+                    }
+                };
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn messages_key(&mut self, code: KeyCode) -> Vec<Action> {

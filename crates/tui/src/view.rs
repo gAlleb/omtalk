@@ -1273,7 +1273,8 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
         Some(_) => "Собеседник".to_owned(),
         None => "—".to_owned(),
     };
-    let block = pane(&title, false).title(
+    let picking = app.focus == Focus::People;
+    let block = pane(&title, picking).title(
         TextLine::from(Span::styled(" › ", Style::default().fg(theme::dim()))).alignment(Alignment::Right),
     );
     let mut inner = block.inner(area);
@@ -1310,6 +1311,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
     let mut nicks = Vec::new();
     let mut devices_from = None;
     let mut people = Vec::new();
+    let mut picked_row = None;
     match &chat.kind {
         ChatKind::Room { .. } => {
             // What the room is: its topic in full, and its address.
@@ -1326,11 +1328,16 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 Style::default().fg(theme::dim()),
             )));
             rows.push(TextLine::default());
+            // The participant picked with the keys, counted as the pane lists them.
+            let mut person = 0;
             for (nick, real) in &chat.occupants {
                 let y = inner.y + rows.len() as u16;
-                if y < inner.bottom() {
-                    nicks.push((Rect::new(inner.x, y, inner.width, 1), nick.clone()));
+                nicks.push((Rect::new(inner.x, y, inner.width, 1), nick.clone()));
+                let picked = picking && person == app.people_cursor;
+                if picked {
+                    picked_row = Some(rows.len());
                 }
+                person += 1;
                 let mut spans = vec![
                     Span::styled("● ", Style::default().fg(theme::ok())),
                     Span::styled(nick.clone(), theme::nick(nick)),
@@ -1343,7 +1350,12 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                         Style::default().fg(theme::dim()),
                     ));
                 }
-                rows.push(TextLine::from(spans));
+                let line = TextLine::from(spans);
+                rows.push(if picked {
+                    line.style(theme::selected())
+                } else {
+                    line
+                });
             }
             // Members who are away, below: their account's name, a click away from a chat.
             let away = app.selected.map(|i| app.away_members(i)).unwrap_or_default();
@@ -1355,21 +1367,29 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 )));
                 for member in away {
                     let y = inner.y + rows.len() as u16;
-                    if y < inner.bottom() {
-                        people.push((Rect::new(inner.x, y, inner.width, 1), member.clone()));
+                    people.push((Rect::new(inner.x, y, inner.width, 1), member.clone()));
+                    let picked = picking && person == app.people_cursor;
+                    if picked {
+                        picked_row = Some(rows.len());
                     }
+                    person += 1;
                     let name = member
                         .node()
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| member.to_string());
-                    rows.push(TextLine::from(vec![
+                    let line = TextLine::from(vec![
                         Span::styled("○ ", Style::default().fg(theme::dim())),
                         Span::styled(name, Style::default().fg(theme::dim())),
                         Span::styled(
                             format!(" {}", member.domain()),
                             Style::default().fg(theme::border_colour()),
                         ),
-                    ]));
+                    ]);
+                    rows.push(if picked {
+                        line.style(theme::selected())
+                    } else {
+                        line
+                    });
                 }
             }
             // What can be done with the room, so nobody has to look for it.
@@ -1534,9 +1554,22 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             app.areas.side_devices = Some(Rect::new(inner.x, top, inner.width, inner.bottom() - top));
         }
     }
-    frame.render_widget(Paragraph::new(rows), inner);
-    app.areas.nicks.extend(nicks);
-    app.areas.people = people;
+    // The picked participant kept in sight: the pane scrolls to it.
+    let scroll = picked_row.map_or(0, |row| (row as u16 + 1).saturating_sub(inner.height));
+    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+    let shown = |r: &Rect| r.y >= inner.y + scroll && r.y < inner.bottom() + scroll;
+    let up = |r: Rect| Rect { y: r.y - scroll, ..r };
+    app.areas.nicks.extend(
+        nicks
+            .into_iter()
+            .filter(|(r, _)| shown(r))
+            .map(|(r, n)| (up(r), n)),
+    );
+    app.areas.people = people
+        .into_iter()
+        .filter(|(r, _)| shown(r))
+        .map(|(r, p)| (up(r), p))
+        .collect();
 }
 
 fn status_line(frame: &mut Frame, app: &App, area: Rect) {
@@ -3008,10 +3041,11 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.input, "m", "one's own nick is not offered");
 
-        // With nothing typed Tab still moves the focus; /help opens the list.
+        // With nothing typed Tab still moves the focus (in a room, to its participants);
+        // /help opens the list.
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.focus, Focus::Chats);
+        assert_eq!(app.focus, Focus::People);
         app.focus = Focus::Input;
         typed(&mut app, "/help");
         press(&mut app, KeyCode::Enter);
@@ -4715,5 +4749,49 @@ mod tests {
         });
         let text = screen(&mut app, 100, 30);
         assert!(text.contains("[ ] pep") && text.contains("[x] mam"), "{text}");
+    }
+
+    #[test]
+    fn room_participants_are_picked_with_the_keys() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        let chat = &mut app.chats[room];
+        chat.occupants.insert("bob".into(), Some(jid("bob@example.org")));
+        chat.occupants.insert("me".into(), Some(me.clone()));
+        chat.members = vec![jid("carol@example.org")];
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.focus = Focus::Input;
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::People, "after the input line, the participants");
+        assert_eq!(
+            app.room_people(),
+            [
+                crate::app::Person::Here("bob".into()),
+                crate::app::Person::Here("me".into()),
+                crate::app::Person::Away(jid("carol@example.org"))
+            ]
+        );
+        let text = screen(&mut app, 120, 24);
+        assert!(text.contains("bob"), "{text}");
+
+        // Down twice: carol, who is away; Enter opens a chat with her.
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.people_cursor, 2, "not past the last");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.current().unwrap().jid, jid("carol@example.org"));
+        assert_eq!(app.focus, Focus::Input);
+
+        // In a direct chat there is nobody to pick: Tab goes round without them.
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Chats);
     }
 }
