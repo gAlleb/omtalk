@@ -1,11 +1,11 @@
 [package]
 name = "omemo-xml"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-omemo = { version = "0.1.1", path = "../omemo" }
+omemo = { version = "0.1.2", path = "../omemo" }
 thiserror = "2.0.21"
 xmpp-parsers = "0.23.0"
 
