@@ -3165,10 +3165,18 @@ mod tests {
             markable: true,
             archive_id: Some(format!("a-{id}")),
         };
-        assert!(!app.rings(&from_bob("1")), "in front: no bell");
+        assert_eq!(
+            app.alert_for(&me, &from_bob("1")),
+            Default::default(),
+            "in front, chat open: nothing"
+        );
 
         assert!(app.on_focus(false).is_empty());
-        assert!(app.rings(&from_bob("2")));
+        let alert = app.alert_for(&me, &from_bob("2"));
+        assert!(
+            alert.bell && alert.sound && alert.desktop,
+            "private, window behind: {alert:?}"
+        );
         assert!(
             app.on_incoming(&me, &from_bob("2"), 1).is_empty(),
             "behind: not marked read"
@@ -3187,9 +3195,29 @@ mod tests {
             }]
         );
         assert_eq!(app.chats[bob].unread, 0);
-        app.bell = false;
+        app.notify.bell_on = crate::notify::When::NEVER;
         app.on_focus(false);
-        assert!(!app.rings(&from_bob("3")), "turned off");
+        let alert = app.alert_for(&me, &from_bob("3"));
+        assert!(!alert.bell && alert.sound, "the bell alone turned off: {alert:?}");
+
+        // A room: its chatter rings only the bell; one's nick named, all of them.
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.notify.bell_on = crate::notify::When::ALL;
+        let said = |text: &str| omtalk_omemo::Incoming {
+            peer: jid("team@muc.home.org"),
+            nick: Some("Алиса".into()),
+            text: Some(text.into()),
+            ..from_bob("4")
+        };
+        let chatter = app.alert_for(&me, &said("всем привет"));
+        assert!(chatter.bell && !chatter.sound && !chatter.desktop, "{chatter:?}");
+        let named = app.alert_for(&me, &said("me, глянь"));
+        assert!(named.bell && named.sound && named.desktop, "{named:?}");
+        let _ = room;
     }
 
     #[test]

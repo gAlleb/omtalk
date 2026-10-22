@@ -310,7 +310,12 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
     app.send_typing = ui.typing;
-    app.bell = ui.bell;
+    let mut notify = options.config.notify.ready()?;
+    // The older switch: bell = false is "bell_on = none".
+    if !ui.bell {
+        notify.bell_on = crate::notify::When::NEVER;
+    }
+    app.notify = notify;
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::NERD,
         config::IconSet::Text => crate::theme::TEXT_ICONS,
@@ -489,11 +494,22 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
         Msg::Incoming { account, message, at } => {
-            // The terminal's bell: the terminal or the window manager marks the window.
-            if app.rings(&message) {
+            // Before the chat shows it, while it is still "not looked at".
+            let alert = app.alert_for(&account, &message);
+            if alert.bell {
                 use std::io::Write;
                 let mut out = io::stdout();
                 let _ = out.write_all(b"\x07").and_then(|_| out.flush());
+            }
+            if alert.sound {
+                crate::notify::run(&app.notify.sound);
+            }
+            if alert.desktop
+                && let Some(text) = &message.text
+            {
+                let who = message.nick.clone().unwrap_or_else(|| message.sender.to_string());
+                let room = message.nick.as_ref().map(|_| message.peer.to_string());
+                crate::notify::run(&crate::notify::desktop(&who, room.as_deref(), text));
             }
             for action in app.on_incoming(&account, &message, at) {
                 tokio::spawn(perform(action, shared.clone()));

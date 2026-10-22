@@ -18,7 +18,13 @@
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! read_markers = true   # let senders see that their messages were read
 //! typing = true         # let chats see that one is typing
-//! bell = true           # ring the bell for a message while the window is behind
+//! bell = true           # older switch: false is [notify] bell_on = "none"
+//!
+//! [notify]              # each: all, private, mention, private+mention or none
+//! sound = "canberra-gtk-play -i message-new-instant"   # a command; "" for no sound
+//! sound_on = "private+mention"
+//! desktop_on = "private+mention"   # notify-send
+//! bell_on = "all"                  # the terminal's bell (\a), which tmux marks windows by
 //!
 //! [theme]               # optional: any role in a colour of one's own; the rest stay
 //! accent = "#7aa2f7"    # the terminal's (pywal and the like keep working for them)
@@ -39,6 +45,8 @@ pub struct Config {
     pub ui: Ui,
     #[serde(default)]
     pub theme: ThemeConfig,
+    #[serde(default)]
+    pub notify: crate::notify::NotifyConfig,
 }
 
 /// `[theme]`: colours of one's own for any role; the rest stay the terminal's.

@@ -445,8 +445,8 @@ pub struct App {
     pub send_typing: bool,
     /// The terminal window is in front (as the terminal says; without its word, it is).
     pub focused: bool,
-    /// Ring the terminal's bell for a message that comes while it is not in front.
-    pub bell: bool,
+    /// Sound, desktop notification and the terminal's bell, each for its messages.
+    pub notify: crate::notify::Notify,
     /// The typing state last told, and to which chat.
     pub typing_out: Option<((BareJid, BareJid), ChatState)>,
     /// When the input last changed (Unix seconds): typing pauses after a while.
@@ -517,7 +517,7 @@ impl App {
             read_markers: true,
             send_typing: true,
             focused: true,
-            bell: true,
+            notify: crate::notify::Notify::default(),
             typing_out: None,
             typed_at: 0,
             typing_in: BTreeMap::new(),
@@ -679,9 +679,29 @@ impl App {
         }
     }
 
-    /// Whether a message from someone, coming now, should ring the bell.
-    pub fn rings(&self, message: &Incoming) -> bool {
-        self.bell && !self.focused && message.direction == Direction::Incoming && message.text.is_some()
+    /// What a message from someone, coming now, calls for. Nothing while one is looking
+    /// at its chat; else by kind: private, one's nick named in a room, any.
+    pub fn alert_for(&self, account: &BareJid, message: &Incoming) -> crate::notify::Alert {
+        let Some(text) = &message.text else {
+            return Default::default();
+        };
+        if message.direction != Direction::Incoming {
+            return Default::default();
+        }
+        let chat = self
+            .chats
+            .iter()
+            .position(|c| &c.account == account && c.jid == message.peer);
+        if self.focused && chat.is_some() && chat == self.selected {
+            return Default::default();
+        }
+        let kind = chat.map(|i| &self.chats[i].kind);
+        let private = message.nick.is_none() && !matches!(kind, Some(ChatKind::Server));
+        let mention = match kind {
+            Some(ChatKind::Room { nick }) => crate::notify::mentions(text, nick),
+            _ => false,
+        };
+        self.notify.alert(private, mention)
     }
 
     /// Called now and then: typing that stopped for 10 s is "paused", as clients do.

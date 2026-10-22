@@ -7,6 +7,7 @@ mod app;
 mod clipboard;
 mod complete;
 mod config;
+mod notify;
 mod runtime;
 mod services;
 mod theme;
