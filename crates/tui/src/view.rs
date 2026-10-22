@@ -1952,11 +1952,29 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     if inner.height < 4 || inner.width < 10 {
         return;
     }
+    // What the server said and the focused field's description are wrapped, up to three
+    // rows each: servers write whole sentences.
+    let (status, problem_style) = match (&services.problem, services.loading) {
+        (Some(text), _) => (text.clone(), Style::default().fg(theme::warn())),
+        (None, true) => ("загрузка…".to_owned(), Style::default().fg(theme::dim())),
+        (None, false) => (String::new(), Style::default()),
+    };
+    let text_width = inner.width.saturating_sub(2) as usize;
+    let mut status_lines = wrap(&status, text_width);
+    status_lines.truncate(3);
+    let field_desc = services
+        .form
+        .as_ref()
+        .filter(|f| !f.finished())
+        .and_then(|f| f.fields.get(f.focus))
+        .and_then(|f| f.desc.clone());
+    let mut desc_lines = field_desc.map(|d| wrap(&d, text_width)).unwrap_or_default();
+    desc_lines.truncate(3);
     let [body, problem, buttons, hint] = Layout::vertical([
         Constraint::Min(1),
+        Constraint::Length(status_lines.len().max(1) as u16),
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(desc_lines.len().max(1) as u16),
     ])
     .areas(inner);
     let body = Rect {
@@ -1964,13 +1982,16 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         width: body.width.saturating_sub(2),
         ..body
     };
-
-    let (status, problem_style) = match (&services.problem, services.loading) {
-        (Some(text), _) => (text.clone(), Style::default().fg(theme::warn())),
-        (None, true) => ("загрузка…".to_owned(), Style::default().fg(theme::dim())),
-        (None, false) => (String::new(), Style::default()),
-    };
-    frame.render_widget(Paragraph::new(format!(" {status}")).style(problem_style), problem);
+    frame.render_widget(
+        Paragraph::new(
+            status_lines
+                .iter()
+                .map(|l| TextLine::raw(format!(" {l}")))
+                .collect::<Vec<_>>(),
+        )
+        .style(problem_style),
+        problem,
+    );
 
     let mut row_areas = Vec::new();
     let mut field_areas = Vec::new();
@@ -2022,15 +2043,43 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                         (None, _) if name != entry.jid.as_str() => format!("  {}", entry.jid),
                         (None, _) => String::new(),
                     };
-                    let mut line = TextLine::from(vec![
-                        Span::raw(format!(" {icon} ")),
-                        Span::raw(name),
-                        Span::styled(address, Style::default().fg(theme::dim())),
-                    ]);
-                    if row == services.cursor {
-                        line = line.style(theme::selected());
+                    // Too long for one row: the name wrapped, the address below it.
+                    let selected = row == services.cursor;
+                    let style = |line: TextLine<'static>| {
+                        if selected {
+                            line.style(theme::selected())
+                        } else {
+                            line
+                        }
+                    };
+                    let width = body.width as usize;
+                    if 3 + name.width() + address.width() <= width {
+                        lines.push((
+                            style(TextLine::from(vec![
+                                Span::raw(format!(" {icon} ")),
+                                Span::raw(name),
+                                Span::styled(address, Style::default().fg(theme::dim())),
+                            ])),
+                            Some(row),
+                        ));
+                    } else {
+                        for (i, part) in wrap(&name, width.saturating_sub(3)).into_iter().enumerate() {
+                            let lead = if i == 0 { format!(" {icon} ") } else { "   ".into() };
+                            lines.push((
+                                style(TextLine::from(vec![Span::raw(lead), Span::raw(part)])),
+                                Some(row),
+                            ));
+                        }
+                        for part in wrap(address.trim(), width.saturating_sub(3)) {
+                            lines.push((
+                                style(TextLine::from(vec![
+                                    Span::raw("   "),
+                                    Span::styled(part, Style::default().fg(theme::dim())),
+                                ])),
+                                Some(row),
+                            ));
+                        }
                     }
-                    lines.push((line, Some(row)));
                     row += 1;
                 }
             }
@@ -2042,7 +2091,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             }
             let cursor_line = lines
                 .iter()
-                .position(|(_, r)| *r == Some(services.cursor))
+                .rposition(|(_, r)| *r == Some(services.cursor))
                 .unwrap_or(0);
             let skip = cursor_line.saturating_sub(body.height as usize - 1);
             for (i, (line, row)) in lines
@@ -2070,6 +2119,8 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         }
         Some(form) => {
             let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
+            // Which line shows which option of a many-choice list, for clicks.
+            let mut options: HashMap<usize, usize> = HashMap::new();
             let instructions = form.step.form.as_ref().and_then(|f| f.instructions.clone());
             for text in instructions.into_iter() {
                 for part in wrap(&text, body.width as usize) {
@@ -2110,7 +2161,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 }
                 let mark = if field.required { "*" } else { "" };
                 let label = format!("{}{mark}", field.label);
-                let value = field_value(field, focused, running);
+                let values = field_lines(field, focused, running);
                 let label_style = if focused {
                     Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)
                 } else {
@@ -2131,32 +2182,47 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 } else {
                     format!("{label:>label_width$} ")
                 };
-                lines.push((
-                    TextLine::from(vec![
-                        Span::styled(label, label_style),
-                        Span::styled(value, value_style),
-                    ]),
-                    Some(index),
-                ));
+                // Each value on its rows, wrapped to the column; the first beside the label.
+                let value_width = (body.width as usize).saturating_sub(label_width + 1).max(8);
+                let indent = " ".repeat(label_width + 1);
+                let mut first = Some(label);
+                for (value, option) in values {
+                    for part in wrap(&value, value_width) {
+                        let lead = first.take().unwrap_or_else(|| indent.clone());
+                        if let Some(option) = option {
+                            options.insert(lines.len(), option);
+                        }
+                        lines.push((
+                            TextLine::from(vec![
+                                Span::styled(lead, label_style),
+                                Span::styled(part, value_style),
+                            ]),
+                            Some(index),
+                        ));
+                    }
+                }
+                if let Some(label) = first {
+                    lines.push((TextLine::from(Span::styled(label, label_style)), Some(index)));
+                }
             }
             let focus_line = lines
                 .iter()
                 .rposition(|(_, r)| *r == Some(form.focus))
                 .unwrap_or(0);
             let skip = focus_line.saturating_sub(body.height as usize - 1);
-            for (i, (line, field)) in lines
+            for (at, (line, field)) in lines
                 .into_iter()
+                .enumerate()
                 .skip(skip)
                 .take(body.height as usize)
-                .enumerate()
             {
                 let place = Rect {
-                    y: body.y + i as u16,
+                    y: body.y + (at - skip) as u16,
                     height: 1,
                     ..body
                 };
                 if let Some(field) = field {
-                    field_areas.push((place, field));
+                    field_areas.push((place, (field, options.get(&at).copied())));
                 }
                 frame.render_widget(Paragraph::new(line), place);
             }
@@ -2175,9 +2241,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                     })
                     .chain([("Отмена".to_owned(), ServiceButton::Close, false)])
                     .collect();
-                let desc = form.fields.get(form.focus).and_then(|f| f.desc.clone());
-                hint_text = desc
-                    .unwrap_or_else(|| "Tab поле · Пробел/←→ выбрать · Enter дальше · Esc отменить".into());
+                hint_text = "Tab поле · Пробел/←→ выбрать · Enter дальше · Esc отменить".into();
             } else {
                 let done = match form.step.status {
                     CommandStatus::Canceled => "отменено",
@@ -2213,13 +2277,74 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         button_areas.push((place, button));
         x += w + 1;
     }
+    // The focused field's description, where it has one; else what the keys do.
+    let hint_lines: Vec<TextLine> = if desc_lines.is_empty() {
+        vec![TextLine::raw(format!(" {hint_text}"))]
+    } else {
+        desc_lines
+            .iter()
+            .map(|l| TextLine::raw(format!(" {l}")))
+            .collect()
+    };
     frame.render_widget(
-        Paragraph::new(format!(" {hint_text}")).style(Style::default().fg(theme::dim())),
+        Paragraph::new(hint_lines).style(Style::default().fg(theme::dim())),
         hint,
     );
     app.areas.service_rows = row_areas;
     app.areas.service_fields = field_areas;
     app.areas.service_buttons = button_areas;
+}
+
+/// A field's value as rows: a multi-line text by its lines, addresses and chosen options
+/// one a row (as Gajim shows results); the field being typed in on one row, as typed.
+fn field_lines(field: &FieldState, focused: bool, editing: bool) -> Vec<(String, Option<usize>)> {
+    let caret = if focused { "▏" } else { "" };
+    let lines: Vec<(String, Option<usize>)> = match field.kind {
+        FieldType::TextMulti => {
+            let mut lines: Vec<(String, Option<usize>)> =
+                field.value.split('\n').map(|l| (l.to_owned(), None)).collect();
+            if let Some((last, _)) = lines.last_mut() {
+                last.push_str(caret);
+            }
+            lines
+        }
+        FieldType::JidMulti if !focused => field
+            .value
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| (v.to_owned(), None))
+            .collect(),
+        FieldType::ListMulti => field
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, value))| editing || field.chosen.contains(value))
+            .map(|(i, (label, value))| {
+                if editing {
+                    let here = if focused && i == field.option_cursor {
+                        "›"
+                    } else {
+                        " "
+                    };
+                    let on = if field.chosen.contains(value) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    (format!("{here}{on} {label}"), Some(i))
+                } else {
+                    (label.clone(), None)
+                }
+            })
+            .collect(),
+        _ => vec![(field_value(field, focused, editing), None)],
+    };
+    if lines.is_empty() {
+        vec![(String::new(), None)]
+    } else {
+        lines
+    }
 }
 
 /// A field's value as shown: secrets hidden, switches and choices drawn as such.
@@ -2243,27 +2368,7 @@ fn field_value(field: &FieldState, focused: bool, editing: bool) -> String {
                 chosen
             }
         }
-        FieldType::ListMulti => field
-            .options
-            .iter()
-            .enumerate()
-            .map(|(i, (label, value))| {
-                let on = if field.chosen.contains(value) {
-                    "[x]"
-                } else {
-                    "[ ]"
-                };
-                let here = if focused && i == field.option_cursor {
-                    "›"
-                } else {
-                    ""
-                };
-                format!("{here}{on} {label}")
-            })
-            .collect::<Vec<_>>()
-            .join("  "),
         FieldType::TextPrivate => format!("{}{caret}", "•".repeat(field.value.chars().count())),
-        FieldType::TextMulti => format!("{}{caret}", field.value.replace('\n', " ⏎ ")),
         _ => format!("{}{caret}", field.value),
     }
 }
@@ -2503,7 +2608,12 @@ mod tests {
         );
 
         // A click on the switch turns it; a click on Готово sends the form.
-        let (switch, _) = *app.areas.service_fields.iter().find(|(_, i)| *i == 1).unwrap();
+        let (switch, _) = *app
+            .areas
+            .service_fields
+            .iter()
+            .find(|(_, (i, _))| *i == 1)
+            .unwrap();
         app.on_mouse(click(switch.x + 2, switch.y));
         assert!(screen(&mut app, 120, 30).contains("[x]"));
         let (done, _) = *app
@@ -4431,5 +4541,103 @@ mod tests {
         // Turned off: not drawn.
         app.show_avatars = false;
         assert_eq!(app.avatar_of(&jid("bob@home.org")), None);
+    }
+
+    #[test]
+    fn service_results_and_long_rows_wrap_instead_of_being_cut() {
+        use crate::services::Listing;
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        use omtalk_xmpp::services::{CommandStatus, CommandStep, ServiceItem};
+
+        let mut app = app_with_chat();
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let server: omtalk_xmpp::Jid = "example.org".parse().unwrap();
+        let long = "Очень длинное название службы, которое никак не помещается в одну строку окна";
+        app.services.as_mut().unwrap().listed(
+            &server,
+            &None,
+            Ok(Listing {
+                info: None,
+                items: vec![ServiceItem {
+                    jid: "pubsub.example.org".parse().unwrap(),
+                    node: Some("news".into()),
+                    name: Some(long.into()),
+                }],
+                commands: Vec::new(),
+            }),
+        );
+        let text = screen(&mut app, 70, 30);
+        assert!(
+            text.contains("помещается") && text.contains("одну строку окна"),
+            "all of it: {text}"
+        );
+        assert!(text.contains("pubsub.example.org · news"), "{text}");
+
+        // A result: each address and each line of text on a row of its own.
+        let result: omtalk_xmpp::Element = r#"<x xmlns="jabber:x:data" type="result">
+            <field var="online" type="jid-multi" label="Online users">
+              <value>dave@example.org</value><value>erin@example.org</value><value>frank@example.org</value></field>
+            <field var="text" type="text-multi" label="Uptime"><value>up 3 days</value><value>load 0.1</value></field></x>"#
+            .parse()
+            .unwrap();
+        let done = CommandStep {
+            node: "online".into(),
+            session: None,
+            status: CommandStatus::Completed,
+            form: Some(result.try_into().unwrap()),
+            notes: Vec::new(),
+            actions: Vec::new(),
+            default_action: None,
+        };
+        app.services
+            .as_mut()
+            .unwrap()
+            .stepped(server.clone(), "Online".into(), Ok(done));
+        let text = screen(&mut app, 100, 30);
+        let row_of = |what: &str| {
+            text.lines()
+                .position(|l| l.contains(what))
+                .unwrap_or_else(|| panic!("{what}: {text}"))
+        };
+        assert!(
+            row_of("dave@") < row_of("erin@") && row_of("erin@") < row_of("frank@"),
+            "{text}"
+        );
+        assert!(row_of("up 3 days") < row_of("load 0.1"), "{text}");
+
+        // A many-choice list: an option a row, ticked by a click on it.
+        let form: omtalk_xmpp::Element = r#"<x xmlns="jabber:x:data" type="form">
+            <field var="mods" type="list-multi" label="Modules"
+              ><option label="pep"><value>pep</value></option><option label="mam"><value>mam</value></option></field></x>"#
+            .parse()
+            .unwrap();
+        let step = CommandStep {
+            node: "load".into(),
+            session: Some("s".into()),
+            status: CommandStatus::Executing,
+            form: Some(form.try_into().unwrap()),
+            notes: Vec::new(),
+            actions: vec![CommandAction::Complete],
+            default_action: Some(CommandAction::Complete),
+        };
+        app.services
+            .as_mut()
+            .unwrap()
+            .stepped(server.clone(), "Load".into(), Ok(step));
+        screen(&mut app, 100, 30);
+        let (row, _) = *app
+            .areas
+            .service_fields
+            .iter()
+            .find(|(_, (_, option))| *option == Some(1))
+            .expect("the second option has its row");
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("[ ] pep") && text.contains("[x] mam"), "{text}");
     }
 }

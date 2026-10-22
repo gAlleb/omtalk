@@ -276,7 +276,8 @@ pub struct Areas {
     /// The services window and what is clickable in it.
     pub service_window: Rect,
     pub service_rows: Vec<(Rect, usize)>,
-    pub service_fields: Vec<(Rect, usize)>,
+    /// A form's rows: the field, and for a many-choice list the option on that row.
+    pub service_fields: Vec<(Rect, (usize, Option<usize>))>,
     pub service_buttons: Vec<(Rect, ServiceButton)>,
 }
 
@@ -2487,7 +2488,7 @@ impl App {
                     Outcome::Stay
                 }
                 (None, Some(row), _) => services.click_row(row),
-                (None, _, Some(field)) => services.click_field(field),
+                (None, _, Some((field, option))) => services.click_field(field, option),
                 // A click beside the window leaves it, as Esc does.
                 _ if outside => return self.close_services(),
                 _ => Outcome::Stay,

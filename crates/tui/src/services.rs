@@ -248,13 +248,20 @@ impl Services {
     }
 
     /// A click on a form field: it takes the cursor; a switch or a choice also turns.
-    pub fn click_field(&mut self, index: usize) -> Outcome {
+    /// A click on a field's row: focus, a switch or a choice changes, and in a
+    /// many-choice list the option on that row is ticked or unticked.
+    pub fn click_field(&mut self, index: usize, option: Option<usize>) -> Outcome {
         if let Some(form) = self.form.as_mut().filter(|f| !f.finished())
             && let Some(field) = form.fields.get_mut(index).filter(|f| f.editable())
         {
             form.focus = index;
-            if matches!(field.kind, FieldType::Boolean | FieldType::ListSingle) {
-                edit(field, KeyCode::Char(' '));
+            match (&field.kind, option) {
+                (FieldType::Boolean | FieldType::ListSingle, _) => edit(field, KeyCode::Char(' ')),
+                (FieldType::ListMulti, Some(option)) => {
+                    field.option_cursor = option;
+                    edit(field, KeyCode::Char(' '));
+                }
+                _ => {}
             }
         }
         Outcome::Stay
