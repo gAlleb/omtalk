@@ -160,15 +160,26 @@ async fn main() {
 
     show::info("type /help for commands");
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        // Ctrl+C leaves as cleanly as /quit. A process that just dies leaves its session
+        // parked on the server (XEP-0198), shown online in rooms for minutes.
+        let line = tokio::select! {
+            line = lines.next_line() => line,
+            _ = tokio::signal::ctrl_c() => break,
+        };
+        let Ok(Some(line)) = line else { break };
         match commands::parse(&line) {
             Ok(commands::Command::Quit) => break,
             Ok(command) => commands::run(&omemo, &account, command).await,
             Err(problem) => show::error(&problem),
         }
     }
+    show::info("closing the connection");
     account.stop().await;
     drop(accounts);
+    // Reading stdin holds a blocking thread that would keep the process alive until the
+    // next line; the connection is closed, so leave now.
+    std::process::exit(0);
 }
 
 fn now() -> u64 {
