@@ -3745,6 +3745,12 @@ mod tests {
             app.alert_for(&me, &said("me")).sound,
             "a one-letter-short nick alone"
         );
+        app.chats[room].name = Some("Команда".into());
+        assert_eq!(
+            app.notice_names(&me, &said("me, глянь")),
+            ("Алиса".into(), Some("Команда".into())),
+            "the room by its name, not its address"
+        );
         let named = app.alert_for(&me, &said("me, глянь"));
         assert!(named.bell && named.sound && named.desktop, "{named:?}");
         // History read from the archive (a room's, on entering): nothing at all.

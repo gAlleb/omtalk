@@ -561,8 +561,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if alert.desktop
                 && let Some(text) = &message.text
             {
-                let who = message.nick.clone().unwrap_or_else(|| message.sender.to_string());
-                let room = message.nick.as_ref().map(|_| message.peer.to_string());
+                let (who, room) = app.notice_names(&account, &message);
                 crate::notify::run(&crate::notify::desktop(
                     message.peer.as_str(),
                     &who,

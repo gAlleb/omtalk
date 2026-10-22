@@ -829,6 +829,20 @@ impl App {
         self.notify.alert(private, mention)
     }
 
+    /// Who wrote and, in a room, which, as a desktop notification names them: the room
+    /// by its name (its address only while it has none).
+    pub fn notice_names(&self, account: &BareJid, message: &Incoming) -> (String, Option<String>) {
+        let Some(nick) = &message.nick else {
+            return (message.sender.to_string(), None);
+        };
+        let room = self
+            .chats
+            .iter()
+            .find(|c| &c.account == account && c.jid == message.peer)
+            .map_or_else(|| message.peer.to_string(), Chat::title);
+        (nick.clone(), Some(room))
+    }
+
     /// Called now and then: typing that stopped for 10 s is "paused", as clients do.
     pub fn typing_tick(&mut self, now: i64) -> Vec<Action> {
         // A typist who went silent long ago (a client that closed mid-word) is let go.
