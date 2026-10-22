@@ -11,6 +11,8 @@ use omtalk_xmpp::services::CommandAction;
 use omtalk_xmpp::{BareJid, Jid};
 use ratatui::layout::Rect;
 
+use omtalk_store::Folder;
+
 use crate::config::Modifier;
 use crate::services::{Outcome, Services};
 
@@ -140,6 +142,21 @@ pub enum Splitter {
 }
 
 /// Where things were drawn last, for the mouse.
+/// A heading in the chat list: one of the user's folders, or an account with the chats
+/// in no folder.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    Folder(String),
+    Account(BareJid),
+}
+
+/// One row of the chat list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    Heading(Group),
+    Chat(usize),
+}
+
 /// A button in the services window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceButton {
@@ -166,8 +183,8 @@ pub struct Areas {
     pub show_left: Option<Rect>,
     pub show_right: Option<Rect>,
     pub chat_rows: Vec<(Rect, usize)>,
-    /// Account headings, shown with more than one account: a click folds them.
-    pub account_rows: Vec<(Rect, BareJid)>,
+    /// Folder and account headings: a click folds them, a chat dropped on one moves there.
+    pub group_rows: Vec<(Rect, Group)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
     /// Senders' names in a room and its participants: a click opens a chat with them.
@@ -221,13 +238,16 @@ pub enum Action {
         /// The command's title, for the form that comes back.
         title: String,
     },
+    /// The folders changed; keep them.
+    SaveFolders(Vec<Folder>),
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
     Quit,
 }
 
 pub const HELP: &str = "/msg JID — открыть чат · /join КОМНАТА [НИК] · /leave · /add JID [ИМЯ] · \
-/accept JID · /refuse JID · /devices · /services [АДРЕС] · /help";
+/accept JID · /refuse JID · /devices · /services [АДРЕС] · /folder [ПАПКА] · \
+/rename-folder СТАРАЯ НОВАЯ · /help";
 
 pub struct App {
     pub accounts: Vec<BareJid>,
@@ -248,10 +268,14 @@ pub struct App {
     pub status: String,
     pub areas: Areas,
     pub dragging: Option<Splitter>,
+    /// A chat being dragged to a folder.
+    pub dragging_chat: Option<usize>,
     /// The services window, over the chat while open.
     pub services: Option<Services>,
-    /// Accounts whose chats are folded away in the list.
-    pub collapsed: BTreeSet<BareJid>,
+    /// Headings whose chats are folded away in the list.
+    pub collapsed: BTreeSet<Group>,
+    /// The user's own folders of chats, in order.
+    pub folders: Vec<Folder>,
     /// The account commands act for: the last one picked, by its chat or its heading.
     pub active: Option<BareJid>,
     pub quit: bool,
@@ -286,8 +310,10 @@ impl App {
             status: String::new(),
             areas: Areas::default(),
             dragging: None,
+            dragging_chat: None,
             services: None,
             collapsed: BTreeSet::new(),
+            folders: Vec::new(),
             active: None,
             quit: false,
         }
@@ -480,13 +506,20 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Char('h') => {
-                if let Some(account) = self.current().map(|c| c.account.clone()) {
-                    self.toggle_account(&account);
+                if let Some(group) = self.selected.map(|i| self.group_of(i)) {
+                    self.toggle_group(&group);
                 }
                 Vec::new()
             }
             KeyCode::Char('z') => {
-                self.focus_account();
+                self.focus_group();
+                Vec::new()
+            }
+            // Into a folder: the command, ready to be given a name.
+            KeyCode::Char('m') => {
+                self.input = "/folder ".into();
+                self.cursor = self.input.chars().count();
+                self.focus = Focus::Input;
                 Vec::new()
             }
             _ => Vec::new(),
@@ -636,6 +669,35 @@ impl App {
                 Some(Err(_)) => Err("/services: нужен адрес сервиса, например example.org".to_owned()),
                 address => return self.open_services(address.and_then(Result::ok)),
             },
+            ("/folder", _) => match self.selected {
+                Some(index) => {
+                    let name = line[name.len()..].trim();
+                    return self.move_to_folder(index, (!name.is_empty()).then_some(name));
+                }
+                None => Err("откройте чат, который положить в папку".to_owned()),
+            },
+            // Names may hold spaces: "/rename-folder старая папка → новая"; two single
+            // words need no arrow.
+            ("/rename-folder", _) => {
+                let rest = line[name.len()..].trim();
+                let parts = rest
+                    .split_once('→')
+                    .map(|(a, b)| (a.trim(), b.trim()))
+                    .or_else(|| {
+                        let mut words = rest.split_whitespace();
+                        match (words.next(), words.next(), words.next()) {
+                            (Some(a), Some(b), None) => Some((a, b)),
+                            _ => None,
+                        }
+                    });
+                match parts {
+                    Some((old, new)) if !old.is_empty() && !new.is_empty() => self.rename_folder(old, new),
+                    _ => Err(
+                        "/rename-folder СТАРАЯ НОВАЯ (или «старая папка → новая» для имён с пробелами)"
+                            .to_owned(),
+                    ),
+                }
+            }
             ("/help", _) => Err(HELP.to_owned()),
             ("/msg" | "/join" | "/add" | "/accept" | "/refuse", None) => {
                 Err(format!("{name}: нужен адрес вида name@server"))
@@ -786,41 +848,137 @@ impl App {
         }
     }
 
-    /// Chats in the order the list shows them: by account, folded ones left out.
-    pub fn visible_chats(&self) -> Vec<usize> {
-        let several = self.accounts.len() > 1;
-        self.accounts
+    /// The folder holding a chat, if any.
+    fn folder_of(&self, index: usize) -> Option<usize> {
+        let chat = &self.chats[index];
+        self.folders
             .iter()
-            .filter(|a| !several || !self.collapsed.contains(*a))
-            .flat_map(|a| {
-                self.chats
+            .position(|f| f.chats.iter().any(|(a, j)| *a == chat.account && *j == chat.jid))
+    }
+
+    /// The heading a chat is listed under.
+    pub fn group_of(&self, index: usize) -> Group {
+        match self.folder_of(index) {
+            Some(folder) => Group::Folder(self.folders[folder].name.clone()),
+            None => Group::Account(self.chats[index].account.clone()),
+        }
+    }
+
+    /// The chat list as shown: folders first, then each account with its other chats.
+    /// Account headings only when there is more than one account or any folder.
+    pub fn list(&self) -> Vec<Entry> {
+        let mut entries = Vec::new();
+        let mut placed = vec![false; self.chats.len()];
+        for folder in &self.folders {
+            let group = Group::Folder(folder.name.clone());
+            let folded = self.collapsed.contains(&group);
+            entries.push(Entry::Heading(group));
+            for (account, jid) in &folder.chats {
+                if let Some(index) = self
+                    .chats
                     .iter()
-                    .enumerate()
-                    .filter(move |(_, c)| &c.account == a)
-                    .map(|(i, _)| i)
+                    .position(|c| c.account == *account && c.jid == *jid)
+                {
+                    placed[index] = true;
+                    if !folded {
+                        entries.push(Entry::Chat(index));
+                    }
+                }
+            }
+        }
+        let headings = self.accounts.len() > 1 || !self.folders.is_empty();
+        for account in &self.accounts {
+            let group = Group::Account(account.clone());
+            let folded = headings && self.collapsed.contains(&group);
+            if headings {
+                entries.push(Entry::Heading(group));
+            }
+            for (index, chat) in self.chats.iter().enumerate() {
+                if &chat.account == account && !placed[index] && !folded {
+                    entries.push(Entry::Chat(index));
+                }
+            }
+        }
+        entries
+    }
+
+    /// Chats in the order the list shows them, folded ones left out.
+    pub fn visible_chats(&self) -> Vec<usize> {
+        self.list()
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Chat(i) => Some(i),
+                Entry::Heading(_) => None,
             })
             .collect()
     }
 
-    /// Folds an account's chats away, or opens them again.
-    pub fn toggle_account(&mut self, account: &BareJid) {
-        if !self.collapsed.remove(account) {
-            self.collapsed.insert(account.clone());
+    /// Folds a heading's chats away, or opens them again.
+    pub fn toggle_group(&mut self, group: &Group) {
+        if !self.collapsed.remove(group) {
+            self.collapsed.insert(group.clone());
         }
     }
 
-    /// Folds every account but the current chat's: to look at one server only. Again,
-    /// and all are open.
-    pub fn focus_account(&mut self) {
-        let Some(current) = self.current().map(|c| c.account.clone()) else {
+    /// Folds every heading but the current chat's: to look at one folder or server
+    /// only. Again, and all are open.
+    pub fn focus_group(&mut self) {
+        let Some(current) = self.selected.map(|i| self.group_of(i)) else {
             return;
         };
-        let others: BTreeSet<BareJid> = self.accounts.iter().filter(|a| **a != current).cloned().collect();
-        if self.collapsed == others {
+        let others: BTreeSet<Group> = self
+            .list()
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Heading(g) if g != current => Some(g),
+                _ => None,
+            })
+            .chain(self.collapsed.iter().filter(|g| **g != current).cloned())
+            .collect();
+        if !others.is_empty() && self.collapsed == others {
             self.collapsed.clear();
         } else {
             self.collapsed = others;
         }
+    }
+
+    /// Puts a chat into a folder, made if new, or (with `None`) takes it out of its own.
+    /// A folder left empty goes.
+    pub fn move_to_folder(&mut self, index: usize, folder: Option<&str>) -> Vec<Action> {
+        let Some(chat) = self.chats.get(index) else {
+            return Vec::new();
+        };
+        let key = (chat.account.clone(), chat.jid.clone());
+        for f in &mut self.folders {
+            f.chats.retain(|c| *c != key);
+        }
+        if let Some(name) = folder {
+            match self.folders.iter_mut().find(|f| f.name == name) {
+                Some(f) => f.chats.push(key),
+                None => self.folders.push(Folder {
+                    name: name.to_owned(),
+                    chats: vec![key],
+                }),
+            }
+            // Where it went stays open, so the chat does not vanish from sight.
+            self.collapsed.remove(&Group::Folder(name.to_owned()));
+        }
+        self.folders.retain(|f| !f.chats.is_empty());
+        vec![Action::SaveFolders(self.folders.clone())]
+    }
+
+    fn rename_folder(&mut self, old: &str, new: &str) -> Result<Vec<Action>, String> {
+        if self.folders.iter().any(|f| f.name == new) {
+            return Err(format!("папка «{new}» уже есть"));
+        }
+        let Some(folder) = self.folders.iter_mut().find(|f| f.name == old) else {
+            return Err(format!("нет папки «{old}»"));
+        };
+        folder.name = new.to_owned();
+        if self.collapsed.remove(&Group::Folder(old.to_owned())) {
+            self.collapsed.insert(Group::Folder(new.to_owned()));
+        }
+        Ok(vec![Action::SaveFolders(self.folders.clone())])
     }
 
     fn move_selection(&mut self, by: isize) -> Vec<Action> {
@@ -887,12 +1045,16 @@ impl App {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
                     self.toggle_omemo();
-                } else if let Some((_, account)) = self.areas.account_rows.iter().find(|(r, _)| inside(*r)) {
-                    let account = account.clone();
-                    self.toggle_account(&account);
-                    self.active = Some(account);
+                } else if let Some((_, group)) = self.areas.group_rows.iter().find(|(r, _)| inside(*r)) {
+                    let group = group.clone();
+                    self.toggle_group(&group);
+                    if let Group::Account(account) = group {
+                        self.active = Some(account);
+                    }
                 } else if let Some(&(_, index)) = self.areas.chat_rows.iter().find(|(r, _)| inside(*r)) {
                     self.focus = Focus::Chats;
+                    // It may be dragged on to a folder from here.
+                    self.dragging_chat = Some(index);
                     return self.select(index);
                 } else if inside(self.areas.input) {
                     self.focus = Focus::Input;
@@ -902,6 +1064,9 @@ impl App {
                 Vec::new()
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.dragging_chat.is_some() && self.dragging.is_none() {
+                    self.status = "отпустите над папкой (или над аккаунтом — вынуть из папки)".into();
+                }
                 let max = self.max_pane();
                 match self.dragging {
                     Some(Splitter::Left) => self.left_width = (x + 1).clamp(MIN_PANE, max),
@@ -914,7 +1079,27 @@ impl App {
             }
             MouseEventKind::Up(_) => {
                 self.dragging = None;
-                Vec::new()
+                // A chat let go over a heading moves there: into a folder, or out of one
+                // onto its account.
+                let dropped = self.dragging_chat.take().and_then(|index| {
+                    let (_, group) = self.areas.group_rows.iter().find(|(r, _)| inside(*r))?;
+                    Some((index, group.clone()))
+                });
+                match dropped {
+                    Some((index, group)) if group != self.group_of(index) => match group {
+                        Group::Folder(name) => self.move_to_folder(index, Some(&name)),
+                        Group::Account(account) if account == self.chats[index].account => {
+                            self.move_to_folder(index, None)
+                        }
+                        Group::Account(_) => {
+                            self.status =
+                                "чат другого аккаунта: его можно положить в папку, но не в чужой аккаунт"
+                                    .into();
+                            Vec::new()
+                        }
+                    },
+                    _ => Vec::new(),
+                }
             }
             MouseEventKind::ScrollUp if inside(self.areas.messages) => self.scroll(3),
             MouseEventKind::ScrollDown if inside(self.areas.messages) => self.scroll(-3),

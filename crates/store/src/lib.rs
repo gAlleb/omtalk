@@ -3,8 +3,10 @@
 //! Secrets are stored unencrypted, as Gajim and Conversations store theirs; the file is
 //! created readable by its owner only.
 
+mod folders;
 mod history;
 
+pub use folders::Folder;
 pub use history::{ChatSummary, StoredMessage};
 
 use std::path::Path;
@@ -60,6 +62,7 @@ const MIGRATIONS: &[&str] = &[
     );
 ",
     history::MIGRATION,
+    folders::MIGRATION,
 ];
 
 #[derive(Clone)]

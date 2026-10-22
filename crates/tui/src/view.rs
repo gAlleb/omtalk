@@ -18,7 +18,7 @@ use omtalk_xmpp::BareJid;
 use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
 use xmpp_parsers::data_forms::FieldType;
 
-use crate::app::{App, Areas, Chat, ChatKind, Focus, Line, MediaState, ServiceButton};
+use crate::app::{App, Areas, Chat, ChatKind, Entry, Focus, Group, Line, MediaState, ServiceButton};
 use crate::services::FieldState;
 use crate::theme;
 
@@ -107,41 +107,46 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     app.areas.left = Some(area);
     app.areas.hide_left = Some(Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1));
 
-    let several = app.accounts.len() > 1;
     let mut y = inner.y;
-    for account in app.accounts.clone() {
-        let folded = app.collapsed.contains(&account);
-        if several && y < inner.bottom() {
-            let row = Rect::new(inner.x, y, inner.width, 1);
-            frame.render_widget(account_row(app, &account, folded, inner.width), row);
-            app.areas.account_rows.push((row, account.clone()));
-            y += 1;
+    for entry in app.list() {
+        if y >= inner.bottom() {
+            break;
         }
-        if several && folded {
-            continue;
-        }
-        for (index, chat) in app.chats.iter().enumerate().filter(|(_, c)| c.account == account) {
-            if y >= inner.bottom() {
-                break;
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        match entry {
+            Entry::Heading(group) => {
+                let folded = app.collapsed.contains(&group);
+                let paragraph = match &group {
+                    Group::Account(account) => account_row(app, account, folded, inner.width),
+                    Group::Folder(name) => folder_row(app, name, folded, inner.width),
+                };
+                frame.render_widget(paragraph, row);
+                app.areas.group_rows.push((row, group));
             }
-            let row = Rect::new(inner.x, y, inner.width, 1);
-            frame.render_widget(
-                chat_row(chat, app.selected == Some(index), inner.width, app.icons),
-                row,
-            );
-            app.areas.chat_rows.push((row, index));
-            y += 1;
+            Entry::Chat(index) => {
+                frame.render_widget(
+                    chat_row(
+                        &app.chats[index],
+                        app.selected == Some(index),
+                        inner.width,
+                        app.icons,
+                    ),
+                    row,
+                );
+                app.areas.chat_rows.push((row, index));
+            }
         }
+        y += 1;
     }
     if app.chats.is_empty() && inner.height > 2 {
         let hint = Paragraph::new(vec![
             TextLine::from(Span::styled("нет чатов", Style::default().fg(theme::DIM))),
             TextLine::from(Span::styled("/msg или /join", Style::default().fg(theme::DIM))),
         ]);
-        frame.render_widget(
-            hint,
-            Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(1), 2),
-        );
+        // Below the headings, if any.
+        if y + 2 <= inner.bottom() {
+            frame.render_widget(hint, Rect::new(inner.x + 1, y, inner.width.saturating_sub(1), 2));
+        }
     }
 }
 
@@ -179,6 +184,47 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
                 style
             }
         }),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(
+            badge,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ),
+    ]))
+}
+
+/// A folder's heading: fold mark, its symbol and name, and while folded its unread count.
+fn folder_row(app: &App, name: &str, folded: bool, width: u16) -> Paragraph<'static> {
+    let mark = if folded { "▸ " } else { "▾ " };
+    let icon = format!("{} ", app.icons.folder);
+    let unread: usize = app
+        .folders
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| {
+            app.chats
+                .iter()
+                .filter(|c| f.chats.iter().any(|(a, j)| *a == c.account && *j == c.jid))
+                .map(|c| c.unread)
+                .sum()
+        })
+        .unwrap_or(0);
+    let badge = if folded && unread > 0 {
+        format!(" {unread} ")
+    } else {
+        String::new()
+    };
+    let room = (width as usize).saturating_sub(mark.width() + icon.width() + badge.width());
+    let name = truncate(name, room);
+    let gap = (width as usize).saturating_sub(mark.width() + icon.width() + name.width() + badge.width());
+    Paragraph::new(TextLine::from(vec![
+        Span::styled(mark, Style::default().fg(theme::DIM)),
+        Span::styled(icon, Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            name,
+            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" ".repeat(gap)),
         Span::styled(
             badge,
@@ -1507,9 +1553,9 @@ mod tests {
         // A click on the work heading folds it; its unread count stays in sight.
         let (heading, _) = app
             .areas
-            .account_rows
+            .group_rows
             .iter()
-            .find(|(_, acc)| *acc == work)
+            .find(|(_, g)| *g == Group::Account(work.clone()))
             .cloned()
             .unwrap();
         app.on_mouse(MouseEvent {
@@ -1547,5 +1593,117 @@ mod tests {
         );
         app.select(b);
         assert_eq!(app.account_for(None), Some(work.clone()));
+    }
+
+    #[test]
+    fn chats_go_into_folders_by_command_and_by_dragging() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let anna = app.chat(&me, &jid("anna@home.org"), ChatKind::Direct);
+        let boss = app.chat(&me, &jid("boss@home.org"), ChatKind::Direct);
+        let team = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        let mouse = |kind, area: Rect| MouseEvent {
+            kind,
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let type_line = |app: &mut App, text: &str| {
+            app.focus = Focus::Input;
+            for c in text.chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        };
+
+        // One account and no folders: no headings at all.
+        assert!(!app.list().iter().any(|e| matches!(e, Entry::Heading(_))));
+
+        // A command puts the current chat into a new folder, which is kept.
+        app.select(boss);
+        let saved = type_line(&mut app, "/folder Рабочие дела");
+        assert!(matches!(&saved[..], [Action::SaveFolders(f)] if f[0].name == "Рабочие дела"));
+        assert_eq!(
+            app.list(),
+            [
+                Entry::Heading(Group::Folder("Рабочие дела".into())),
+                Entry::Chat(boss),
+                Entry::Heading(Group::Account(me.clone())),
+                Entry::Chat(anna),
+                Entry::Chat(team),
+            ]
+        );
+        let text = screen(&mut app, 120, 20);
+        assert!(
+            text.contains("Рабочие дела") && text.contains("me@home.org"),
+            "{text}"
+        );
+
+        // A room dragged on to the folder's heading joins it.
+        let row_of = |app: &App, index| app.areas.chat_rows.iter().find(|(_, i)| *i == index).unwrap().0;
+        let heading =
+            |app: &App, group: &Group| app.areas.group_rows.iter().find(|(_, g)| g == group).unwrap().0;
+        let folder = Group::Folder("Рабочие дела".into());
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row_of(&app, team)));
+        app.on_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            heading(&app, &folder),
+        ));
+        let saved = app.on_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            heading(&app, &folder),
+        ));
+        assert!(
+            matches!(&saved[..], [Action::SaveFolders(f)] if f[0].chats.len() == 2),
+            "{saved:?}"
+        );
+        assert_eq!(app.visible_chats(), [boss, team, anna]);
+
+        // A plain click on a chat moves nothing.
+        screen(&mut app, 120, 20);
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row_of(&app, anna)));
+        assert!(
+            app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), row_of(&app, anna)))
+                .is_empty()
+        );
+
+        // Folded, the folder hides its chats; Space folds the current chat's heading.
+        app.toggle_group(&folder);
+        assert_eq!(app.visible_chats(), [anna]);
+        app.toggle_group(&folder);
+        app.select(boss);
+        app.focus = Focus::Chats;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.collapsed.contains(&folder));
+        app.collapsed.clear();
+
+        // z: only the current chat's heading open; again, all.
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.visible_chats(), [boss, team]);
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.visible_chats(), [boss, team, anna]);
+
+        // Renamed; dragged out on to the account; the last one out takes the folder along.
+        type_line(&mut app, "/rename-folder Рабочие дела → Работа");
+        assert_eq!(app.folders[0].name, "Работа");
+        screen(&mut app, 120, 20);
+        let account = Group::Account(me.clone());
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row_of(&app, team)));
+        app.on_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            heading(&app, &account),
+        ));
+        app.select(boss);
+        let saved = type_line(&mut app, "/folder");
+        assert!(
+            matches!(&saved[..], [Action::SaveFolders(f)] if f.is_empty()),
+            "{saved:?}"
+        );
+        assert!(app.folders.is_empty());
     }
 }

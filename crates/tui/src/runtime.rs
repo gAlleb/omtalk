@@ -193,6 +193,8 @@ enum Msg {
         url: String,
         image: image::DynamicImage,
     },
+    /// A line for the status bar, about no account in particular.
+    Status(String),
     /// What an address offers, for the services window.
     Listed {
         jid: Jid,
@@ -253,6 +255,15 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         config::IconSet::Text => crate::theme::TEXT_ICONS,
     };
     load_history(&mut app, &store, &jids);
+    app.folders = store.folders().map_err(|e| e.to_string())?;
+    // A chat put in a folder stays in the list, also before anyone wrote in it.
+    for folder in app.folders.clone() {
+        for (account, chat) in folder.chats {
+            if jids.contains(&account) && !app.chats.iter().any(|c| c.account == account && c.jid == chat) {
+                app.chat(&account, &chat, ChatKind::Direct);
+            }
+        }
+    }
     // Shared files in the history: from the cache, or fetched again.
     let mut urls: Vec<String> = app
         .chats
@@ -389,6 +400,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.media_done(&url, state);
         }
         Msg::Picture { .. } => {}
+        Msg::Status(text) => app.status = text,
         Msg::Listed { jid, node, listing } => {
             if let Some(services) = app.services.as_mut() {
                 services.listed(&jid, &node, listing);
@@ -789,6 +801,11 @@ async fn perform(action: Action, shared: Shared) {
                 chat: Some(jid),
                 text: "не видит ваш статус".into(),
             });
+        }
+        Action::SaveFolders(folders) => {
+            if let Err(e) = shared.store.save_folders(&folders) {
+                tell(Msg::Status(format!("папки не сохранились: {e}")));
+            }
         }
         Action::Devices { account, jid } => {
             let Some((_, omemo)) = get(&account) else { return };

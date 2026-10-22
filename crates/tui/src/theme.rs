@@ -64,9 +64,11 @@ pub struct Icons {
     /// Before a service and a command in the services window.
     pub service: &'static str,
     pub command: &'static str,
+    /// Before a folder's name in the chat list.
+    pub folder: &'static str,
 }
 
-/// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal.
+/// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal, U+F07B folder.
 pub const NERD: Icons = Icons {
     locked: "\u{f023} OMEMO",
     unlocked: "\u{f09c} без шифрования",
@@ -76,6 +78,7 @@ pub const NERD: Icons = Icons {
     file: "\u{f15b}",
     service: "\u{f233}",
     command: "\u{f120}",
+    folder: "\u{f07b}",
 };
 
 pub const TEXT_ICONS: Icons = Icons {
@@ -87,4 +90,5 @@ pub const TEXT_ICONS: Icons = Icons {
     file: "[файл]",
     service: "›",
     command: "$",
+    folder: "/",
 };
