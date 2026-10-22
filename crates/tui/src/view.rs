@@ -1528,6 +1528,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 tr!("/name title", "/name название"),
                 tr!("/invite address", "/invite адрес"),
                 tr!("/nick nick", "/nick ник"),
+                "/commands",
                 "/close",
             ] {
                 rows.push(TextLine::from(Span::styled(
@@ -5292,5 +5293,78 @@ mod tests {
         }
         let text = screen(&mut app, 90, 30);
         assert!(text.contains("user39@") && !text.contains("user00@"), "{text}");
+    }
+
+    #[test]
+    fn a_chats_commands_open_as_gajim_opens_them() {
+        use crate::services::{Outcome, Request};
+        use omtalk_xmpp::presence::{Online, State};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let browsed = |actions: &[Action]| match actions {
+            [
+                Action::Services {
+                    request: Request::Browse { jid, .. },
+                    ..
+                },
+            ] => jid.to_string(),
+            other => panic!("{other:?}"),
+        };
+
+        // A biboumi channel: its own commands, and back to its IRC server's.
+        let channel = app.chat(
+            &me,
+            &jid("#rust%irc.libera.chat@biboumi.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(channel);
+        assert_eq!(
+            browsed(&app.open_chat_commands()),
+            "#rust%irc.libera.chat@biboumi.home.org"
+        );
+        let back = app.services.as_mut().unwrap().go_back();
+        assert!(
+            matches!(&back, Outcome::Request(Request::Browse { jid, .. }, _) if jid.as_str() == "irc.libera.chat@biboumi.home.org"),
+            "{back:?}"
+        );
+
+        // A contact online: their client's commands, at its full address.
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.connection.insert(me.clone(), crate::app::Connection::Online);
+        app.online
+            .entry((me.clone(), jid("bob@home.org")))
+            .or_default()
+            .insert(
+                "gajim.x1".into(),
+                Online {
+                    account: me.clone(),
+                    resource: "gajim.x1".into(),
+                    state: Some(State::Online),
+                    client: "Gajim".into(),
+                    status: None,
+                },
+            );
+        assert_eq!(browsed(&app.open_chat_commands()), "bob@home.org/gajim.x1");
+
+        // The server channel, by the prefix and c: one's own server, as /services.
+        app.services = None;
+        let server = app.server_chat(&me);
+        app.select(server);
+        assert_eq!(
+            browsed(
+                &app.on_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    KeyModifiers::CONTROL,
+                ))
+                .into_iter()
+                .chain(app.on_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('c'),
+                    KeyModifiers::NONE
+                )))
+                .collect::<Vec<_>>()
+            ),
+            "home.org"
+        );
     }
 }

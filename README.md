@@ -131,7 +131,7 @@ switches focus.
 
 Commands: `/msg`, `/join`, `/leave`, `/add`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/reply`, `/keys`, `/upload`, `/settings`, `/close`, `/help`, `/quit`.
+`/name`, `/nick`, `/reply`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
 
 A chat is closed with `/close`, prefix+`w` or a middle click on it in the list: it leaves
 the list, its history stays, and it comes back by itself when someone writes in it.
@@ -278,7 +278,12 @@ opens a form (XEP-0004): text, password (hidden), checkbox, choice from a list, 
 values. Keys: `Enter` opens or goes to the next step, `←`/`Backspace` goes back, `Tab`
 goes to the next field, `Space` toggles a checkbox or choice, `Esc` cancels the command on
 the server and closes. Rows, fields and buttons work with the mouse. An administrator of
-their own server can manage it from here: users, passwords, modules, statistics. A result
+their own server can manage it from here: users, passwords, modules, statistics.
+
+A chat's own commands, as Gajim's "Execute command": `/commands` or prefix+`c`. A room's
+(a bridge's channel too), a contact's client's while it is online, the own server's from
+the server channel. In a biboumi channel (`#chan%irc.server@biboumi…`) `←` goes on to the
+IRC server's commands: port, TLS, password, nick, keeping the channel joined. A result
 with several items (XEP-0004 `<reported>`) is a table; the arrows scroll a long one.
 
 ## Testing against other clients: omtalk-cli

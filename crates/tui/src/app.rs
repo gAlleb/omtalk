@@ -567,6 +567,7 @@ pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
         "ключи OMEMO: отпечатки, доверие",
     ),
     ("p", "settings", "настройки"),
+    ("c", "this chat's commands", "команды этого чата"),
     (
         "w",
         "close the chat (a room is left)",
@@ -1531,6 +1532,7 @@ impl App {
             KeyCode::Char('s') => self.open_services(None),
             KeyCode::Char('e') => self.open_keys(None),
             KeyCode::Char('p') => self.open_settings(),
+            KeyCode::Char('c') => self.open_chat_commands(),
             KeyCode::Char('a') => self.reply_here(),
             KeyCode::Char('w') => match self.selected {
                 Some(index) => self.close_chat(index),
@@ -2007,6 +2009,7 @@ impl App {
             }
             ("/reply", _) => return self.reply_here(),
             ("/settings", _) => return self.open_settings(),
+            ("/commands", _) => return self.open_chat_commands(),
             ("/nick", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
                     let nick = line[name.len()..].trim().to_owned();
@@ -2707,6 +2710,47 @@ impl App {
         };
         let jid = jid.unwrap_or_else(|| Jid::from(account.domain().to_owned()));
         let (services, request) = Services::open(account, jid);
+        self.services = Some(services);
+        vec![Action::Services {
+            request,
+            title: String::new(),
+        }]
+    }
+
+    /// The commands of the open chat (Gajim's "Execute command"): a room's, a contact's
+    /// client's while one is online (else the contact's address), the own server's from
+    /// the server channel. A biboumi channel (`#chan%irc.server@biboumi`) leads back to
+    /// its IRC server's commands.
+    pub fn open_chat_commands(&mut self) -> Vec<Action> {
+        let Some(chat) = self.current() else {
+            return self.open_services(None);
+        };
+        let account = chat.account.clone();
+        let jid: Jid = match chat.kind {
+            ChatKind::Server => Jid::from(account.domain().to_owned()),
+            ChatKind::Room { .. } => chat.jid.clone().into(),
+            ChatKind::Direct => match self.clients(&account, &chat.jid).first() {
+                Some(client) => format!("{}/{}", chat.jid, client.resource)
+                    .parse()
+                    .unwrap_or_else(|_| chat.jid.clone().into()),
+                None => chat.jid.clone().into(),
+            },
+        };
+        let parent = chat
+            .is_room()
+            .then(|| {
+                chat.jid
+                    .node()?
+                    .as_str()
+                    .split_once('%')
+                    .map(|(_, server)| server.to_owned())
+            })
+            .flatten()
+            .and_then(|server| format!("{server}@{}", chat.jid.domain()).parse::<Jid>().ok());
+        let (mut services, request) = Services::open(account, jid);
+        if let Some(parent) = parent {
+            services = services.with_parent(parent);
+        }
         self.services = Some(services);
         vec![Action::Services {
             request,

@@ -119,6 +119,13 @@ impl Services {
         (services, request)
     }
 
+    /// Where "back" leads from the first place: for a biboumi channel, its IRC server,
+    /// whose commands set the connection (port, TLS, password, nick).
+    pub fn with_parent(mut self, parent: Jid) -> Self {
+        self.back.push((parent, None));
+        self
+    }
+
     pub fn rows(&self) -> usize {
         self.listing
             .as_ref()

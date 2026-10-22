@@ -98,6 +98,14 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/commands",
+        args: ["", ""],
+        about: [
+            "this chat's commands (a room's, a bridge's, a contact's client's)",
+            "команды этого чата (комнаты, моста, клиента собеседника)",
+        ],
+    },
+    Command {
         name: "/settings",
         args: ["", ""],
         about: ["settings", "настройки"],
