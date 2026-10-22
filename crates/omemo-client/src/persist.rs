@@ -10,6 +10,8 @@ pub trait Persist: Send + Sync {
     fn identity(&self, jid: &BareJid, device: DeviceId, key: &[u8; 32]) -> Result<(), PersistError>;
     /// The last message id read from `archive`, so the next catch-up starts after it.
     fn archive_position(&self, archive: &BareJid, id: &str) -> Result<(), PersistError>;
+    /// No position for `archive`: the next catch-up starts from its newest message.
+    fn forget_archive_position(&self, archive: &BareJid) -> Result<(), PersistError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +32,9 @@ impl Persist for Ephemeral {
         Ok(())
     }
     fn archive_position(&self, _: &BareJid, _: &str) -> Result<(), PersistError> {
+        Ok(())
+    }
+    fn forget_archive_position(&self, _: &BareJid) -> Result<(), PersistError> {
         Ok(())
     }
 }

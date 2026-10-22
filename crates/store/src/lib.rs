@@ -227,6 +227,13 @@ impl Persist for AccountOmemo {
         )
     }
 
+    fn forget_archive_position(&self, archive: &BareJid) -> Result<(), PersistError> {
+        self.write(
+            "DELETE FROM archive_positions WHERE account = ?1 AND archive = ?2",
+            params![self.account.as_str(), archive.as_str()],
+        )
+    }
+
     fn identity(&self, jid: &BareJid, device: DeviceId, key: &[u8; 32]) -> Result<(), PersistError> {
         self.write(
             "INSERT OR REPLACE INTO omemo_identities (account, jid, device, key) VALUES (?1, ?2, ?3, ?4)",

@@ -1,0 +1,17 @@
+[package]
+name = "omtalk-media"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes-gcm = "0.11.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

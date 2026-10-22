@@ -58,6 +58,9 @@ pub struct Icons {
     pub plain_mark: &'static str,
     /// After a chat's name in the list when its OMEMO is off.
     pub chat_unlocked: &'static str,
+    /// Before a shared picture's or file's name.
+    pub picture: &'static str,
+    pub file: &'static str,
 }
 
 /// U+F023 lock, U+F09C unlock.
@@ -66,6 +69,8 @@ pub const NERD: Icons = Icons {
     unlocked: "\u{f09c} без шифрования",
     plain_mark: "\u{f09c} без шифрования · ",
     chat_unlocked: " \u{f09c}",
+    picture: "\u{f03e}",
+    file: "\u{f15b}",
 };
 
 pub const TEXT_ICONS: Icons = Icons {
@@ -73,4 +78,6 @@ pub const TEXT_ICONS: Icons = Icons {
     unlocked: "[без шифрования]",
     plain_mark: "[без шифрования] · ",
     chat_unlocked: " [откр.]",
+    picture: "[картинка]",
+    file: "[файл]",
 };

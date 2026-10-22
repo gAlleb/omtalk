@@ -17,12 +17,13 @@ use omtalk_store::{Store, StoredMessage};
 use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Server, muc};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use xmpp_parsers::message::{Lang, Message};
 
-use crate::app::{Action, App, ChatKind, DeviceRow, Line};
+use crate::app::{Action, App, ChatKind, DeviceRow, Line, MediaState};
 use crate::config::{self, AccountEntry, Config};
-use crate::view;
+use crate::view::{self, Pictures};
 
 /// How many messages of each chat are loaded on start.
 const HISTORY: usize = 300;
@@ -180,11 +181,25 @@ enum Msg {
         real: Option<BareJid>,
         present: bool,
     },
+    /// A shared file was fetched (or not).
+    Media {
+        url: String,
+        state: MediaState,
+    },
+    /// A fetched picture, decoded and ready to be drawn.
+    Picture {
+        url: String,
+        image: image::DynamicImage,
+    },
 }
 
 #[derive(Clone)]
 struct Shared {
     accounts: HashMap<BareJid, (Account, Arc<Omemo>)>,
+    /// Where fetched files are kept.
+    cache: PathBuf,
+    /// The program that shows a file outside the terminal.
+    viewer: String,
     store: Store,
     tx: mpsc::UnboundedSender<Msg>,
 }
@@ -199,6 +214,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut shared = Shared {
         accounts: HashMap::new(),
+        cache: config::cache_dir().join("media"),
+        viewer: options.config.ui.viewer.clone(),
         store: store.clone(),
         tx,
     };
@@ -222,6 +239,17 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         config::IconSet::Text => crate::theme::TEXT_ICONS,
     };
     load_history(&mut app, &store, &jids);
+    // Shared files in the history: from the cache, or fetched again.
+    let mut urls: Vec<String> = app
+        .chats
+        .iter()
+        .flat_map(|c| c.lines.iter())
+        .filter_map(|l| l.media.as_ref().map(|m| m.link.clone()))
+        .collect();
+    urls.dedup();
+    for link in urls {
+        tokio::spawn(fetch_media(link, shared.clone()));
+    }
     tokio::spawn(pump(events, shared.clone()));
     if !app.chats.is_empty() {
         // Opening the first chat asks for what its panes show (the peer's devices).
@@ -230,12 +258,16 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
     }
 
+    // Asks the terminal what graphics it speaks (kitty, sixel), before anything else reads
+    // its answers; plain block characters where it speaks none, as Alacritty.
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let mut pictures = Pictures::new();
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| e.to_string())?;
     terminal.clear().map_err(|e| e.to_string())?;
     let mut input = EventStream::new();
     loop {
         terminal
-            .draw(|frame| view::draw(frame, &mut app))
+            .draw(|frame| view::draw(frame, &mut app, &mut pictures))
             .map_err(|e| e.to_string())?;
         let actions = tokio::select! {
             event = input.next() => match event {
@@ -245,10 +277,14 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 Some(Err(_)) | None => break,
             },
             Some(msg) = rx.recv() => {
-                apply(&mut app, msg);
                 // Drain what else is waiting, then draw once.
-                while let Ok(msg) = rx.try_recv() {
-                    apply(&mut app, msg);
+                let mut next = Some(msg);
+                while let Some(msg) = next {
+                    match msg {
+                        Msg::Picture { url, image } => drop(pictures.insert(url, picker.new_resize_protocol(image))),
+                        msg => apply(&mut app, msg, &shared),
+                    }
+                    next = rx.try_recv().ok();
                 }
                 Vec::new()
             }
@@ -293,31 +329,52 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
                     (None, true) => "я".to_owned(),
                     (None, false) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
                 };
-                app.chats[index].lines.push(Line {
-                    at: message.at,
+                app.chats[index].lines.push(Line::message(
+                    message.at,
                     who,
-                    text: message.body,
-                    encrypted: message.encrypted,
-                    outgoing: message.outgoing,
-                    notice: false,
-                });
+                    message.body,
+                    message.encrypted,
+                    message.outgoing,
+                ));
             }
         }
     }
 }
 
-fn apply(app: &mut App, msg: Msg) {
+fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
-        Msg::Incoming { account, message, at } => app.on_incoming(&account, &message, at),
+        Msg::Incoming { account, message, at } => {
+            app.on_incoming(&account, &message, at);
+            if let Some(text) = &message.text {
+                fetch_if_media(text, shared);
+            }
+        }
         Msg::Line {
             account,
             chat,
             kind,
             line,
         } => {
+            fetch_if_media(&line.text, shared);
             let index = app.chat(&account, &chat, kind);
             app.push(index, line);
         }
+        Msg::Media { url, state } => {
+            // A picture is decoded aside: large ones take a moment.
+            if let MediaState::Ready(path) = &state
+                && (omtalk_media::Media::Plain { url: url.clone() }).is_image()
+            {
+                let (path, url, tx) = (path.clone(), url.clone(), shared.tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    let reader = image::ImageReader::open(&path).and_then(|r| r.with_guessed_format());
+                    if let Ok(Ok(image)) = reader.map(|r| r.decode()) {
+                        let _ = tx.send(Msg::Picture { url, image });
+                    }
+                });
+            }
+            app.media_done(&url, state);
+        }
+        Msg::Picture { .. } => {}
         Msg::Notice { account, chat, text } => {
             let index = chat.map(|chat| app.chat(&account, &chat, ChatKind::Direct));
             app.notice(index, text, now());
@@ -465,6 +522,13 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
     }
     match omemo.catch_up().await {
         Ok(caught) => {
+            if caught.position_lost {
+                tell(Msg::Notice {
+                    account: account.clone(),
+                    chat: None,
+                    text: "часть сообщений за время отсутствия недоступна: сервер их уже не хранит".into(),
+                });
+            }
             for message in caught.messages {
                 deliver(&shared, &account, message);
             }
@@ -499,6 +563,13 @@ async fn join(
             });
             match omemo.catch_up_room(&room).await {
                 Ok(caught) => {
+                    if caught.position_lost {
+                        tell(Msg::Notice {
+                            account: account.clone(),
+                            chat: Some(room.clone()),
+                            text: "часть сообщений комнаты за время отсутствия недоступна: сервер их уже не хранит".into(),
+                        });
+                    }
                     for message in caught.messages {
                         deliver(shared, account, message);
                     }
@@ -684,19 +755,28 @@ async fn perform(action: Action, shared: Shared) {
                 }),
             }
         }
+        Action::Open(path) => {
+            // Detached and silent: the viewer must not write over the interface.
+            let opened = std::process::Command::new(&shared.viewer)
+                .arg(&path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            if let Err(e) = opened {
+                tell(Msg::Notice {
+                    account: BareJid::new("omtalk@localhost").unwrap(),
+                    chat: None,
+                    text: format!("{}: {e}", shared.viewer),
+                });
+            }
+        }
         Action::Quit => {}
     }
 }
 
 fn own_line(text: &str, encrypted: bool) -> Line {
-    Line {
-        at: now(),
-        who: "я".into(),
-        text: text.to_owned(),
-        encrypted,
-        outgoing: true,
-        notice: false,
-    }
+    Line::message(now(), "я".into(), text.to_owned(), encrypted, true)
 }
 
 fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encrypted: bool) {
@@ -712,4 +792,25 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encr
             at: now(),
         },
     );
+}
+
+fn fetch_if_media(text: &str, shared: &Shared) {
+    if omtalk_media::Media::from_text(text).is_some() {
+        tokio::spawn(fetch_media(text.trim().to_owned(), shared.clone()));
+    }
+}
+
+/// Fetches (and decrypts) a shared file into the cache, and tells the interface.
+async fn fetch_media(link: String, shared: Shared) {
+    let Some(media) = omtalk_media::Media::from_text(&link) else {
+        return;
+    };
+    let state = match media.fetch(&shared.cache).await {
+        Ok(path) => MediaState::Ready(path),
+        Err(e) => MediaState::Failed(e.to_string()),
+    };
+    let _ = shared.tx.send(Msg::Media {
+        url: media.url().to_owned(),
+        state,
+    });
 }

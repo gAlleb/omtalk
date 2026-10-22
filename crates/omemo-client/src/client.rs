@@ -90,6 +90,9 @@ pub struct CatchUp {
     pub messages: Vec<Incoming>,
     /// Archived messages addressed to this device that did not decrypt, by archive id.
     pub failed: Vec<(String, Error)>,
+    /// Where this device stopped is no longer in the archive (expired, or the server
+    /// lost it): messages from then until now could not be read.
+    pub position_lost: bool,
 }
 
 /// Which devices a message reached.
@@ -336,10 +339,30 @@ impl Omemo {
             return Ok(caught);
         }
         loop {
-            let page = self
+            let page = match self
                 .account
                 .archive_after(room, after.as_deref(), ARCHIVE_PAGE)
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                // The position is gone from the archive: expired, or the server lost
+                // its data. Everything since cannot be found; go on from now, and say so.
+                Err(omtalk_xmpp::Error::Stanza(e))
+                    if e.defined_condition == omtalk_xmpp::stanza_error::DefinedCondition::ItemNotFound =>
+                {
+                    match self.account.archive_newest(room).await? {
+                        Some(newest) => self.set_archive_position(&archive, &newest).await?,
+                        // An empty archive: nothing to miss; next time starts afresh.
+                        None => {
+                            self.persist.forget_archive_position(&archive)?;
+                            self.state.lock().await.archive_positions.remove(&archive);
+                        }
+                    }
+                    caught.position_lost = true;
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            };
             for archived in page.messages {
                 let envelope = match room {
                     None => Ok(envelope::open_archived(&own, archived.message)),

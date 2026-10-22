@@ -1,5 +1,8 @@
 //! Draws the model, and remembers where everything went, for the mouse.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use chrono::{Local, TimeZone};
 use crossterm::event::KeyModifiers;
 use ratatui::Frame;
@@ -7,16 +10,25 @@ use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Areas, Chat, ChatKind, Focus, Line};
+use crate::app::{App, Areas, Chat, ChatKind, Focus, Line, MediaState};
 use crate::theme;
 
 /// Narrower than this, the chat list folds away; the participants pane even earlier.
 const FOLD_LEFT_BELOW: u16 = 50;
 const FOLD_RIGHT_BELOW: u16 = 90;
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+/// Fetched pictures, by link, ready for the terminal's graphics.
+pub type Pictures = HashMap<String, StatefulProtocol>;
+
+/// Rows a picture takes in the conversation, and its widest.
+const PICTURE_ROWS: usize = 10;
+const PICTURE_WIDTH: u16 = 48;
+
+pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     let area = frame.area();
     app.areas = Areas {
         screen: area,
@@ -50,7 +62,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         strip(frame, left, "›");
         app.areas.show_left = Some(left);
     }
-    center_pane(frame, app, center);
+    center_pane(frame, app, center, pictures);
     if show_right {
         side(frame, app, right);
     } else {
@@ -158,7 +170,7 @@ fn chat_row(chat: &Chat, selected: bool, width: u16, icons: theme::Icons) -> Par
     .style(base)
 }
 
-fn center_pane(frame: &mut Frame, app: &mut App, area: Rect) {
+fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
     let [messages, input] = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
     app.areas.messages = messages;
     app.areas.input = input;
@@ -190,7 +202,8 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.selected {
         Some(index) => {
             let width = inner.width as usize;
-            let rows = message_rows(&app.chats[index].lines, width, app.icons);
+            let ready = |url: &str| pictures.contains_key(url);
+            let rows = message_rows(&app.chats[index].lines, width, app.icons, &ready);
             let height = inner.height as usize;
             let max_scroll = rows.len().saturating_sub(height);
             let chat = &mut app.chats[index];
@@ -198,10 +211,43 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             let end = rows.len() - chat.scroll;
             let start = end.saturating_sub(height);
             // Newest at the bottom, like every chat; a short history sits low too.
-            let shown: Vec<_> = rows[start..end].to_vec();
+            let shown = &rows[start..end];
             let top = inner.y + (height - shown.len()) as u16;
+            let mut texts = Vec::with_capacity(shown.len());
+            for (offset, row) in shown.iter().enumerate() {
+                let y = top + offset as u16;
+                let mut text = row.text.clone();
+                if let Some(picture) = &row.picture {
+                    // A picture is drawn whole from its first row, or not at all: when
+                    // scrolled half out of sight, its first visible row names it.
+                    let first_visible = picture.row == 0 || offset == 0;
+                    let whole = picture.row == 0 && offset + PICTURE_ROWS <= shown.len();
+                    match pictures.get_mut(&picture.url) {
+                        Some(protocol) if whole => {
+                            let width = PICTURE_WIDTH.min(inner.width.saturating_sub(2));
+                            let place = Rect::new(inner.x + 2, y, width, PICTURE_ROWS as u16);
+                            frame.render_stateful_widget(StatefulImage::default(), place, protocol);
+                            if let Some(path) = &row.open {
+                                app.areas.files.push((place, path.clone()));
+                            }
+                        }
+                        _ if first_visible => {
+                            text = TextLine::from(Span::styled(
+                                format!("  {} — прокрутите, чтобы увидеть", picture.name),
+                                Style::default().fg(theme::DIM),
+                            ));
+                        }
+                        _ => {}
+                    }
+                } else if let Some(path) = &row.open {
+                    app.areas
+                        .files
+                        .push((Rect::new(inner.x, y, inner.width, 1), path.clone()));
+                }
+                texts.push(text);
+            }
             frame.render_widget(
-                Paragraph::new(shown),
+                Paragraph::new(texts),
                 Rect {
                     y: top,
                     height: inner.bottom() - top,
@@ -248,7 +294,40 @@ fn empty_state(frame: &mut Frame, area: Rect) {
 
 /// The chat as rows of exactly `width` cells at most: day separators, a header where a
 /// new sender (or a pause) starts, wrapped text below it.
-pub fn message_rows(lines: &[Line], width: usize, icons: theme::Icons) -> Vec<TextLine<'static>> {
+/// One row of the conversation as drawn.
+#[derive(Debug, Clone)]
+pub struct Row {
+    pub text: TextLine<'static>,
+    /// A fetched file a click on this row opens.
+    pub open: Option<PathBuf>,
+    pub picture: Option<PictureRow>,
+}
+
+/// One of the rows a picture covers.
+#[derive(Debug, Clone)]
+pub struct PictureRow {
+    pub url: String,
+    pub name: String,
+    /// Which of its rows, from the top.
+    pub row: usize,
+}
+
+impl From<TextLine<'static>> for Row {
+    fn from(text: TextLine<'static>) -> Self {
+        Self {
+            text,
+            open: None,
+            picture: None,
+        }
+    }
+}
+
+pub fn message_rows(
+    lines: &[Line],
+    width: usize,
+    icons: theme::Icons,
+    ready: &dyn Fn(&str) -> bool,
+) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut last_day = None;
     let mut last_who: Option<(&str, bool, i64)> = None;
@@ -260,14 +339,17 @@ pub fn message_rows(lines: &[Line], width: usize, icons: theme::Icons) -> Vec<Te
             if let Some(t) = time {
                 let label = format!(" {} ", t.format("%-d.%m.%Y"));
                 let side = width.saturating_sub(label.width()) / 2;
-                rows.push(TextLine::from(Span::styled(
-                    format!(
-                        "{}{label}{}",
-                        "─".repeat(side),
-                        "─".repeat(width.saturating_sub(side + label.width()))
-                    ),
-                    Style::default().fg(theme::BORDER),
-                )));
+                rows.push(
+                    TextLine::from(Span::styled(
+                        format!(
+                            "{}{label}{}",
+                            "─".repeat(side),
+                            "─".repeat(width.saturating_sub(side + label.width()))
+                        ),
+                        Style::default().fg(theme::BORDER),
+                    ))
+                    .into(),
+                );
             }
             last_day = day;
             last_who = None;
@@ -275,10 +357,13 @@ pub fn message_rows(lines: &[Line], width: usize, icons: theme::Icons) -> Vec<Te
         let clock = time.map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
         if line.notice {
             for text in wrap(&line.text, width.saturating_sub(4).max(1)) {
-                rows.push(TextLine::from(Span::styled(
-                    format!("  · {text}"),
-                    Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC),
-                )));
+                rows.push(
+                    TextLine::from(Span::styled(
+                        format!("  · {text}"),
+                        Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC),
+                    ))
+                    .into(),
+                );
             }
             last_who = None;
             continue;
@@ -292,7 +377,7 @@ pub fn message_rows(lines: &[Line], width: usize, icons: theme::Icons) -> Vec<Te
             } else {
                 theme::nick(&line.who)
             };
-            rows.push(TextLine::from(vec![
+            rows.push(Row::from(TextLine::from(vec![
                 Span::styled(
                     if line.who.is_empty() {
                         "?".to_owned()
@@ -302,11 +387,58 @@ pub fn message_rows(lines: &[Line], width: usize, icons: theme::Icons) -> Vec<Te
                     who_style,
                 ),
                 Span::styled(format!("  {clock}"), Style::default().fg(theme::DIM)),
-            ]));
+            ])));
         }
         last_who = Some((&line.who, line.outgoing, line.at));
-        let mut first = true;
         let marker = icons.plain_mark;
+        if let Some(slot) = &line.media {
+            let path = match &slot.state {
+                MediaState::Ready(path) => Some(path.clone()),
+                _ => None,
+            };
+            if slot.image && path.is_some() && ready(&slot.url) {
+                for row in 0..PICTURE_ROWS {
+                    rows.push(Row {
+                        text: TextLine::from(""),
+                        open: path.clone(),
+                        picture: Some(PictureRow {
+                            url: slot.url.clone(),
+                            name: slot.name.clone(),
+                            row,
+                        }),
+                    });
+                }
+                continue;
+            }
+            let (icon, state, colour) = match &slot.state {
+                MediaState::Loading => (
+                    if slot.image { icons.picture } else { icons.file },
+                    "загружается…".to_owned(),
+                    theme::DIM,
+                ),
+                MediaState::Ready(_) if slot.image => {
+                    (icons.picture, "открыть — клик".to_owned(), theme::ACCENT)
+                }
+                MediaState::Ready(_) => (icons.file, "открыть — клик".to_owned(), theme::ACCENT),
+                MediaState::Failed(e) => (icons.file, format!("не загрузилось: {e}"), theme::WARN),
+            };
+            let mut spans = vec![Span::raw("  ")];
+            if !line.encrypted {
+                spans.push(Span::styled(marker, Style::default().fg(theme::WARN)));
+            }
+            spans.push(Span::styled(
+                format!("{icon} {} ", slot.name),
+                Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(state, Style::default().fg(colour)));
+            rows.push(Row {
+                text: TextLine::from(spans),
+                open: path,
+                picture: None,
+            });
+            continue;
+        }
+        let mut first = true;
         let text_width = if line.encrypted {
             body_width
         } else {
@@ -320,7 +452,7 @@ pub fn message_rows(lines: &[Line], width: usize, icons: theme::Icons) -> Vec<Te
                 spans.push(Span::raw(" ".repeat(marker.width())));
             }
             spans.push(Span::styled(text, Style::default().fg(theme::TEXT)));
-            rows.push(TextLine::from(spans));
+            rows.push(TextLine::from(spans).into());
             first = false;
         }
     }
@@ -562,7 +694,10 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
     if !app.status.is_empty() {
-        left.push(Span::styled(app.status.clone(), Style::default().fg(theme::WARN)));
+        left.push(Span::styled(
+            format!("{}  ", app.status),
+            Style::default().fg(theme::WARN),
+        ));
     }
     let hints_width = hints.width() as u16;
     let [left_area, right_area] =
@@ -586,7 +721,7 @@ mod tests {
 
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal.draw(|f| draw(f, app, &mut Pictures::new())).unwrap();
         let buffer = terminal.backend().buffer().clone();
         // A wide character fills two cells; the second holds nothing to read.
         (0..height)
@@ -609,14 +744,7 @@ mod tests {
         let me = jid("me@example.org");
         let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
         app.select(bob);
-        let line = |text: &str, at, encrypted| Line {
-            at,
-            who: "bob".into(),
-            text: text.into(),
-            encrypted,
-            outgoing: false,
-            notice: false,
-        };
+        let line = |text: &str, at, encrypted| Line::message(at, "bob".into(), text.into(), encrypted, false);
         app.push(bob, line("привет", 1_700_000_000, true));
         app.push(bob, line("это без шифрования", 1_700_000_010, false));
         app
@@ -679,5 +807,47 @@ mod tests {
         let row: String = text.lines().nth(button.y as usize).unwrap().chars().collect();
         assert!(row.contains(theme::NERD.locked));
         assert!(button.width >= theme::NERD.locked.width() as u16);
+    }
+
+    #[test]
+    fn a_fetched_picture_is_drawn_in_the_chat_and_clickable() {
+        let mut app = App::new(vec![jid("me@example.org")], Modifier::Ctrl, 26, 30);
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        app.push(
+            bob,
+            Line::message(
+                1_700_000_000,
+                "bob".into(),
+                "https://example.org/cat.png".into(),
+                false,
+                false,
+            ),
+        );
+
+        // Not fetched yet: the line names the file and says so.
+        let text = screen(&mut app, 120, 24);
+        assert!(text.contains("cat.png") && text.contains("загружается"), "{text}");
+
+        app.media_done(
+            "https://example.org/cat.png",
+            crate::app::MediaState::Ready("/cache/cat.png".into()),
+        );
+        let mut pictures = Pictures::new();
+        let image = image::DynamicImage::new_rgb8(8, 8);
+        pictures.insert(
+            "https://example.org/cat.png".into(),
+            ratatui_image::picker::Picker::halfblocks().new_resize_protocol(image),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, &mut pictures)).unwrap();
+        let (place, path) = app.areas.files.first().expect("the picture is clickable");
+        assert_eq!(path.to_str(), Some("/cache/cat.png"));
+        assert_eq!(place.height as usize, PICTURE_ROWS);
+        assert!(
+            app.areas.messages.contains(place.as_position()),
+            "inside the conversation"
+        );
     }
 }

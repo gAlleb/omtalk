@@ -144,3 +144,33 @@ async fn closed_laptop_reads_what_the_room_said_meanwhile() {
 
     stop_all([laptop, phone, bob]).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_position_the_archive_no_longer_has_is_reported_and_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("laptop.db");
+    fresh_device_lists(&["u05"]).await;
+    let laptop = Device::start_stored("u05", &db).await;
+    laptop.stop().await;
+
+    // The server lost its archive, or it expired: the stored position names nothing.
+    let store = omtalk_store::Store::open(&db).unwrap();
+    let account: BareJid = "u05@localhost".parse().unwrap();
+    store
+        .omemo(&account)
+        .archive_position(&account, "no-such-archive-id")
+        .unwrap();
+    drop(store);
+
+    // Starting again (which catches up) must not fail on every start: the dead position
+    // is dropped or replaced, and catching up works again.
+    let laptop = Device::start_stored("u05", &db).await;
+    let position = laptop
+        .omemo
+        .with_state(|s| s.archive_positions.get(&account).cloned())
+        .await;
+    assert_ne!(position.as_deref(), Some("no-such-archive-id"));
+    let again = laptop.omemo.catch_up().await.unwrap();
+    assert!(!again.position_lost, "the position works again afterwards");
+    stop_all([laptop]).await;
+}

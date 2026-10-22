@@ -10,6 +10,7 @@
 //! [ui]
 //! modifier = "ctrl"     # ctrl, alt or super: the key for every shortcut
 //! icons = "nerd"        # nerd (Nerd Font glyphs) or text
+//! viewer = "xdg-open"   # opens a shared file on click
 //! left = 26             # width of the chat list
 //! right = 30            # width of the participants pane
 //! ```
@@ -67,6 +68,8 @@ pub struct Ui {
     pub icons: IconSet,
     pub left: u16,
     pub right: u16,
+    /// The program a click on a shared file opens it with.
+    pub viewer: String,
 }
 
 impl Default for Ui {
@@ -76,6 +79,7 @@ impl Default for Ui {
             icons: IconSet::Nerd,
             left: 26,
             right: 30,
+            viewer: "xdg-open".into(),
         }
     }
 }
@@ -84,6 +88,14 @@ pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("omtalk")
+}
+
+pub fn cache_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("omtalk")
 }

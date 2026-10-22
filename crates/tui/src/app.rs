@@ -3,6 +3,7 @@
 //! runtime carries out. That keeps all of it testable.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use omtalk_omemo::{Direction, Incoming};
@@ -27,6 +28,48 @@ pub struct Line {
     pub outgoing: bool,
     /// Said by omtalk itself (an error, a request), not by anyone in the chat.
     pub notice: bool,
+    /// A shared file the message is, if it is one.
+    pub media: Option<MediaSlot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSlot {
+    /// Where the file is; the same for every copy of the message.
+    pub url: String,
+    /// The link as sent: for `aesgcm://`, it carries the key.
+    pub link: String,
+    pub name: String,
+    pub image: bool,
+    pub state: MediaState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaState {
+    Loading,
+    Ready(PathBuf),
+    Failed(String),
+}
+
+impl Line {
+    /// A message line, with its media slot filled in if the text is a shared file.
+    pub fn message(at: i64, who: String, text: String, encrypted: bool, outgoing: bool) -> Self {
+        let media = omtalk_media::Media::from_text(&text).map(|media| MediaSlot {
+            url: media.url().to_owned(),
+            link: text.trim().to_owned(),
+            name: media.name(),
+            image: media.is_image(),
+            state: MediaState::Loading,
+        });
+        Self {
+            at,
+            who,
+            text,
+            encrypted,
+            outgoing,
+            notice: false,
+            media,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +152,8 @@ pub struct Areas {
     pub show_left: Option<Rect>,
     pub show_right: Option<Rect>,
     pub chat_rows: Vec<(Rect, usize)>,
+    /// Pictures and file lines, to open with a click.
+    pub files: Vec<(Rect, PathBuf)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +192,8 @@ pub enum Action {
         account: BareJid,
         jid: BareJid,
     },
+    /// Show a fetched file in the outside viewer.
+    Open(PathBuf),
     Quit,
 }
 
@@ -274,19 +321,24 @@ impl App {
             (None, Direction::Outgoing) => "я".to_owned(),
             (None, Direction::Incoming) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
         };
-        self.push(
-            index,
-            Line {
-                at,
-                who,
-                text: text.clone(),
-                encrypted: message.encrypted,
-                outgoing: message.direction == Direction::Outgoing,
-                notice: false,
-            },
+        let line = Line::message(
+            at,
+            who,
+            text.clone(),
+            message.encrypted,
+            message.direction == Direction::Outgoing,
         );
+        self.push(index, line);
     }
 
+    /// The fetch of a shared file ended; every line showing that link learns how.
+    pub fn media_done(&mut self, url: &str, state: MediaState) {
+        for line in self.chats.iter_mut().flat_map(|c| c.lines.iter_mut()) {
+            if let Some(slot) = line.media.as_mut().filter(|s| s.url == url) {
+                slot.state = state.clone();
+            }
+        }
+    }
     /// A line from omtalk itself, in a chat or (without one) in the status line.
     pub fn notice(&mut self, chat: Option<usize>, text: impl Into<String>, at: i64) {
         let text = text.into();
@@ -300,6 +352,7 @@ impl App {
                     encrypted: true,
                     outgoing: false,
                     notice: true,
+                    media: None,
                 },
             ),
             _ => self.status = text,
@@ -583,6 +636,8 @@ impl App {
                     self.show_left = true;
                 } else if inside_opt(self.areas.show_right) {
                     self.show_right = true;
+                } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
+                    return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
                     self.toggle_omemo();
                 } else if let Some(&(_, index)) = self.areas.chat_rows.iter().find(|(r, _)| inside(*r)) {
@@ -789,5 +844,39 @@ mod tests {
         assert!(!app.chats[bob].omemo);
         app.on_mouse(click);
         assert!(app.chats[bob].omemo);
+    }
+
+    #[test]
+    fn a_link_alone_is_a_file_and_clicking_its_picture_opens_it() {
+        let line = Line::message(0, "bob".into(), "aesgcm://h/p.png#3b78aa076c56fa93bab4bb7e75794bf3369293c49bee6dcd924132244217e9c10dfcb540a3a36418de5a95e2".into(), true, false);
+        let slot = line.media.as_ref().unwrap();
+        assert_eq!(
+            (slot.name.as_str(), slot.image, &slot.state),
+            ("p.png", true, &MediaState::Loading)
+        );
+        assert!(
+            Line::message(0, "bob".into(), "просто текст".into(), true, false)
+                .media
+                .is_none()
+        );
+
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.push(bob, line);
+        app.media_done("https://h/p.png", MediaState::Ready("/cache/p.png".into()));
+        assert_eq!(
+            app.chats[bob].lines[0].media.as_ref().unwrap().state,
+            MediaState::Ready("/cache/p.png".into())
+        );
+
+        app.areas.files = vec![(Rect::new(30, 10, 40, 8), "/cache/p.png".into())];
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 35,
+            row: 12,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(app.on_mouse(click), [Action::Open("/cache/p.png".into())]);
     }
 }
