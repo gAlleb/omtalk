@@ -17,6 +17,8 @@ pub const MAX_SIZE: u64 = 50 * 1024 * 1024;
 pub enum Error {
     #[error("download failed: {0}")]
     Download(String),
+    #[error("upload failed: {0}")]
+    Upload(String),
     #[error("the file is larger than {} MB", MAX_SIZE / 1024 / 1024)]
     TooLarge,
     #[error("the file does not decrypt with the key of the link")]
@@ -188,6 +190,81 @@ pub fn decrypt(data: &[u8], iv: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, Error>
     result.map_err(|_| Error::Decrypt)?;
     Ok(plain)
 }
+
+/// A file encrypted for sharing in an encrypted chat: AES-256-GCM under a fresh key and a
+/// 12-byte IV, the tag at the end, as XEP-0454 has it and every OMEMO client reads.
+pub struct Sealed {
+    pub data: Vec<u8>,
+    pub iv: [u8; 12],
+    pub key: [u8; 32],
+}
+
+pub fn encrypt(plain: &[u8]) -> Sealed {
+    let mut iv = [0u8; 12];
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut iv).expect("system randomness");
+    getrandom::fill(&mut key).expect("system randomness");
+    let mut data = plain.to_vec();
+    let tag = AesGcm::<Aes256, U12>::new((&key).into())
+        .encrypt_inout_detached((&iv).into(), &[], data.as_mut_slice().into())
+        .expect("AES-GCM takes any length a file has");
+    data.extend_from_slice(&tag);
+    Sealed { data, iv, key }
+}
+
+/// The link to share for a sealed file put at `url` (https://…): the scheme says it is
+/// encrypted, the fragment (never sent to a server) carries IV and key.
+pub fn aesgcm_link(url: &str, iv: &[u8; 12], key: &[u8; 32]) -> String {
+    let location = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let secret: String = iv.iter().chain(key).map(|b| format!("{b:02x}")).collect();
+    format!("aesgcm://{location}#{secret}")
+}
+
+/// PUTs `data` to `url`, as an upload slot says; `progress` hears how much went so far.
+pub async fn upload(
+    url: &str,
+    headers: &[(String, String)],
+    data: Vec<u8>,
+    content_type: Option<&str>,
+    progress: impl Fn(u64, u64) + Send + Sync + 'static,
+) -> Result<(), Error> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder()
+        .https_only(!cfg!(test) && !url.starts_with("http://127.0.0.1"))
+        .build()
+        .map_err(|e| Error::Upload(e.to_string()))?;
+    let total = data.len() as u64;
+    let data = bytes::Bytes::from(data);
+    // In pieces, so that the progress moves as they go out.
+    let pieces: Vec<bytes::Bytes> = (0..data.len())
+        .step_by(UPLOAD_PIECE)
+        .map(|at| data.slice(at..(at + UPLOAD_PIECE).min(data.len())))
+        .collect();
+    let mut sent = 0u64;
+    let stream = futures_util::stream::iter(pieces.into_iter().map(move |piece| {
+        sent += piece.len() as u64;
+        progress(sent, total);
+        Ok::<_, std::io::Error>(piece)
+    }));
+    let mut request = client
+        .put(url)
+        .header(reqwest::header::CONTENT_LENGTH, total)
+        .body(reqwest::Body::wrap_stream(stream));
+    if let Some(content_type) = content_type {
+        request = request.header(reqwest::header::CONTENT_TYPE, content_type);
+    }
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    request
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| Error::Upload(e.to_string()))?;
+    Ok(())
+}
+
+const UPLOAD_PIECE: usize = 64 * 1024;
 
 fn hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {

@@ -32,6 +32,8 @@ pub enum ChatKind {
 /// How far one's own message has got.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Delivery {
+    /// A file going up to the server, this far (percent).
+    Uploading(u8),
     Sending,
     /// The server has it (for a room: the room sent it back).
     Sent,
@@ -214,6 +216,8 @@ pub struct Areas {
     pub messages: Rect,
     pub input: Rect,
     pub omemo_button: Rect,
+    /// The paperclip: send a file.
+    pub attach_button: Rect,
     pub hide_left: Option<Rect>,
     pub hide_right: Option<Rect>,
     /// Thin strips that bring a hidden pane back.
@@ -290,6 +294,16 @@ pub enum Action {
         marker: Option<String>,
         archive_id: Option<String>,
     },
+    /// Send the file at `path` to the chat: up to the server's upload service (sealed
+    /// first in an encrypted chat), then its link as a message under `id`.
+    Upload {
+        account: BareJid,
+        to: BareJid,
+        room: bool,
+        path: PathBuf,
+        encrypted: bool,
+        id: String,
+    },
     /// The chat was closed: keep it so, until someone writes in it.
     CloseChat {
         account: BareJid,
@@ -309,6 +323,53 @@ pub enum Action {
 }
 
 /// The keys after the leader, as the list shows them; [`App::shortcut`] does them.
+/// `~/x` as the home's `x`; `None` for nothing.
+pub fn expand_home(path: &str) -> Option<PathBuf> {
+    let path = path.trim().trim_matches(['\'', '"']);
+    if path.is_empty() {
+        return None;
+    }
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest)),
+        None => Some(PathBuf::from(path)),
+    }
+}
+
+/// A pasted text that is one existing file, as terminals paste a dropped one: a path,
+/// quoted or not, or a file:// address.
+fn dropped_file(text: &str) -> Option<PathBuf> {
+    let text = text.trim();
+    if text.contains('\n') {
+        return None;
+    }
+    let path = match text.strip_prefix("file://") {
+        Some(rest) => percent_decode(rest),
+        None => text.trim_matches(['\'', '"']).replace("\\ ", " "),
+    };
+    let path = expand_home(&path)?;
+    (path.is_absolute() && path.is_file()).then_some(path)
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = text
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The part of `text` between display columns `from` and `to`.
 fn columns(text: &str, from: usize, to: usize) -> String {
     let mut col = 0;
@@ -1004,6 +1065,52 @@ impl App {
         self.send_to(index, text)
     }
 
+    /// Sends the file at `path` to chat `index`: its line shows at once, going up.
+    pub fn upload(&mut self, index: usize, path: PathBuf) -> Vec<Action> {
+        let chat = &self.chats[index];
+        if chat.kind == ChatKind::Server {
+            self.status = "это служебный канал аккаунта: файлы здесь не отправить".into();
+            return Vec::new();
+        }
+        let id = omtalk_xmpp::receipts::new_id();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let action = Action::Upload {
+            account: chat.account.clone(),
+            to: chat.jid.clone(),
+            room: chat.is_room(),
+            path,
+            encrypted: chat.omemo,
+            id: id.clone(),
+        };
+        let encrypted = chat.omemo;
+        let mut line = Line::message(chrono::Utc::now().timestamp(), "я".into(), name, encrypted, true);
+        line.id = Some(id);
+        line.delivery = Some(Delivery::Uploading(0));
+        self.chats[index].scroll = 0;
+        self.push(index, line);
+        vec![action]
+    }
+
+    /// The file of message `id` is up: its line becomes the link, as any shared file.
+    pub fn uploaded(&mut self, account: &BareJid, id: &str, link: &str) {
+        for chat in self.chats.iter_mut().filter(|c| &c.account == account) {
+            for line in chat
+                .lines
+                .iter_mut()
+                .filter(|l| l.outgoing && l.id.as_deref() == Some(id))
+            {
+                let mut fresh =
+                    Line::message(line.at, line.who.clone(), link.to_owned(), line.encrypted, true);
+                fresh.id = line.id.take();
+                fresh.delivery = line.delivery.take();
+                *line = fresh;
+            }
+        }
+    }
+
     /// Sends `text` to chat `index`: its line shows at once, as being sent.
     pub fn send_to(&mut self, index: usize, text: String) -> Vec<Action> {
         let chat = &mut self.chats[index];
@@ -1113,6 +1220,17 @@ impl App {
                 }
             }
             // The list shows while a command is being typed: start one.
+            ("/upload", _) => {
+                let path = line[name.len()..].trim();
+                match (self.selected, expand_home(path)) {
+                    (None, _) => Err("нет открытого чата".to_owned()),
+                    (_, None) => Err("/upload ПУТЬ — какой файл отправить (Tab дописывает путь)".to_owned()),
+                    (Some(_), Some(file)) if !file.is_file() => {
+                        Err(format!("нет такого файла: {}", file.display()))
+                    }
+                    (Some(index), Some(file)) => return self.upload(index, file),
+                }
+            }
             ("/close", _) => match self.selected {
                 Some(index) => return self.close_chat(index),
                 None => Err("нет открытого чата".to_owned()),
@@ -1173,6 +1291,15 @@ impl App {
         }
         self.focus = Focus::Input;
         self.completion = None;
+        // A file dropped on the terminal arrives as its path: offer to send it.
+        if self.input.is_empty()
+            && let Some(file) = dropped_file(&text)
+        {
+            self.input = format!("/upload {}", file.display());
+            self.cursor = self.input.chars().count();
+            self.status = "Enter — отправить этот файл".into();
+            return Vec::new();
+        }
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, &text);
         self.cursor += text.chars().count();
@@ -1761,6 +1888,12 @@ impl App {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
                     self.toggle_omemo();
+                } else if inside(self.areas.attach_button) {
+                    // The path is typed (Tab helps), or a file dropped on the terminal.
+                    self.input = "/upload ".into();
+                    self.cursor = self.input.chars().count();
+                    self.focus = Focus::Input;
+                    self.status = "путь к файлу (Tab дописывает) или перетащите файл в окно".into();
                 } else if let Some((_, group)) = self.areas.group_rows.iter().find(|(r, _)| inside(*r)) {
                     let group = group.clone();
                     self.toggle_group(&group);

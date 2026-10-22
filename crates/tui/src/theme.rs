@@ -66,9 +66,11 @@ pub struct Icons {
     pub command: &'static str,
     /// Before a folder's name in the chat list.
     pub folder: &'static str,
+    /// The button that sends a file, on the input box.
+    pub attach: &'static str,
 }
 
-/// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal, U+F07B folder.
+/// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal, U+F07B folder, U+F0C6 paperclip.
 pub const NERD: Icons = Icons {
     locked: "\u{f023} OMEMO",
     unlocked: "\u{f09c} без шифрования",
@@ -79,6 +81,7 @@ pub const NERD: Icons = Icons {
     service: "\u{f233}",
     command: "\u{f120}",
     folder: "\u{f07b}",
+    attach: "\u{f0c6}",
 };
 
 pub const TEXT_ICONS: Icons = Icons {
@@ -91,4 +94,5 @@ pub const TEXT_ICONS: Icons = Icons {
     service: "›",
     command: "$",
     folder: "/",
+    attach: "[файл]",
 };

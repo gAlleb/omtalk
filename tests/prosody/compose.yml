@@ -12,6 +12,7 @@ services:
       - data:/var/lib/prosody
     ports:
       - "127.0.0.1:15222:5222"
+      - "127.0.0.1:15280:5280"
 
 volumes:
   data:

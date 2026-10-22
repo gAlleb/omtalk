@@ -19,6 +19,7 @@ pub mod presence;
 pub mod receipts;
 pub mod roster;
 pub mod services;
+pub mod upload;
 
 pub use pep::Access;
 pub use roster::Contact;

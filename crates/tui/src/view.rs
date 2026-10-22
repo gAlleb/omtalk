@@ -793,6 +793,7 @@ pub fn message_rows(
                         who: None,
                     });
                 }
+                push_delivery(&mut rows, line, body_width, true);
                 continue;
             }
             let (icon, state, colour) = match &slot.state {
@@ -822,6 +823,7 @@ pub fn message_rows(
                 picture: None,
                 who: None,
             });
+            push_delivery(&mut rows, line, body_width, false);
             continue;
         }
         let mut first = true;
@@ -841,21 +843,25 @@ pub fn message_rows(
             rows.push(TextLine::from(spans).into());
             first = false;
         }
-        // How far one's message got, after its last word, or below where it does not fit.
-        if let Some(delivery) = &line.delivery {
-            let (mark, style) = delivery_mark(delivery);
-            let last = rows.last_mut().expect("a message has a row");
-            if last.text.width() + mark.width() < body_width + 2 {
-                last.text.spans.push(Span::styled(format!(" {mark}"), style));
-            } else {
-                // A long one (a failure's reason) wraps like the message.
-                for part in wrap(&mark, body_width.max(1)) {
-                    rows.push(TextLine::from(vec![Span::raw("  "), Span::styled(part, style)]).into());
-                }
-            }
-        }
+        push_delivery(&mut rows, line, body_width, false);
     }
     rows
+}
+
+/// How far one's message got, after its last word, or below where it does not fit (and
+/// always below a picture, whose rows hold no text).
+fn push_delivery(rows: &mut Vec<Row>, line: &Line, body_width: usize, below: bool) {
+    let Some(delivery) = &line.delivery else { return };
+    let (mark, style) = delivery_mark(delivery);
+    let last = rows.last_mut().expect("a message has a row");
+    if !below && last.text.width() + mark.width() < body_width + 2 {
+        last.text.spans.push(Span::styled(format!(" {mark}"), style));
+        return;
+    }
+    // A long one (a failure's reason) wraps like the message.
+    for part in wrap(&mark, body_width.max(1)) {
+        rows.push(TextLine::from(vec![Span::raw("  "), Span::styled(part, style)]).into());
+    }
 }
 
 /// The sign for how far a message got: ⋯ being sent, ✓ on the server, ✓✓ delivered,
@@ -863,6 +869,7 @@ pub fn message_rows(
 fn delivery_mark(delivery: &Delivery) -> (String, Style) {
     let dim = Style::default().fg(theme::DIM);
     match delivery {
+        Delivery::Uploading(percent) => (format!("⇡ {percent}%"), dim),
         Delivery::Sending => ("⋯".into(), dim),
         Delivery::Sent => ("✓".into(), dim),
         Delivery::Delivered => ("✓✓".into(), dim),
@@ -940,6 +947,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         (app.icons.unlocked, theme::WARN)
     };
     let button = format!(" {label} ");
+    let attach = format!(" {} ", app.icons.attach);
     // The hint as long as the border has room for beside the lock.
     let hint = [
         " Enter ⏎ · Alt+Enter — новая строка ",
@@ -947,7 +955,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         " ⏎ ",
     ]
     .into_iter()
-    .find(|h| button.width() + h.width() + 4 <= area.width as usize)
+    .find(|h| button.width() + attach.width() + h.width() + 4 <= area.width as usize)
     .unwrap_or("");
     let block = Block::default()
         .borders(Borders::ALL)
@@ -957,6 +965,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
             button.clone(),
             Style::default().fg(colour).add_modifier(Modifier::BOLD),
         ))
+        .title(Span::styled(attach.clone(), Style::default().fg(theme::ACCENT)))
         .title(
             TextLine::from(Span::styled(hint, Style::default().fg(theme::DIM))).alignment(Alignment::Right),
         );
@@ -964,6 +973,12 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
     app.areas.omemo_button = Rect::new(area.x + 1, area.y, button.width() as u16, 1);
+    app.areas.attach_button = Rect::new(
+        area.x + 1 + button.width() as u16,
+        area.y,
+        attach.width() as u16,
+        1,
+    );
 
     if app.input.is_empty() {
         let hint = if app.current().is_some() {
@@ -2848,5 +2863,86 @@ mod tests {
         let server = app.server_chat(&me);
         assert!(app.close_chat(server).is_empty());
         assert!(app.status.contains("не закрывается"));
+    }
+
+    #[test]
+    fn a_file_is_sent_by_command_drop_or_paperclip_and_shows_its_progress() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("кот.png");
+        std::fs::write(&file, b"not really a png").unwrap();
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        let typed = |app: &mut App, text: &str| {
+            app.focus = Focus::Input;
+            text.chars()
+                .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        };
+
+        assert!(typed(&mut app, "/upload /nowhere/nothing.png").is_empty());
+        assert!(app.status.contains("нет такого файла"), "{}", app.status);
+
+        let sent = typed(&mut app, &format!("/upload {}", file.display()));
+        let [
+            Action::Upload {
+                path,
+                encrypted: true,
+                id,
+                ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(path, &file);
+        let id = id.clone();
+        assert!(screen(&mut app, 100, 20).contains("кот.png ⇡ 0%"));
+        app.delivery(&me, &id, Delivery::Uploading(40));
+        assert!(screen(&mut app, 100, 20).contains("кот.png ⇡ 40%"));
+        let link = "aesgcm://up.home.org/x/кот.png#000102030405060708090a0b000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        app.uploaded(&me, &id, link);
+        app.delivery(&me, &id, Delivery::Sent);
+        let line = app.chats[bob].lines.last().unwrap();
+        assert_eq!(
+            (line.text.as_str(), &line.delivery),
+            (link, &Some(Delivery::Sent))
+        );
+        assert!(
+            line.media.as_ref().is_some_and(|m| m.image),
+            "a picture, as any shared one"
+        );
+
+        // A file dropped on the terminal arrives as its path: offered, not sent.
+        app.input.clear();
+        app.on_paste(&format!("'{}'\n", file.display()));
+        assert_eq!(app.input, format!("/upload {}", file.display()));
+        app.input.clear();
+        app.on_paste(&format!(
+            "file://{}",
+            file.display().to_string().replace("кот", "%D0%BA%D0%BE%D1%82")
+        ));
+        assert_eq!(
+            app.input,
+            format!("/upload {}", file.display()),
+            "file:// with escapes too"
+        );
+        app.input.clear();
+        app.on_paste("просто текст");
+        assert_eq!(app.input, "просто текст");
+
+        // The paperclip starts the command.
+        app.input.clear();
+        screen(&mut app, 100, 20);
+        let clip = app.areas.attach_button;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: clip.x + 1,
+            row: clip.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.input, "/upload ");
     }
 }

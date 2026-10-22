@@ -65,6 +65,11 @@ pub const COMMANDS: &[Command] = &[
         about: "этот список",
     },
     Command {
+        name: "/upload",
+        args: "ПУТЬ",
+        about: "отправить файл или картинку",
+    },
+    Command {
         name: "/close",
         args: "",
         about: "закрыть чат; комнату — покинуть",
@@ -112,6 +117,13 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     let first_end = before.find(char::is_whitespace);
     let command = first_end.map(|end| &before[..end]);
     // The folder's name is all the rest of the line, spaces and all.
+    // A path: all the rest of the line, completed from the disk.
+    if let (Some("/upload"), Some(end)) = (command, first_end) {
+        let rest = &before[end..];
+        let start = end + rest.len() - rest.trim_start().len();
+        let found = paths(&before[start..]);
+        return (!found.is_empty()).then(|| (before[..start].chars().count(), found));
+    }
     if let (Some("/folder"), Some(end)) = (command, first_end) {
         let rest = &before[end..];
         let start = end + rest.len() - rest.trim_start().len();
@@ -147,6 +159,39 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
         ),
     };
     (!found.is_empty()).then_some((start, found))
+}
+
+/// Files and folders beginning with `typed` (a path, `~/` for home), folders with `/`
+/// after them so Tab goes on inside; hidden ones only when asked for with a dot.
+pub fn paths(typed: &str) -> Vec<String> {
+    let (dir, prefix) = match typed.rfind('/') {
+        Some(at) => (&typed[..=at], &typed[at + 1..]),
+        None => ("", typed),
+    };
+    let on_disk = match dir {
+        "" => std::path::PathBuf::from("."),
+        d if d.starts_with("~/") => match std::env::var_os("HOME") {
+            Some(home) => std::path::PathBuf::from(home).join(&d[2..]),
+            None => return Vec::new(),
+        },
+        d => std::path::PathBuf::from(d),
+    };
+    let Ok(entries) = std::fs::read_dir(&on_disk) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
+                return None;
+            }
+            let folder = e.file_type().is_ok_and(|t| t.is_dir());
+            Some(format!("{dir}{name}{}", if folder { "/" } else { "" }))
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// Whether the word starting at `start` is the command's first argument.
@@ -232,6 +277,24 @@ mod tests {
             "the text after the address is free"
         );
         assert_eq!(complete("/services m"), Some((10, vec!["muc.home.org".into()])));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("фото")).unwrap();
+        std::fs::write(dir.path().join("фото").join("кот.png"), b"").unwrap();
+        std::fs::write(dir.path().join(".скрытый"), b"").unwrap();
+        let base = dir.path().display().to_string();
+        assert_eq!(
+            complete(&format!("/upload {base}/ф")).unwrap().1,
+            [format!("{base}/фото/")]
+        );
+        assert_eq!(
+            complete(&format!("/upload {base}/фото/")).unwrap().1,
+            [format!("{base}/фото/кот.png")]
+        );
+        assert_eq!(
+            complete(&format!("/upload {base}/")).unwrap().1,
+            [format!("{base}/фото/")],
+            "hidden ones not unasked"
+        );
         assert_eq!(complete("/services ").unwrap().1, ["home.org", "muc.home.org"]);
         assert_eq!(
             complete("/folder Раб").unwrap(),

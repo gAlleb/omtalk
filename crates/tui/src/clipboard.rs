@@ -43,6 +43,26 @@ pub fn holds_image() -> bool {
             })
 }
 
+/// Saves the picture in the ordinary clipboard as a PNG file in `folder`.
+pub fn image_to(folder: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let output = Command::new("wl-paste")
+        .args(["--type", "image/png"])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("wl-paste: {e}"))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err("картинку из буфера не получить".into());
+    }
+    std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let path = folder.join(format!("картинка-{stamp}.png"));
+    std::fs::write(&path, &output.stdout).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn paste(args: &[&str]) -> Result<String, String> {
     if !wayland() {
         return Err("нет Wayland: вставка из буфера только через терминал (Shift+средняя кнопка)".into());

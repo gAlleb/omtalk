@@ -57,7 +57,7 @@ mod tests {
         );
         store.close_chat(&me, &bob).unwrap();
         store.close_chat(&me, &bob).unwrap();
-        assert_eq!(store.closed_chats(&me).unwrap(), [bob.clone()]);
+        assert_eq!(store.closed_chats(&me).unwrap(), std::slice::from_ref(&bob));
         assert!(
             store
                 .closed_chats(&"other@example.org".parse().unwrap())

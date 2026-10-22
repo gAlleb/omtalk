@@ -22,10 +22,12 @@ pub struct Identity {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ServiceInfo {
     pub identities: Vec<Identity>,
     pub features: BTreeSet<String>,
+    /// Forms describing it further (XEP-0128): limits, contact addresses.
+    pub extensions: Vec<DataForm>,
 }
 
 /// Something listed under an address: a service, a node, or a command.
@@ -126,6 +128,7 @@ impl Account {
                 })
                 .collect(),
             features: info.features,
+            extensions: info.extensions,
         })
     }
 

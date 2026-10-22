@@ -206,6 +206,14 @@ enum Msg {
         account: BareJid,
         text: String,
     },
+    /// The file of message `id` is up, at `link`.
+    Uploaded {
+        account: BareJid,
+        id: String,
+        link: String,
+    },
+    /// A file to offer for sending (a picture pasted from the clipboard).
+    Offer(PathBuf),
     /// Text from a clipboard, for the input.
     Paste(String),
     /// Another of one's clients read `chat`.
@@ -470,6 +478,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
         Msg::Paste(text) => drop(app.on_paste(&text)),
+        Msg::Uploaded { account, id, link } => app.uploaded(&account, &id, &link),
+        Msg::Offer(path) => {
+            app.input = format!("/upload {}", path.display());
+            app.cursor = app.input.chars().count();
+            app.focus = crate::app::Focus::Input;
+            app.status = "Enter — отправить картинку из буфера".into();
+        }
         Msg::Online { account, online } => app.presence(&account, online, now()),
         Msg::Log { account, text } => app.server_log(&account, text, now()),
         Msg::Bound { account, resource } => drop(app.own_resource.insert(account, resource)),
@@ -843,6 +858,91 @@ fn refusal(error: &omtalk_xmpp::Error) -> String {
     }
 }
 
+/// Puts the file up on the account's upload service, sealed if `encrypted`, and gives
+/// the link to share. The progress goes to the file's line as it moves.
+async fn upload(
+    xmpp: &Account,
+    shared: &Shared,
+    account: &BareJid,
+    path: &std::path::Path,
+    encrypted: bool,
+    id: &str,
+) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let data = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let service = xmpp
+        .upload_service()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("у сервера нет службы загрузки файлов (XEP-0363)")?;
+    let (body, secret) = if encrypted {
+        let sealed = omtalk_media::encrypt(&data);
+        (sealed.data, Some((sealed.iv, sealed.key)))
+    } else {
+        (data, None)
+    };
+    if let Some(max) = service.max_size
+        && body.len() as u64 > max
+    {
+        return Err(format!(
+            "файл больше, чем принимает сервер ({} МБ)",
+            max / 1024 / 1024
+        ));
+    }
+    let content_type = content_type(&name);
+    let slot = xmpp
+        .upload_slot(&service.jid, &name, body.len() as u64, content_type)
+        .await
+        .map_err(|e| service_error(&e))?;
+    let (tx, account, id) = (shared.tx.clone(), account.clone(), id.to_owned());
+    let last = std::sync::atomic::AtomicU8::new(0);
+    omtalk_media::upload(
+        &slot.put,
+        &slot.headers,
+        body,
+        content_type,
+        move |sent, total| {
+            let percent = (sent * 100 / total.max(1)) as u8;
+            // Only when the number changes: a hundred redraws at most.
+            if last.swap(percent, std::sync::atomic::Ordering::Relaxed) != percent {
+                let _ = tx.send(Msg::Delivery {
+                    account: account.clone(),
+                    id: id.clone(),
+                    state: Delivery::Uploading(percent),
+                });
+            }
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(match secret {
+        Some((iv, key)) => omtalk_media::aesgcm_link(&slot.get, &iv, &key),
+        None => slot.get,
+    })
+}
+
+/// The type to name a file by, from its extension, for the few that matter.
+fn content_type(name: &str) -> Option<&'static str> {
+    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "mp4" => "video/mp4",
+        "ogg" | "opus" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        _ => return None,
+    })
+}
+
 /// A failed service query, in words.
 fn service_error(error: &omtalk_xmpp::Error) -> String {
     use omtalk_xmpp::stanza_error::DefinedCondition as C;
@@ -1012,6 +1112,83 @@ async fn perform(action: Action, shared: Shared) {
                 text: "не видит ваш статус".into(),
             });
         }
+        Action::Upload {
+            account,
+            to,
+            room,
+            path,
+            encrypted,
+            id,
+        } => {
+            let Some((xmpp, omemo)) = get(&account) else {
+                return;
+            };
+            let failed = |reason: String| {
+                tell(Msg::Delivery {
+                    account: account.clone(),
+                    id: id.clone(),
+                    state: Delivery::Failed(reason),
+                })
+            };
+            let link = match upload(&xmpp, &shared, &account, &path, encrypted, &id).await {
+                Ok(link) => link,
+                Err(reason) => return failed(reason),
+            };
+            tell(Msg::Uploaded {
+                account: account.clone(),
+                id: id.clone(),
+                link: link.clone(),
+            });
+            // The file is here already: put it where the fetched one would go, so the
+            // picture shows without coming down again.
+            if let Some(media) = omtalk_media::Media::from_text(&link) {
+                let cached = media.cache_path(&shared.cache);
+                let _ = tokio::fs::create_dir_all(&shared.cache).await;
+                let _ = tokio::fs::copy(&path, &cached).await;
+            }
+            fetch_if_media(&link, &shared);
+            let sent = if encrypted {
+                let report = if room {
+                    omemo.send_group_with_id(&to, &link, &id).await
+                } else {
+                    omemo.send_with_id(&to, &link, &id).await
+                };
+                report.map(drop).map_err(|e| e.to_string())
+            } else {
+                let mut message = if room {
+                    Message::groupchat(Some(to.clone().into()))
+                } else {
+                    Message::chat(Some(to.clone().into()))
+                }
+                .with_body(Lang::default(), link.clone());
+                // Out-of-band data (XEP-0066): what Gajim and others show as the file.
+                message.payloads.push(
+                    xmpp_parsers::minidom::Element::builder("x", "jabber:x:oob")
+                        .append(
+                            xmpp_parsers::minidom::Element::builder("url", "jabber:x:oob")
+                                .append(link.as_str())
+                                .build(),
+                        )
+                        .build(),
+                );
+                receipts::mark_outgoing(&mut message, &id);
+                xmpp.send(message).await.map_err(|e| e.to_string())
+            };
+            match sent {
+                Ok(()) => {
+                    // A room's copy back goes into the history when it comes.
+                    if !(room && !encrypted) {
+                        save_own(&shared, &account, &to, &link, encrypted);
+                    }
+                    tell(Msg::Delivery {
+                        account: account.clone(),
+                        id: id.clone(),
+                        state: Delivery::Sent,
+                    });
+                }
+                Err(e) => failed(e),
+            }
+        }
         Action::CloseChat { account, jid } => {
             if let Err(e) = shared.store.close_chat(&account, &jid) {
                 tell(Msg::Status(format!("чат {jid} не закрылся насовсем: {e}")));
@@ -1114,22 +1291,24 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::PastePrimary | Action::PasteClipboard => {
             let primary = action_is_primary(&action);
+            let folder = shared.cache.join("pasted");
             let pasted = tokio::task::spawn_blocking(move || {
+                // A picture in the clipboard is kept as a file and offered for sending.
                 if !primary && clipboard::holds_image() {
-                    return Err(
-                        "в буфере картинка: отправка картинок будет вместе с отправкой файлов".to_owned(),
-                    );
+                    return clipboard::image_to(&folder).map(Err);
                 }
                 if primary {
                     clipboard::primary()
                 } else {
                     clipboard::clipboard()
                 }
+                .map(Ok)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
             match pasted {
-                Ok(text) => tell(Msg::Paste(text)),
+                Ok(Ok(text)) => tell(Msg::Paste(text)),
+                Ok(Err(picture)) => tell(Msg::Offer(picture)),
                 Err(e) => tell(Msg::Status(e)),
             }
         }

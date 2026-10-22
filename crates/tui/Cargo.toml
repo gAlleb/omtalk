@@ -24,6 +24,9 @@ toml = "1"
 unicode-width = "0.2.2"
 xmpp-parsers = "0.23.0"
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [features]
 # Plaintext connections to the local test server.
 insecure-tcp = ["omtalk-xmpp/insecure-tcp"]
