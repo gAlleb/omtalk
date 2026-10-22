@@ -9,7 +9,7 @@ mod history;
 mod seen;
 
 pub use folders::Folder;
-pub use history::{ChatSummary, StoredMessage};
+pub use history::{ChatSummary, Delivery, StoredMessage};
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -79,6 +79,7 @@ const MIGRATIONS: &[&str] = &[
     );
     ",
     seen::MIGRATION,
+    history::MIGRATION_DELIVERY,
 ];
 
 #[derive(Clone)]

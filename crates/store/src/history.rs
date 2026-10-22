@@ -26,6 +26,46 @@ pub(crate) const MIGRATION: &str = "
     );
 ";
 
+/// Schema 9: a message's id (receipts, markers and replies name it) and, for one's own,
+/// how far it got: [`Delivery`] codes, the reason with a failure.
+pub(crate) const MIGRATION_DELIVERY: &str = "
+    ALTER TABLE messages ADD COLUMN id TEXT;
+    ALTER TABLE messages ADD COLUMN delivery INTEGER;
+    ALTER TABLE messages ADD COLUMN failure TEXT;
+    CREATE INDEX messages_by_id ON messages (account, id);
+";
+
+/// How far one's own message got, as kept: each step only moves forward, and a failure
+/// is final.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    Sent,
+    Delivered,
+    Read,
+    Failed(String),
+}
+
+impl Delivery {
+    fn code(&self) -> i64 {
+        match self {
+            Delivery::Sent => 1,
+            Delivery::Delivered => 2,
+            Delivery::Read => 3,
+            Delivery::Failed(_) => 9,
+        }
+    }
+
+    fn from_code(code: Option<i64>, failure: Option<String>) -> Option<Self> {
+        match code? {
+            1 => Some(Delivery::Sent),
+            2 => Some(Delivery::Delivered),
+            3 => Some(Delivery::Read),
+            9 => Some(Delivery::Failed(failure.unwrap_or_default())),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMessage {
     /// The peer, or the room.
@@ -37,6 +77,10 @@ pub struct StoredMessage {
     pub body: String,
     /// Unix time, seconds.
     pub at: i64,
+    /// The sender's id for it, if it named one.
+    pub id: Option<String>,
+    /// For one's own, sent from here: how far it got.
+    pub delivery: Option<Delivery>,
 }
 
 /// A chat with history, newest activity first.
@@ -51,8 +95,8 @@ impl Store {
     pub fn save_message(&self, account: &BareJid, message: &StoredMessage) -> Result<(), Error> {
         self.reopen_chat(account, &message.chat)?;
         self.db.lock().unwrap().execute(
-            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 account.as_str(),
                 message.chat.as_str(),
@@ -61,8 +105,29 @@ impl Store {
                 message.outgoing,
                 message.encrypted,
                 message.body,
-                message.at
+                message.at,
+                message.id,
+                message.delivery.as_ref().map(Delivery::code),
+                match &message.delivery {
+                    Some(Delivery::Failed(why)) => Some(why.as_str()),
+                    _ => None,
+                },
             ],
+        )?;
+        Ok(())
+    }
+
+    /// One's own message `id` got further; an older step (a receipt after the read
+    /// marker) changes nothing, and a failure stays.
+    pub fn set_delivery(&self, account: &BareJid, id: &str, delivery: &Delivery) -> Result<(), Error> {
+        let failure = match delivery {
+            Delivery::Failed(why) => Some(why.as_str()),
+            _ => None,
+        };
+        self.db.lock().unwrap().execute(
+            "UPDATE messages SET delivery = ?3, failure = ?4
+             WHERE account = ?1 AND id = ?2 AND outgoing = 1 AND (delivery IS NULL OR delivery < ?3)",
+            params![account.as_str(), id, delivery.code(), failure],
         )?;
         Ok(())
     }
@@ -76,7 +141,7 @@ impl Store {
     ) -> Result<Vec<StoredMessage>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
-            "SELECT sender, nick, outgoing, encrypted, body, at FROM messages
+            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure FROM messages
              WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3",
         )?;
         let rows = query.query_map(params![account.as_str(), chat.as_str(), limit as i64], |r| {
@@ -87,11 +152,14 @@ impl Store {
                 r.get::<_, bool>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         })?;
         let mut messages = Vec::new();
         for row in rows {
-            let (sender, nick, outgoing, encrypted, body, at) = row?;
+            let (sender, nick, outgoing, encrypted, body, at, id, delivery, failure) = row?;
             messages.push(StoredMessage {
                 chat: chat.clone(),
                 sender: parse_jid(&sender)?,
@@ -100,6 +168,8 @@ impl Store {
                 encrypted,
                 body,
                 at,
+                id,
+                delivery: Delivery::from_code(delivery, failure),
             });
         }
         messages.reverse();
@@ -174,7 +244,58 @@ mod tests {
             encrypted: true,
             body: body.into(),
             at,
+            id: None,
+            delivery: None,
         }
+    }
+
+    #[test]
+    fn own_messages_keep_how_far_they_got() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let me = jid("me@example.org");
+        let own = StoredMessage {
+            sender: me.clone(),
+            outgoing: true,
+            id: Some("m1".into()),
+            delivery: Some(Delivery::Sent),
+            ..message("bob@example.org", "привет", 1)
+        };
+        store.save_message(&me, &own).unwrap();
+        store
+            .save_message(
+                &me,
+                &StoredMessage {
+                    id: Some("m2".into()),
+                    ..own.clone()
+                },
+            )
+            .unwrap();
+        let state = |id: &str| {
+            store
+                .recent_messages(&me, &jid("bob@example.org"), 10)
+                .unwrap()
+                .into_iter()
+                .find(|m| m.id.as_deref() == Some(id))
+                .unwrap()
+                .delivery
+        };
+        store.set_delivery(&me, "m1", &Delivery::Read).unwrap();
+        store.set_delivery(&me, "m1", &Delivery::Delivered).unwrap();
+        assert_eq!(
+            state("m1"),
+            Some(Delivery::Read),
+            "a late receipt does not undo the read marker"
+        );
+        store
+            .set_delivery(&me, "m2", &Delivery::Failed("отказано".into()))
+            .unwrap();
+        store.set_delivery(&me, "m2", &Delivery::Read).unwrap();
+        assert_eq!(
+            state("m2"),
+            Some(Delivery::Failed("отказано".into())),
+            "a failure stays"
+        );
     }
 
     #[test]

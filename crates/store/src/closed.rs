@@ -72,6 +72,8 @@ mod tests {
             encrypted: true,
             body: "снова я".into(),
             at: 1,
+            id: None,
+            delivery: None,
         };
         store.save_message(&me, &message).unwrap();
         assert!(

@@ -567,13 +567,16 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
                     (None, true) => "я".to_owned(),
                     (None, false) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
                 };
-                app.chats[index].lines.push(Line::message(
-                    message.at,
-                    who,
-                    message.body,
-                    message.encrypted,
-                    message.outgoing,
-                ));
+                let mut line =
+                    Line::message(message.at, who, message.body, message.encrypted, message.outgoing);
+                line.id = message.id;
+                line.delivery = message.delivery.map(|d| match d {
+                    omtalk_store::Delivery::Sent => Delivery::Sent,
+                    omtalk_store::Delivery::Delivered => Delivery::Delivered,
+                    omtalk_store::Delivery::Read => Delivery::Read,
+                    omtalk_store::Delivery::Failed(why) => Delivery::Failed(why),
+                });
+                app.chats[index].lines.push(line);
             }
         }
     }
@@ -646,7 +649,20 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             Some(account) => app.server_notice(&account, text, now()),
             None => app.status = text,
         },
-        Msg::Delivery { account, id, state } => app.delivery(&account, &id, state),
+        Msg::Delivery { account, id, state } => {
+            // Kept, so the ✓✓ is there after a restart too.
+            let kept = match &state {
+                Delivery::Sent => Some(omtalk_store::Delivery::Sent),
+                Delivery::Delivered => Some(omtalk_store::Delivery::Delivered),
+                Delivery::Read => Some(omtalk_store::Delivery::Read),
+                Delivery::Failed(why) => Some(omtalk_store::Delivery::Failed(why.clone())),
+                Delivery::Uploading(_) | Delivery::Sending => None,
+            };
+            if let Some(kept) = kept {
+                let _ = shared.store.set_delivery(&account, &id, &kept);
+            }
+            app.delivery(&account, &id, state)
+        }
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
         Msg::Avatar { jid, hash } => match hash {
             Some(hash) => drop(app.avatars.insert(jid, hash)),
@@ -1035,6 +1051,10 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
                 encrypted: message.encrypted,
                 body: text.clone(),
                 at,
+                id: message.id.clone(),
+                // One's own, come back from the room: it got there.
+                delivery: (message.direction == Direction::Outgoing && message.nick.is_some())
+                    .then_some(omtalk_store::Delivery::Sent),
             },
         );
     }
@@ -1404,7 +1424,7 @@ async fn perform(action: Action, shared: Shared) {
                 };
                 match sent {
                     Ok(report) => {
-                        save_own(&shared, &account, &to, &text, true);
+                        save_own(&shared, &account, &to, &text, true, &id);
                         delivery(Delivery::Sent);
                         for (jid, device, e) in report.failed {
                             tell(Msg::Notice {
@@ -1447,7 +1467,7 @@ async fn perform(action: Action, shared: Shared) {
                     Ok(()) => {
                         // A room's copy back goes into the history when it comes.
                         if !room {
-                            save_own(&shared, &account, &to, &text, false);
+                            save_own(&shared, &account, &to, &text, false, &id);
                         }
                         delivery(Delivery::Sent);
                     }
@@ -1596,7 +1616,7 @@ async fn perform(action: Action, shared: Shared) {
                 Ok(()) => {
                     // A room's copy back goes into the history when it comes.
                     if !(room && !encrypted) {
-                        save_own(&shared, &account, &to, &link, encrypted);
+                        save_own(&shared, &account, &to, &link, encrypted, &id);
                     }
                     tell(Msg::Delivery {
                         account: account.clone(),
@@ -1955,7 +1975,8 @@ async fn perform(action: Action, shared: Shared) {
     }
 }
 
-fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encrypted: bool) {
+/// Keeps a message sent from here, as on the server: its ✓ is kept with it.
+fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encrypted: bool, id: &str) {
     let _ = shared.store.save_message(
         account,
         &StoredMessage {
@@ -1966,6 +1987,8 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encr
             encrypted,
             body: text.to_owned(),
             at: now(),
+            id: Some(id.to_owned()),
+            delivery: Some(omtalk_store::Delivery::Sent),
         },
     );
 }
