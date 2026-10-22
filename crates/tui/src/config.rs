@@ -16,6 +16,7 @@
 //! right = 30            # width of the participants pane
 //! auto_download = true  # false: shared files wait for a click ("скачать")
 //! avatars = false       # true: people's and rooms' pictures in the right pane
+//! language = "en"       # the interface's language: en or ru
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! read_markers = true   # let senders see that their messages were read
 //! typing = true         # let chats see that one is typing
@@ -90,11 +91,21 @@ impl ThemeConfig {
         palette.selection = match (&self.selection_text, &self.selection_background) {
             (Some(fg), Some(bg)) => Some((parse_colour(fg)?, parse_colour(bg)?)),
             (None, None) => None,
-            _ => return Err("[theme]: selection_text и selection_background задаются вместе".into()),
+            _ => {
+                return Err(tr!(
+                    "[theme]: selection_text and selection_background go together",
+                    "[theme]: selection_text и selection_background задаются вместе"
+                )
+                .into());
+            }
         };
         if let Some(nicks) = &self.nicks {
             if nicks.is_empty() {
-                return Err("[theme]: nicks — хотя бы один цвет".into());
+                return Err(tr!(
+                    "[theme]: nicks needs at least one colour",
+                    "[theme]: nicks — хотя бы один цвет"
+                )
+                .into());
             }
             palette.nicks = nicks.iter().map(|n| parse_colour(n)).collect::<Result<_, _>>()?;
         }
@@ -161,6 +172,8 @@ pub struct Ui {
     pub auto_download: bool,
     /// Show people's and rooms' avatars (and fetch them).
     pub avatars: bool,
+    /// The interface's language: "en" (the default) or "ru".
+    pub language: crate::lang::Language,
 }
 
 impl Default for Ui {
@@ -178,6 +191,7 @@ impl Default for Ui {
             bell: true,
             auto_download: true,
             avatars: false,
+            language: crate::lang::Language::English,
         }
     }
 }
@@ -195,7 +209,12 @@ pub fn parse_key(text: &str) -> Result<(crossterm::event::KeyCode, crossterm::ev
             "alt" | "meta" | "m" => KeyModifiers::ALT,
             "super" => KeyModifiers::SUPER,
             "shift" => KeyModifiers::SHIFT,
-            other => return Err(format!("leader = {text:?}: неизвестный модификатор {other:?}")),
+            other => {
+                return Err(trf!(
+                    "leader = {text:?}: unknown modifier {other:?}",
+                    "leader = {text:?}: неизвестный модификатор {other:?}"
+                ));
+            }
         };
     }
     let code = match key {
@@ -203,7 +222,12 @@ pub fn parse_key(text: &str) -> Result<(crossterm::event::KeyCode, crossterm::ev
         "esc" | "escape" => KeyCode::Esc,
         f if f.starts_with('f') && f[1..].parse::<u8>().is_ok() => KeyCode::F(f[1..].parse().unwrap()),
         c if c.chars().count() == 1 => KeyCode::Char(c.chars().next().unwrap()),
-        _ => return Err(format!("leader = {text:?}: не понимаю клавишу {key:?}")),
+        _ => {
+            return Err(trf!(
+                "leader = {text:?}: cannot read key {key:?}",
+                "leader = {text:?}: не понимаю клавишу {key:?}"
+            ));
+        }
     };
     Ok((code, modifiers))
 }

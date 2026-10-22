@@ -23,7 +23,7 @@ use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use xmpp_parsers::message::{Lang, Message};
 
-use crate::app::{Action, App, ChatKind, Delivery, DeviceRow, Line, MediaState};
+use crate::app::{Action, App, ChatKind, Connection, Delivery, DeviceRow, Line, MediaState};
 use crate::clipboard;
 use crate::config::{self, AccountEntry, Config};
 use crate::services::{Listing, Request};
@@ -121,7 +121,8 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
                 (Some(command), _) => config::run_password_command(command)?,
                 (None, Ok(password)) => password,
                 (None, Err(_)) => {
-                    rpassword::prompt_password(format!("пароль для {jid}: ")).map_err(|e| e.to_string())?
+                    rpassword::prompt_password(trf!("password for {jid}: ", "пароль для {jid}: "))
+                        .map_err(|e| e.to_string())?
                 }
             };
             let mut account = AccountConfig::new(jid, password);
@@ -170,7 +171,7 @@ enum Msg {
     },
     Connection {
         account: BareJid,
-        state: String,
+        state: Connection,
     },
     Devices {
         account: BareJid,
@@ -371,8 +372,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     app.show_avatars = ui.avatars;
     app.config_notify = options.config.notify.clone();
     app.icons = match ui.icons {
-        config::IconSet::Nerd => crate::theme::NERD,
-        config::IconSet::Text => crate::theme::TEXT_ICONS,
+        config::IconSet::Nerd => crate::theme::nerd(),
+        config::IconSet::Text => crate::theme::text_icons(),
     };
     load_history(&mut app, &store, &jids);
     app.folders = store.folders().map_err(|e| e.to_string())?;
@@ -523,7 +524,10 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 let (path, tx) = (options.config_path.clone(), shared.tx.clone());
                 tokio::task::spawn_blocking(move || {
                     if let Err(problem) = crate::settings::write(&path, section, key, &value) {
-                        let _ = tx.send(Msg::Status(format!("настройка не записана: {problem}")));
+                        let _ = tx.send(Msg::Status(trf!(
+                            "the setting was not written: {problem}",
+                            "настройка не записана: {problem}"
+                        )));
                     }
                 });
                 continue;
@@ -566,7 +570,7 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
             {
                 let who = match (&message.nick, message.outgoing) {
                     (Some(nick), _) => nick.clone(),
-                    (None, true) => "я".to_owned(),
+                    (None, true) => tr!("me", "я").to_owned(),
                     (None, false) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
                 };
                 let mut line =
@@ -727,7 +731,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.input = format!("/upload {}", path.display());
             app.cursor = app.input.chars().count();
             app.focus = crate::app::Focus::Input;
-            app.status = "Enter — отправить картинку из буфера".into();
+            app.status = tr!(
+                "Enter sends the picture from the clipboard",
+                "Enter — отправить картинку из буфера"
+            )
+            .into();
         }
         Msg::Online { account, online } => app.presence(&account, online, now()),
         Msg::Log { account, text } => app.server_log(&account, text, now()),
@@ -769,7 +777,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         Msg::Connection { account, state } => {
             let index = app.server_chat(&account);
             if app.connection.get(&account) != Some(&state) {
-                app.notice(Some(index), state.clone(), now());
+                app.notice(Some(index), state.words(), now());
             }
             app.connection.insert(account, state);
         }
@@ -866,14 +874,14 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 });
                 tell(Msg::Connection {
                     account: account.clone(),
-                    state: "в сети".into(),
+                    state: Connection::Online,
                 });
                 tell(Msg::Log {
                     account: account.clone(),
                     text: if *resumed {
-                        "связь восстановлена".to_owned()
+                        tr!("connection restored", "связь восстановлена").to_owned()
                     } else {
-                        format!("вход: {jid}")
+                        trf!("logged in: {jid}", "вход: {jid}")
                     },
                 });
                 if !resumed {
@@ -887,20 +895,23 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
             }
             Event::Reachable => tell(Msg::Connection {
                 account: account.clone(),
-                state: "в сети".into(),
+                state: Connection::Online,
             }),
             Event::Disconnected { reason } => tell(Msg::Connection {
                 account: account.clone(),
-                state: format!("переподключение ({reason})"),
+                state: Connection::Reconnecting(reason.clone()),
             }),
             Event::AuthFailed { reason } => tell(Msg::Connection {
                 account: account.clone(),
-                state: format!("пароль не принят: {reason}"),
+                state: Connection::Refused(reason.clone()),
             }),
             Event::SubscriptionRequest { from } => tell(Msg::Notice {
                 account: account.clone(),
                 chat: Some(from.clone()),
-                text: format!("{from} хочет видеть ваш статус: /accept {from} или /refuse {from}"),
+                text: trf!(
+                    "{from} asks to see your status: /accept {from} or /refuse {from}",
+                    "{from} хочет видеть ваш статус: /accept {from} или /refuse {from}"
+                ),
             }),
             Event::Message(message) => {
                 if let Some((room, by, topic)) = muc::subject_of(message) {
@@ -912,11 +923,16 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     });
                 }
                 if let Some((room, from)) = muc::invitation_of(message) {
-                    let who = from.map(|f| f.to_string()).unwrap_or_else(|| "кто-то".into());
+                    let who = from
+                        .map(|f| f.to_string())
+                        .unwrap_or_else(|| tr!("someone", "кто-то").into());
                     tell(Msg::Notice {
                         account: account.clone(),
                         chat: None,
-                        text: format!("{who} зовёт в комнату {room}: /join {room}"),
+                        text: trf!(
+                            "{who} invites you to the room {room}: /join {room}",
+                            "{who} зовёт в комнату {room}: /join {room}"
+                        ),
                     });
                 }
                 if let Some(room) = muc::config_changed(message) {
@@ -952,11 +968,11 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     });
                 }
                 // One's message came back: the recipient's server (or one's own) refused it.
-                if let Some((id, reason)) = receipts::bounce(message) {
+                if let Some((id, condition, text)) = receipts::bounce(message) {
                     tell(Msg::Delivery {
                         account: account.clone(),
                         id,
-                        state: Delivery::Failed(reason),
+                        state: Delivery::Failed(bounce_words(&condition, text.as_deref())),
                     });
                 }
                 if let Some(receipt) = receipts::answer(&account, message) {
@@ -1075,7 +1091,11 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             let fingerprint = omtalk_omemo::fingerprint(&omemo.identity_key().await);
             tell(Msg::Log {
                 account: account.clone(),
-                text: format!("OMEMO: устройство {}, отпечаток {fingerprint}", omemo.device_id()),
+                text: trf!(
+                    "OMEMO: device {}, fingerprint {fingerprint}",
+                    "OMEMO: устройство {}, отпечаток {fingerprint}",
+                    omemo.device_id()
+                ),
             });
         }
         Err(e) => tell(Msg::Notice {
@@ -1090,18 +1110,25 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             if got > 0 || caught.unreadable > 0 {
                 let unreadable = match caught.unreadable {
                     0 => String::new(),
-                    n => format!(", не прочитать: {n}"),
+                    n => trf!(", unreadable: {n}", ", не прочитать: {n}"),
                 };
                 tell(Msg::Log {
                     account: account.clone(),
-                    text: format!("пропущенных сообщений: {got}{unreadable}"),
+                    text: trf!(
+                        "missed messages: {got}{unreadable}",
+                        "пропущенных сообщений: {got}{unreadable}"
+                    ),
                 });
             }
             if caught.position_lost {
                 tell(Msg::Notice {
                     account: account.clone(),
                     chat: None,
-                    text: "часть пропущенных сообщений сервер уже удалил".into(),
+                    text: tr!(
+                        "the server has already deleted some of the missed messages",
+                        "часть пропущенных сообщений сервер уже удалил"
+                    )
+                    .into(),
                 });
             }
             for message in caught.messages {
@@ -1111,7 +1138,7 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
         Err(e) => tell(Msg::Notice {
             account: account.clone(),
             chat: None,
-            text: format!("архив: {e}"),
+            text: trf!("archive: {e}", "архив: {e}"),
         }),
     }
     for (room, _) in shared.store.rooms(&account).unwrap_or_default() {
@@ -1148,7 +1175,7 @@ async fn join(
             let _ = shared.store.remember_room(account, &room, &nick);
             tell(Msg::Log {
                 account: account.clone(),
-                text: format!("вход в {room} как {nick}"),
+                text: trf!("joined {room} as {nick}", "вход в {room} как {nick}"),
             });
             // A room new to the account goes into its bookmarks, as Gajim does, so its
             // other clients know it and the nick.
@@ -1160,7 +1187,10 @@ async fn join(
                     autojoin: true,
                 };
                 if let Err(e) = xmpp.bookmark(&entry).await {
-                    tell(Msg::Status(format!("закладка для {room} не сохранилась: {e}")));
+                    tell(Msg::Status(trf!(
+                        "the bookmark for {room} was not saved: {e}",
+                        "закладка для {room} не сохранилась: {e}"
+                    )));
                 }
             }
             tell(Msg::Joined {
@@ -1175,7 +1205,11 @@ async fn join(
                         tell(Msg::Notice {
                             account: account.clone(),
                             chat: Some(room.clone()),
-                            text: "часть пропущенных сообщений комнаты сервер уже удалил".into(),
+                            text: tr!(
+                                "the server has already deleted some of the room's missed messages",
+                                "часть пропущенных сообщений комнаты сервер уже удалил"
+                            )
+                            .into(),
                         });
                     }
                     if caught.unreadable > 0 {
@@ -1196,14 +1230,18 @@ async fn join(
                 Err(e) => tell(Msg::Notice {
                     account: account.clone(),
                     chat: Some(room),
-                    text: format!("архив комнаты: {e}"),
+                    text: trf!("the room's archive: {e}", "архив комнаты: {e}"),
                 }),
             }
         }
         Err(e) => tell(Msg::Notice {
             account: account.clone(),
             chat: None,
-            text: format!("не удалось войти в {room}: {}", refusal(&e)),
+            text: trf!(
+                "could not join {room}: {}",
+                "не удалось войти в {room}: {}",
+                refusal(&e)
+            ),
         }),
     }
 }
@@ -1213,12 +1251,16 @@ fn refusal(error: &omtalk_xmpp::Error) -> String {
     use omtalk_xmpp::stanza_error::DefinedCondition as C;
     match error {
         omtalk_xmpp::Error::Stanza(e) => match e.defined_condition {
-            C::RegistrationRequired => "только для участников, нужно приглашение".into(),
-            C::Conflict => "этот ник занят".into(),
-            C::Forbidden => "вас туда не пускают (бан)".into(),
-            C::ServiceUnavailable => "комната переполнена".into(),
-            C::ItemNotFound => "такой комнаты нет".into(),
-            C::NotAuthorized => "нужен пароль".into(),
+            C::RegistrationRequired => tr!(
+                "members only: an invitation is needed",
+                "только для участников, нужно приглашение"
+            )
+            .into(),
+            C::Conflict => tr!("this nick is taken", "этот ник занят").into(),
+            C::Forbidden => tr!("you are banned there", "вас туда не пускают (бан)").into(),
+            C::ServiceUnavailable => tr!("the room is full", "комната переполнена").into(),
+            C::ItemNotFound => tr!("no such room", "такой комнаты нет").into(),
+            C::NotAuthorized => tr!("a password is needed", "нужен пароль").into(),
             ref other => format!("{other:?}"),
         },
         other => other.to_string(),
@@ -1246,7 +1288,7 @@ async fn upload(
         .upload_service()
         .await
         .map_err(|e| e.to_string())?
-        .ok_or("сервер не принимает файлы")?;
+        .ok_or(tr!("the server takes no files", "сервер не принимает файлы"))?;
     let (body, secret) = if encrypted {
         let sealed = omtalk_media::encrypt(&data);
         (sealed.data, Some((sealed.iv, sealed.key)))
@@ -1256,7 +1298,8 @@ async fn upload(
     if let Some(max) = service.max_size
         && body.len() as u64 > max
     {
-        return Err(format!(
+        return Err(trf!(
+            "the file is larger than the server takes ({} MB)",
             "файл больше, чем принимает сервер ({} МБ)",
             max / 1024 / 1024
         ));
@@ -1351,13 +1394,57 @@ async fn key_rows(
     Ok(rows)
 }
 
+/// Why a message of one's came back, in words; the server's own after them.
+fn bounce_words(condition: &omtalk_xmpp::stanza_error::DefinedCondition, server: Option<&str>) -> String {
+    use omtalk_xmpp::stanza_error::DefinedCondition as C;
+    let what = match condition {
+        C::PolicyViolation => tr!(
+            "the recipient's server does not take such messages (policy-violation)",
+            "сервер получателя не принимает такие сообщения (policy-violation)"
+        ),
+        C::RemoteServerNotFound => tr!(
+            "the recipient's server was not found",
+            "сервер получателя не найден"
+        ),
+        C::RemoteServerTimeout => tr!(
+            "the recipient's server does not answer",
+            "сервер получателя не отвечает"
+        ),
+        C::ServiceUnavailable => tr!(
+            "the recipient takes no messages",
+            "получатель не принимает сообщения"
+        ),
+        C::ItemNotFound => tr!("no such address", "такого адреса нет"),
+        C::Forbidden | C::NotAllowed | C::NotAuthorized => tr!("refused", "отказано"),
+        C::NotAcceptable => tr!("the message was not taken", "сообщение не принято"),
+        C::ResourceConstraint => tr!("the recipient is out of room", "у получателя не хватает места"),
+        C::RecipientUnavailable => tr!("the recipient is unavailable", "получатель недоступен"),
+        C::JidMalformed => tr!("a wrong address", "неверный адрес"),
+        _ => tr!("an error", "ошибка"),
+    };
+    match server {
+        Some(text) => format!("{what}: {text}"),
+        None => what.to_owned(),
+    }
+}
+
 /// Old messages encrypted before this device existed, counted in words.
 fn unreadable_words(count: usize) -> String {
-    let (what, verb, them) = match (count % 10, count % 100) {
-        (1, n) if n != 11 => ("старое сообщение", "зашифровано", "его"),
-        (2..=4, n) if !(12..=14).contains(&n) => ("старых сообщения", "зашифрованы", "их"),
-        _ => ("старых сообщений", "зашифрованы", "их"),
-    };
+    if !crate::lang::russian() {
+        let what = if count == 1 {
+            "old message was"
+        } else {
+            "old messages were"
+        };
+        let them = if count == 1 { "it" } else { "them" };
+        return format!(
+            "{count} more {what} encrypted before this device existed: {them} cannot be read here"
+        );
+    }
+    let ru = |one, few, many| crate::lang::ru_plural(count, one, few, many);
+    let what = ru("старое сообщение", "старых сообщения", "старых сообщений");
+    let verb = ru("зашифровано", "зашифрованы", "зашифрованы");
+    let them = ru("его", "их", "их");
     format!("ещё {count} {what} {verb} до появления этого устройства — здесь {them} не прочитать")
 }
 
@@ -1365,9 +1452,14 @@ fn unreadable_words(count: usize) -> String {
 fn omemo_error(error: &omtalk_omemo::Error) -> String {
     match error {
         omtalk_omemo::Error::NoTrustedDevices(jid) => {
-            format!("у {jid} нет доверенных устройств — решите о них в окне ключей (/keys)")
+            trf!(
+                "{jid} has no trusted devices: decide about them in the keys window (/keys)",
+                "у {jid} нет доверенных устройств — решите о них в окне ключей (/keys)"
+            )
         }
-        omtalk_omemo::Error::NoDevices(jid) => format!("у {jid} нет устройств OMEMO"),
+        omtalk_omemo::Error::NoDevices(jid) => {
+            trf!("{jid} has no OMEMO devices", "у {jid} нет устройств OMEMO")
+        }
         other => other.to_string(),
     }
 }
@@ -1378,11 +1470,17 @@ fn service_error(error: &omtalk_xmpp::Error) -> String {
     match error {
         omtalk_xmpp::Error::Stanza(e) => {
             let what = match e.defined_condition {
-                C::Forbidden | C::NotAuthorized => "нет прав".to_owned(),
-                C::ItemNotFound => "такого нет".to_owned(),
-                C::ServiceUnavailable | C::FeatureNotImplemented => "не поддерживается".to_owned(),
-                C::BadRequest => "сервер не принял запрос".to_owned(),
-                C::RemoteServerNotFound | C::RemoteServerTimeout => "сервер недоступен".to_owned(),
+                C::Forbidden | C::NotAuthorized => tr!("not allowed", "нет прав").to_owned(),
+                C::ItemNotFound => tr!("not found", "такого нет").to_owned(),
+                C::ServiceUnavailable | C::FeatureNotImplemented => {
+                    tr!("not supported", "не поддерживается").to_owned()
+                }
+                C::BadRequest => {
+                    tr!("the server did not take the request", "сервер не принял запрос").to_owned()
+                }
+                C::RemoteServerNotFound | C::RemoteServerTimeout => {
+                    tr!("the server cannot be reached", "сервер недоступен").to_owned()
+                }
                 ref other => format!("{other:?}"),
             };
             match e.texts.values().next() {
@@ -1442,14 +1540,18 @@ async fn perform(action: Action, shared: Shared) {
                             tell(Msg::Notice {
                                 account: account.clone(),
                                 chat: Some(to.clone()),
-                                text: format!("устройство {device} у {jid} не сможет прочитать: {e}"),
+                                text: trf!(
+                                    "device {device} of {jid} will not be able to read it: {e}",
+                                    "устройство {device} у {jid} не сможет прочитать: {e}"
+                                ),
                             });
                         }
                         for (jid, device) in report.untrusted {
                             tell(Msg::Notice {
                                 account: account.clone(),
                                 chat: Some(to.clone()),
-                                text: format!(
+                                text: trf!(
+                                    "device {device} of {jid} is not verified and gets nothing (/keys)",
                                     "устройство {device} у {jid} не проверено, ему не шифруется (/keys)"
                                 ),
                             });
@@ -1458,7 +1560,7 @@ async fn perform(action: Action, shared: Shared) {
                             tell(Msg::Notice {
                                 account: account.clone(),
                                 chat: Some(to.clone()),
-                                text: format!("у {jid} нет OMEMO"),
+                                text: trf!("{jid} has no OMEMO", "у {jid} нет OMEMO"),
                             });
                         }
                     }
@@ -1511,7 +1613,8 @@ async fn perform(action: Action, shared: Shared) {
             if let Some(id) = archive_id {
                 let by = if room { to.clone() } else { account.clone() };
                 if let Err(e) = xmpp.read_up_to(&to, &by, &id).await {
-                    tell(Msg::Status(format!(
+                    tell(Msg::Status(trf!(
+                        "the read mark for your other devices: {e}",
                         "отметка «прочитано» для других устройств: {e}"
                     )));
                 }
@@ -1532,8 +1635,12 @@ async fn perform(action: Action, shared: Shared) {
         Action::AddContact { account, jid, name } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let text = match xmpp.add_contact(&jid, name.as_deref()).await {
-                Ok(()) => "добавлен; запрошен его статус".to_owned(),
-                Err(e) => format!("не добавлен: {e}"),
+                Ok(()) => tr!(
+                    "added; asked to see their status",
+                    "добавлен; запрошен его статус"
+                )
+                .to_owned(),
+                Err(e) => trf!("not added: {e}", "не добавлен: {e}"),
             };
             tell(Msg::Notice {
                 account,
@@ -1544,8 +1651,8 @@ async fn perform(action: Action, shared: Shared) {
         Action::Accept { account, jid } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let text = match xmpp.accept_contact(&jid).await {
-                Ok(()) => "видит ваш статус".to_owned(),
-                Err(e) => format!("не получилось: {e}"),
+                Ok(()) => tr!("sees your status", "видит ваш статус").to_owned(),
+                Err(e) => trf!("did not work: {e}", "не получилось: {e}"),
             };
             tell(Msg::Notice {
                 account,
@@ -1559,7 +1666,7 @@ async fn perform(action: Action, shared: Shared) {
             tell(Msg::Notice {
                 account,
                 chat: Some(jid),
-                text: "не видит ваш статус".into(),
+                text: tr!("does not see your status", "не видит ваш статус").into(),
             });
         }
         Action::Upload {
@@ -1641,12 +1748,18 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::CloseChat { account, jid } => {
             if let Err(e) = shared.store.close_chat(&account, &jid) {
-                tell(Msg::Status(format!("чат {jid} не закрылся насовсем: {e}")));
+                tell(Msg::Status(trf!(
+                    "the chat {jid} did not close for good: {e}",
+                    "чат {jid} не закрылся насовсем: {e}"
+                )));
             }
         }
         Action::SaveFolders(folders) => {
             if let Err(e) = shared.store.save_folders(&folders) {
-                tell(Msg::Status(format!("папки не сохранились: {e}")));
+                tell(Msg::Status(trf!(
+                    "the folders were not saved: {e}",
+                    "папки не сохранились: {e}"
+                )));
             }
         }
         Action::Devices { account, jid } => {
@@ -1670,7 +1783,7 @@ async fn perform(action: Action, shared: Shared) {
                 Err(e) => tell(Msg::Notice {
                     account,
                     chat: Some(jid),
-                    text: format!("устройства: {e}"),
+                    text: trf!("devices: {e}", "устройства: {e}"),
                 }),
             }
         }
@@ -1745,7 +1858,11 @@ async fn perform(action: Action, shared: Shared) {
                 tell(Msg::Notice {
                     account,
                     chat: Some(room),
-                    text: format!("тема не сменилась: {}", service_error(&e)),
+                    text: trf!(
+                        "the topic did not change: {}",
+                        "тема не сменилась: {}",
+                        service_error(&e)
+                    ),
                 });
             }
         }
@@ -1760,7 +1877,11 @@ async fn perform(action: Action, shared: Shared) {
                 Err(e) => tell(Msg::Notice {
                     account,
                     chat: Some(room),
-                    text: format!("название не сменилось: {}", service_error(&e)),
+                    text: trf!(
+                        "the title did not change: {}",
+                        "название не сменилось: {}",
+                        service_error(&e)
+                    ),
                 }),
             }
         }
@@ -1789,7 +1910,11 @@ async fn perform(action: Action, shared: Shared) {
                         tell(Msg::Notice {
                             account,
                             chat: None,
-                            text: "у сервера нет сервиса комнат: укажите имя@сервис".into(),
+                            text: tr!(
+                                "the server has no room service: give name@service",
+                                "у сервера нет сервиса комнат: укажите имя@сервис"
+                            )
+                            .into(),
                         });
                         return;
                     }
@@ -1804,14 +1929,15 @@ async fn perform(action: Action, shared: Shared) {
                 Ok(()) => {
                     tell(Msg::Log {
                         account: account.clone(),
-                        text: format!("создана комната {room}"),
+                        text: trf!("room {room} created", "создана комната {room}"),
                     });
                     tell(Msg::RoomName { account, room, name });
                 }
                 Err(e) => tell(Msg::Notice {
                     account,
                     chat: Some(room),
-                    text: format!(
+                    text: trf!(
+                        "the room was not set up (it may have been someone else's): {}",
                         "комната не настроилась (может, она уже была чужой): {}",
                         service_error(&e)
                     ),
@@ -1828,8 +1954,12 @@ async fn perform(action: Action, shared: Shared) {
                 Err(e) => Err(e),
             };
             let text = match result {
-                Ok(()) => format!("{jid} позван(а) в комнату"),
-                Err(e) => format!("{jid} не позвать: {}", service_error(&e)),
+                Ok(()) => trf!("{jid} invited to the room", "{jid} позван(а) в комнату"),
+                Err(e) => trf!(
+                    "{jid} could not be invited: {}",
+                    "{jid} не позвать: {}",
+                    service_error(&e)
+                ),
             };
             tell(Msg::Notice {
                 account: account.clone(),
@@ -1865,7 +1995,7 @@ async fn perform(action: Action, shared: Shared) {
                 Err(e) => tell(Msg::Notice {
                     account,
                     chat: Some(room),
-                    text: format!("ник не сменился: {}", refusal(&e)),
+                    text: trf!("the nick did not change: {}", "ник не сменился: {}", refusal(&e)),
                 }),
             }
         }
@@ -1887,7 +2017,7 @@ async fn perform(action: Action, shared: Shared) {
                 Err(e) => tell(Msg::Notice {
                     account,
                     chat: Some(peer),
-                    text: format!("история с сервера: {e}"),
+                    text: trf!("history from the server: {e}", "история с сервера: {e}"),
                 }),
             }
         }
@@ -1939,7 +2069,10 @@ async fn perform(action: Action, shared: Shared) {
                     }
                     tell(Msg::Log {
                         account: account.clone(),
-                        text: format!("устройство {device} удалено из списка"),
+                        text: trf!(
+                            "device {device} removed from the list",
+                            "устройство {device} удалено из списка"
+                        ),
                     });
                     None
                 }
@@ -1953,8 +2086,11 @@ async fn perform(action: Action, shared: Shared) {
             // but one whole sequence between frames is harmless.
             let lines = text.lines().count();
             match clipboard::copy(&text) {
-                Ok(how) => tell(Msg::Status(format!("скопировано ({lines} стр., {how})"))),
-                Err(e) => tell(Msg::Status(format!("не скопировалось: {e}"))),
+                Ok(how) => tell(Msg::Status(trf!(
+                    "copied ({lines} lines, {how})",
+                    "скопировано ({lines} стр., {how})"
+                ))),
+                Err(e) => tell(Msg::Status(trf!("not copied: {e}", "не скопировалось: {e}"))),
             }
         }
         Action::PastePrimary | Action::PasteClipboard => {

@@ -649,13 +649,17 @@ async fn a_message_to_a_server_that_is_not_there_comes_back_with_why() {
         Message::chat(Some("bob@nowhere.invalid".parse().unwrap())).with_body(Lang::default(), "эй".into());
     receipts::mark_outgoing(&mut message, "lost-1");
     alice.send(message).await.unwrap();
-    let (id, reason) = wait_for(&mut events, |e| match &e.event {
+    let (id, condition, _) = wait_for(&mut events, |e| match &e.event {
         Event::Message(m) => receipts::bounce(m),
         _ => None,
     })
     .await;
     assert_eq!(id, "lost-1");
-    assert!(reason.contains("сервер получателя"), "{reason}");
+    use xmpp_parsers::stanza_error::DefinedCondition as C;
+    assert!(
+        matches!(condition, C::RemoteServerNotFound | C::RemoteServerTimeout),
+        "the recipient's server: {condition:?}"
+    );
 }
 
 #[tokio::test]

@@ -3,6 +3,8 @@
 //!     omtalk                 accounts from ~/.config/omtalk/config.toml
 //!     omtalk me@example.org  one account, without a config file
 
+#[macro_use]
+mod lang;
 mod app;
 mod avatar;
 mod clipboard;
@@ -34,6 +36,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    crate::lang::set(options.config.ui.language);
     // A mistake in the colours is said before the screen is taken over, as one in the
     // accounts is.
     match options.config.theme.palette() {

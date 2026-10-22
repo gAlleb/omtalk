@@ -184,7 +184,7 @@ impl Chat {
 
     pub fn title(&self) -> String {
         if self.kind == ChatKind::Server {
-            return "сервер".to_owned();
+            return tr!("server", "сервер").to_owned();
         }
         if let Some(name) = &self.name {
             return name.clone();
@@ -210,6 +210,37 @@ pub enum Focus {
 pub enum Person {
     Here(String),
     Away(BareJid),
+}
+
+/// How an account's connection stands. Said in words when shown, in the interface's
+/// language as it is then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Connection {
+    Connecting,
+    Online,
+    /// Lost, being made again; why.
+    Reconnecting(String),
+    /// The server refused the password; the account has stopped.
+    Refused(String),
+}
+
+impl Connection {
+    pub fn online(&self) -> bool {
+        *self == Connection::Online
+    }
+
+    pub fn words(&self) -> String {
+        match self {
+            Connection::Connecting => tr!("connecting…", "подключение…").into(),
+            Connection::Online => tr!("online", "в сети").into(),
+            Connection::Reconnecting(why) => trf!(
+                "reconnecting ({})",
+                "переподключение ({})",
+                crate::lang::reason(why)
+            ),
+            Connection::Refused(why) => trf!("password refused: {why}", "пароль не принят: {why}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,27 +550,48 @@ pub struct Replying {
     pub to: Option<omtalk_xmpp::replies::ReplyTo>,
 }
 
-pub const LEADER_KEYS: &[(&str, &str)] = &[
-    ("o", "OMEMO в этом чате вкл/выкл"),
-    ("s", "сервисы сервера"),
-    ("b", "список чатов скрыть/показать"),
-    ("r", "правую панель скрыть/показать"),
-    ("a", "ответить (на выделенное или последнее)"),
-    ("e", "ключи OMEMO: отпечатки, доверие"),
-    ("p", "настройки"),
-    ("w", "закрыть чат (комнату — покинуть)"),
-    ("z", "только текущий аккаунт / все"),
-    ("m", "мышь: omtalk / терминал (выделение tmux)"),
-    ("↑ ↓ / k j", "предыдущий / следующий чат"),
-    ("← →", "уже / шире список чатов"),
-    ("q", "выход"),
-    ("Esc", "отмена"),
+/// The key, what it does in English, in Russian.
+pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
+    ("o", "OMEMO in this chat on/off", "OMEMO в этом чате вкл/выкл"),
+    ("s", "the server's services", "сервисы сервера"),
+    ("b", "hide/show the chat list", "список чатов скрыть/показать"),
+    ("r", "hide/show the right pane", "правую панель скрыть/показать"),
+    (
+        "a",
+        "reply (to the selected or the last)",
+        "ответить (на выделенное или последнее)",
+    ),
+    (
+        "e",
+        "OMEMO keys: fingerprints, trust",
+        "ключи OMEMO: отпечатки, доверие",
+    ),
+    ("p", "settings", "настройки"),
+    (
+        "w",
+        "close the chat (a room is left)",
+        "закрыть чат (комнату — покинуть)",
+    ),
+    (
+        "z",
+        "the current account only / all",
+        "только текущий аккаунт / все",
+    ),
+    (
+        "m",
+        "mouse: omtalk / the terminal (tmux selection)",
+        "мышь: omtalk / терминал (выделение tmux)",
+    ),
+    ("↑ ↓ / k j", "previous / next chat", "предыдущий / следующий чат"),
+    ("← →", "narrower / wider chat list", "уже / шире список чатов"),
+    ("q", "quit", "выход"),
+    ("Esc", "cancel", "отмена"),
 ];
 
 pub struct App {
     pub accounts: Vec<BareJid>,
     /// Account → connection state, as shown in the status line.
-    pub connection: BTreeMap<BareJid, String>,
+    pub connection: BTreeMap<BareJid, Connection>,
     pub chats: Vec<Chat>,
     pub selected: Option<usize>,
     pub focus: Focus,
@@ -639,7 +691,7 @@ impl App {
         Self {
             connection: accounts
                 .iter()
-                .map(|a| (a.clone(), "подключение…".to_owned()))
+                .map(|a| (a.clone(), Connection::Connecting))
                 .collect(),
             accounts,
             chats: Vec::new(),
@@ -652,7 +704,7 @@ impl App {
             show_left: true,
             show_right: true,
             modifier,
-            icons: crate::theme::NERD,
+            icons: crate::theme::nerd(),
             status: String::new(),
             areas: Areas::default(),
             dragging: None,
@@ -762,7 +814,11 @@ impl App {
         }];
         match &chat.kind {
             ChatKind::Server => {
-                self.status = "служебный канал не закрывается".into();
+                self.status = tr!(
+                    "the server channel does not close",
+                    "служебный канал не закрывается"
+                )
+                .into();
                 return Vec::new();
             }
             // The room goes once it is left (Msg::Left).
@@ -801,7 +857,7 @@ impl App {
         {
             self.input = format!("/upload {}", file.display());
             self.cursor = self.input.chars().count();
-            self.status = "Enter — отправить этот файл".into();
+            self.status = tr!("Enter sends this file", "Enter — отправить этот файл").into();
             return Vec::new();
         }
         let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
@@ -1003,9 +1059,9 @@ impl App {
             chat.kind = ChatKind::Room { nick: new.to_owned() };
         }
         let text = if own {
-            format!("теперь вы {new}")
+            trf!("you are now {new}", "теперь вы {new}")
         } else {
-            format!("{old} теперь {new}")
+            trf!("{old} is now {new}", "{old} теперь {new}")
         };
         self.notice(Some(index), text, at);
     }
@@ -1027,9 +1083,9 @@ impl App {
             && before.as_deref() != Some(topic.as_str())
         {
             let text = if topic.is_empty() {
-                format!("{by} убрал(а) тему")
+                trf!("{by} removed the topic", "{by} убрал(а) тему")
             } else {
-                format!("{by} сменил(а) тему: {topic}")
+                trf!("{by} changed the topic: {topic}", "{by} сменил(а) тему: {topic}")
             };
             self.notice(Some(index), text, at);
         }
@@ -1048,8 +1104,18 @@ impl App {
         let clients = self.online.entry(key).or_default();
         let known = clients.contains_key(&online.resource);
         let line = match &online.state {
-            Some(_) if !known => Some(format!("{} ({}) подключился", online.client, online.resource)),
-            None if known => Some(format!("{} ({}) отключился", online.client, online.resource)),
+            Some(_) if !known => Some(trf!(
+                "{} ({}) connected",
+                "{} ({}) подключился",
+                online.client,
+                online.resource
+            )),
+            None if known => Some(trf!(
+                "{} ({}) disconnected",
+                "{} ({}) отключился",
+                online.client,
+                online.resource
+            )),
             _ => None,
         };
         match online.state {
@@ -1061,7 +1127,7 @@ impl App {
             && !this
             && let Some(line) = line
         {
-            self.server_log(account, format!("ваш {line}"), at);
+            self.server_log(account, trf!("your {line}", "ваш {line}"), at);
         }
     }
 
@@ -1078,7 +1144,7 @@ impl App {
 
     /// Whether the account is connected now.
     pub fn connected(&self, account: &BareJid) -> bool {
-        self.connection.get(account).is_some_and(|s| s == "в сети")
+        self.connection.get(account).is_some_and(Connection::online)
     }
 
     /// `who`'s connected clients, the most available first. Offline, nobody is known
@@ -1099,7 +1165,7 @@ impl App {
     /// One's own message, sent from here: shown at once, as being sent. `id` is the
     /// message's, for receipts.
     pub fn sending(&mut self, index: usize, text: &str, encrypted: bool, id: &str, at: i64) {
-        let mut line = Line::message(at, "я".into(), text.to_owned(), encrypted, true);
+        let mut line = Line::message(at, tr!("me", "я").into(), text.to_owned(), encrypted, true);
         line.id = Some(id.to_owned());
         line.delivery = Some(Delivery::Sending);
         self.push(index, line);
@@ -1264,7 +1330,7 @@ impl App {
         }
         let who = match (&message.nick, message.direction) {
             (Some(nick), _) => nick.clone(),
-            (None, Direction::Outgoing) => "я".to_owned(),
+            (None, Direction::Outgoing) => tr!("me", "я").to_owned(),
             (None, Direction::Incoming) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
         };
         let mut line = Line::message(
@@ -1306,10 +1372,13 @@ impl App {
         let index = self.chat(account, &message.peer, kind);
         let who = match (&message.nick, message.direction) {
             (Some(nick), _) => nick.clone(),
-            (None, Direction::Outgoing) => "ваше другое устройство".to_owned(),
+            (None, Direction::Outgoing) => tr!("your other device", "ваше другое устройство").to_owned(),
             (None, Direction::Incoming) => message.sender.to_string(),
         };
-        let text = format!("{who}: сообщение не для этого устройства — его клиент не доверяет omtalk");
+        let text = trf!(
+            "{who}: a message not for this device: their client does not trust omtalk",
+            "{who}: сообщение не для этого устройства — его клиент не доверяет omtalk"
+        );
         let said = self.chats[index]
             .lines
             .iter()
@@ -1474,9 +1543,13 @@ impl App {
             KeyCode::Char('m') => {
                 self.mouse = !self.mouse;
                 self.status = if self.mouse {
-                    "мышь у omtalk".into()
+                    tr!("the mouse is omtalk's", "мышь у omtalk").into()
                 } else {
-                    "мышь у терминала (префикс+m — вернуть)".into()
+                    tr!(
+                        "the mouse is the terminal's (prefix+m takes it back)",
+                        "мышь у терминала (префикс+m — вернуть)"
+                    )
+                    .into()
                 };
                 Vec::new()
             }
@@ -1617,7 +1690,7 @@ impl App {
         });
         match line {
             Some(line) => self.reply_to(chat, line, (!selected.trim().is_empty()).then_some(selected)),
-            None => self.say("не на что отвечать"),
+            None => self.say(tr!("nothing to reply to", "не на что отвечать")),
         }
     }
 
@@ -1716,7 +1789,11 @@ impl App {
         // A pasted block keeps its indentation; only empty lines around it go.
         let text = input.trim_end().trim_start_matches(['\n', '\r']).to_owned();
         let Some(index) = self.selected else {
-            self.status = "нет открытого чата: /msg JID или /join КОМНАТА".into();
+            self.status = tr!(
+                "no chat open: /msg JID or /join ROOM",
+                "нет открытого чата: /msg JID или /join КОМНАТА"
+            )
+            .into();
             return Vec::new();
         };
         self.send_to(index, text)
@@ -1726,7 +1803,7 @@ impl App {
     pub fn upload(&mut self, index: usize, path: PathBuf) -> Vec<Action> {
         let chat = &self.chats[index];
         if chat.kind == ChatKind::Server {
-            self.status = "сюда файлы не отправить".into();
+            self.status = tr!("files cannot be sent here", "сюда файлы не отправить").into();
             return Vec::new();
         }
         let id = omtalk_xmpp::receipts::new_id();
@@ -1743,7 +1820,13 @@ impl App {
             id: id.clone(),
         };
         let encrypted = chat.omemo;
-        let mut line = Line::message(chrono::Utc::now().timestamp(), "я".into(), name, encrypted, true);
+        let mut line = Line::message(
+            chrono::Utc::now().timestamp(),
+            tr!("me", "я").into(),
+            name,
+            encrypted,
+            true,
+        );
         line.id = Some(id);
         line.delivery = Some(Delivery::Uploading(0));
         self.chats[index].scroll = 0;
@@ -1772,7 +1855,7 @@ impl App {
     pub fn send_to(&mut self, index: usize, text: String) -> Vec<Action> {
         let chat = &mut self.chats[index];
         if chat.kind == ChatKind::Server {
-            self.status = "здесь только команды".into();
+            self.status = tr!("only commands here", "здесь только команды").into();
             return Vec::new();
         }
         chat.scroll = 0;
@@ -1849,7 +1932,7 @@ impl App {
                     room: jid.clone(),
                     nick: nick.clone(),
                 }]),
-                _ => Err("это не комната".to_owned()),
+                _ => Err(tr!("this is not a room", "это не комната").to_owned()),
             },
             ("/add", Some(jid)) => {
                 let name = (args.len() > 1).then(|| args[1..].join(" "));
@@ -1862,10 +1945,14 @@ impl App {
                     account: chat.account.clone(),
                     jid: chat.jid.clone(),
                 }]),
-                _ => Err("откройте личный чат".to_owned()),
+                _ => Err(tr!("open a direct chat", "откройте личный чат").to_owned()),
             },
             ("/services", _) => match args.first().map(|a| a.parse::<Jid>()) {
-                Some(Err(_)) => Err("/services: нужен адрес сервиса, например example.org".to_owned()),
+                Some(Err(_)) => Err(tr!(
+                    "/services: a service address is needed, as example.org",
+                    "/services: нужен адрес сервиса, например example.org"
+                )
+                .to_owned()),
                 address => return self.open_services(address.and_then(Result::ok)),
             },
             ("/folder", _) => match self.selected {
@@ -1873,7 +1960,11 @@ impl App {
                     let name = line[name.len()..].trim();
                     return self.move_to_folder(index, (!name.is_empty()).then_some(name));
                 }
-                None => Err("откройте чат, который положить в папку".to_owned()),
+                None => Err(tr!(
+                    "open the chat to put in a folder",
+                    "откройте чат, который положить в папку"
+                )
+                .to_owned()),
             },
             // Names may hold spaces: "/rename-folder старая папка → новая"; two single
             // words need no arrow.
@@ -1891,17 +1982,17 @@ impl App {
                     });
                 match parts {
                     Some((old, new)) if !old.is_empty() && !new.is_empty() => self.rename_folder(old, new),
-                    _ => Err("/rename-folder СТАРАЯ НОВАЯ".to_owned()),
+                    _ => Err(tr!("/rename-folder OLD NEW", "/rename-folder СТАРАЯ НОВАЯ").to_owned()),
                 }
             }
             // The list shows while a command is being typed: start one.
             ("/upload", _) => {
                 let path = line[name.len()..].trim();
                 match (self.selected, expand_home(path)) {
-                    (None, _) => Err("нет открытого чата".to_owned()),
-                    (_, None) => Err("/upload ПУТЬ".to_owned()),
+                    (None, _) => Err(tr!("no chat open", "нет открытого чата").to_owned()),
+                    (_, None) => Err(tr!("/upload PATH", "/upload ПУТЬ").to_owned()),
                     (Some(_), Some(file)) if !file.is_file() => {
-                        Err(format!("нет такого файла: {}", file.display()))
+                        Err(trf!("no such file: {}", "нет такого файла: {}", file.display()))
                     }
                     (Some(index), Some(file)) => return self.upload(index, file),
                 }
@@ -1909,7 +2000,7 @@ impl App {
             ("/keys", _) => {
                 let peer = match args.first().map(|a| a.parse::<BareJid>()) {
                     Some(Ok(peer)) => Some(peer),
-                    Some(Err(_)) => return self.say("/keys [АДРЕС]"),
+                    Some(Err(_)) => return self.say(tr!("/keys [ADDRESS]", "/keys [АДРЕС]")),
                     None => None,
                 };
                 return self.open_keys(peer);
@@ -1920,7 +2011,10 @@ impl App {
                 Some(chat) => {
                     let nick = line[name.len()..].trim().to_owned();
                     if nick.is_empty() {
-                        return self.say("/nick НИК — сменить свой ник в этой комнате");
+                        return self.say(tr!(
+                            "/nick NICK changes your nick in this room",
+                            "/nick НИК — сменить свой ник в этой комнате"
+                        ));
                     }
                     Ok(vec![Action::Nick {
                         account: chat.account.clone(),
@@ -1928,14 +2022,20 @@ impl App {
                         nick,
                     }])
                 }
-                None => Err("это не комната".to_owned()),
+                None => Err(tr!("this is not a room", "это не комната").to_owned()),
             },
             ("/topic", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
                     let topic = line[name.len()..].trim().to_owned();
                     if topic.is_empty() {
-                        let now = chat.topic.clone().unwrap_or_else(|| "темы нет".into());
-                        return self.say(&format!("тема: {now} · /topic ТЕКСТ — сменить"));
+                        let now = chat
+                            .topic
+                            .clone()
+                            .unwrap_or_else(|| tr!("no topic", "темы нет").into());
+                        return self.say(&trf!(
+                            "topic: {now} · /topic TEXT changes it",
+                            "тема: {now} · /topic ТЕКСТ — сменить"
+                        ));
                     }
                     Ok(vec![Action::SetTopic {
                         account: chat.account.clone(),
@@ -1943,13 +2043,16 @@ impl App {
                         topic,
                     }])
                 }
-                None => Err("это не комната".to_owned()),
+                None => Err(tr!("this is not a room", "это не комната").to_owned()),
             },
             ("/name", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
                     let new = line[name.len()..].trim().to_owned();
                     if new.is_empty() {
-                        return self.say("/name НАЗВАНИЕ — сменить название комнаты (только владелец)");
+                        return self.say(tr!(
+                            "/name TITLE changes the room's title (owner only)",
+                            "/name НАЗВАНИЕ — сменить название комнаты (только владелец)"
+                        ));
                     }
                     Ok(vec![Action::SetRoomName {
                         account: chat.account.clone(),
@@ -1957,7 +2060,7 @@ impl App {
                         name: new,
                     }])
                 }
-                None => Err("это не комната".to_owned()),
+                None => Err(tr!("this is not a room", "это не комната").to_owned()),
             },
             ("/create", _) => {
                 let mut rest = line[name.len()..].trim().splitn(2, char::is_whitespace);
@@ -1968,7 +2071,10 @@ impl App {
                     .filter(|t| !t.is_empty())
                     .map(str::to_owned);
                 if address.is_empty() {
-                    return self.say("/create ИМЯ [НАЗВАНИЕ] — новая закрытая комната; ИМЯ или имя@сервис");
+                    return self.say(tr!(
+                        "/create NAME [TITLE] makes a closed room; NAME or name@service",
+                        "/create ИМЯ [НАЗВАНИЕ] — новая закрытая комната; ИМЯ или имя@сервис"
+                    ));
                 }
                 // A bare name goes to the account's room service, which the runtime finds.
                 let room = if address.contains('@') {
@@ -1983,7 +2089,10 @@ impl App {
                         name: title,
                         nick: None,
                     }]),
-                    None => Err(format!("{address}: не годится для адреса комнаты")),
+                    None => Err(trf!(
+                        "{address} cannot be a room's address",
+                        "{address}: не годится для адреса комнаты"
+                    )),
                 }
             }
             ("/invite", Some(jid)) => match self.current().filter(|c| c.is_room()) {
@@ -1992,11 +2101,15 @@ impl App {
                     room: chat.jid.clone(),
                     jid,
                 }]),
-                None => Err("откройте комнату, в которую позвать".to_owned()),
+                None => Err(tr!(
+                    "open the room to invite to",
+                    "откройте комнату, в которую позвать"
+                )
+                .to_owned()),
             },
             ("/close", _) => match self.selected {
                 Some(index) => return self.close_chat(index),
-                None => Err("нет открытого чата".to_owned()),
+                None => Err(tr!("no chat open", "нет открытого чата").to_owned()),
             },
             ("/quit", _) => {
                 self.quit = true;
@@ -2008,10 +2121,11 @@ impl App {
                 self.focus = Focus::Input;
                 Ok(Vec::new())
             }
-            ("/msg" | "/join" | "/add" | "/accept" | "/refuse" | "/invite", None) => {
-                Err(format!("{name}: нужен адрес вида name@server"))
-            }
-            _ => Err(format!("нет команды {name}")),
+            ("/msg" | "/join" | "/add" | "/accept" | "/refuse" | "/invite", None) => Err(trf!(
+                "{name}: an address as name@server is needed",
+                "{name}: нужен адрес вида name@server"
+            )),
+            _ => Err(trf!("no command {name}", "нет команды {name}")),
         };
         match result {
             Ok(actions) => actions,
@@ -2067,7 +2181,7 @@ impl App {
         {
             self.input = format!("/upload {}", file.display());
             self.cursor = self.input.chars().count();
-            self.status = "Enter — отправить этот файл".into();
+            self.status = tr!("Enter sends this file", "Enter — отправить этот файл").into();
             return Vec::new();
         }
         let at = self.byte_at(self.cursor);
@@ -2271,7 +2385,7 @@ impl App {
         let account = chat.account.clone();
         match chat.occupants.get(nick) {
             Some(Some(real)) if *real == account => {
-                self.status = "это вы".into();
+                self.status = tr!("this is you", "это вы").into();
                 Vec::new()
             }
             Some(Some(real)) => {
@@ -2281,11 +2395,17 @@ impl App {
                 self.select(index)
             }
             Some(None) => {
-                self.status = format!("{nick}: комната не показывает адрес участника");
+                self.status = trf!(
+                    "{nick}: the room does not show who this is",
+                    "{nick}: комната не показывает адрес участника"
+                );
                 Vec::new()
             }
             None => {
-                self.status = format!("{nick} сейчас не в комнате, адрес неизвестен");
+                self.status = trf!(
+                    "{nick} is not in the room now, the address is unknown",
+                    "{nick} сейчас не в комнате, адрес неизвестен"
+                );
                 Vec::new()
             }
         }
@@ -2445,9 +2565,9 @@ impl App {
             ("icons", value) => {
                 let text = value.text() == "text";
                 self.icons = if text {
-                    crate::theme::TEXT_ICONS
+                    crate::theme::text_icons()
                 } else {
-                    crate::theme::NERD
+                    crate::theme::nerd()
                 };
                 self.config_ui.icons = if text {
                     crate::config::IconSet::Text
@@ -2485,12 +2605,29 @@ impl App {
                 self.config_ui.auto_download = *on;
                 Ok(())
             }
+            ("language", value) => {
+                let language = if value.text() == "ru" {
+                    crate::lang::Language::Russian
+                } else {
+                    crate::lang::Language::English
+                };
+                crate::lang::set(language);
+                self.config_ui.language = language;
+                // The icons carry words too.
+                self.icons = match self.config_ui.icons {
+                    crate::config::IconSet::Text => crate::theme::text_icons(),
+                    crate::config::IconSet::Nerd => crate::theme::nerd(),
+                };
+                Ok(())
+            }
             ("avatars", Value::Bool(on)) => {
                 self.show_avatars = *on;
                 self.config_ui.avatars = *on;
                 Ok(())
             }
-            ("viewer", Value::Text(text)) if text.is_empty() => Err("нужна программа".into()),
+            ("viewer", Value::Text(text)) if text.is_empty() => {
+                Err(tr!("a program is needed", "нужна программа").into())
+            }
             ("viewer", Value::Text(text)) => {
                 self.config_ui.viewer = text.clone();
                 Ok(())
@@ -2510,6 +2647,14 @@ impl App {
             ("avatars", true) => self.selected.and_then(|i| self.ask_avatar(i)),
             _ => None,
         };
+        // The window itself in the language just chosen, where it was.
+        if setting.key == "language" && used.is_ok() {
+            let cursor = self.settings.as_ref().map_or(0, |s| s.cursor);
+            self.open_settings();
+            if let Some(settings) = self.settings.as_mut() {
+                settings.cursor = cursor;
+            }
+        }
         let settings = self.settings.as_mut().expect("open");
         match used {
             Ok(()) => {
@@ -2767,7 +2912,11 @@ impl App {
             return Vec::new();
         };
         if chat.kind == ChatKind::Server {
-            self.status = "служебный канал не кладётся в папку".into();
+            self.status = tr!(
+                "the server channel does not go in a folder",
+                "служебный канал не кладётся в папку"
+            )
+            .into();
             return Vec::new();
         }
         let (account, jid) = (chat.account.clone(), chat.jid.clone());
@@ -2799,17 +2948,23 @@ impl App {
     /// Renames a folder of the account commands act for.
     fn rename_folder(&mut self, old: &str, new: &str) -> Result<Vec<Action>, String> {
         let Some(account) = self.account_for(None) else {
-            return Err("нет аккаунта".to_owned());
+            return Err(tr!("no account", "нет аккаунта").to_owned());
         };
         if self.folders.iter().any(|f| f.account == account && f.name == new) {
-            return Err(format!("папка «{new}» уже есть"));
+            return Err(trf!(
+                "there is a folder «{new}» already",
+                "папка «{new}» уже есть"
+            ));
         }
         let Some(folder) = self
             .folders
             .iter_mut()
             .find(|f| f.account == account && f.name == old)
         else {
-            return Err(format!("в {account} нет папки «{old}»"));
+            return Err(trf!(
+                "{account} has no folder «{old}»",
+                "в {account} нет папки «{old}»"
+            ));
         };
         folder.name = new.to_owned();
         if self
@@ -2967,7 +3122,11 @@ impl App {
                     self.input = "/upload ".into();
                     self.cursor = self.input.chars().count();
                     self.focus = Focus::Input;
-                    self.status = "путь к файлу или перетащите файл сюда".into();
+                    self.status = tr!(
+                        "a path to a file, or drop a file here",
+                        "путь к файлу или перетащите файл сюда"
+                    )
+                    .into();
                 } else if let Some((_, group)) = self.areas.group_rows.iter().find(|(r, _)| inside(*r)) {
                     let group = group.clone();
                     self.toggle_group(&group);
@@ -2988,7 +3147,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.dragging_chat.is_some() && self.dragging.is_none() {
-                    self.status = "отпустите на папке".into();
+                    self.status = tr!("let go on a folder", "отпустите на папке").into();
                 }
                 let max = self.max_pane();
                 match self.dragging {
@@ -3017,7 +3176,11 @@ impl App {
                             self.move_to_folder(index, None)
                         }
                         _ => {
-                            self.status = "чат другого аккаунта: папки у каждого аккаунта свои".into();
+                            self.status = tr!(
+                                "a chat of another account: each account has folders of its own",
+                                "чат другого аккаунта: папки у каждого аккаунта свои"
+                            )
+                            .into();
                             Vec::new()
                         }
                     },

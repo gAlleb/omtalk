@@ -36,7 +36,8 @@ impl When {
                 "mention" => when.mention = true,
                 "none" | "never" | "" => {}
                 other => {
-                    return Err(format!(
+                    return Err(trf!(
+                        "[notify]: cannot read {other:?}: all, private, mention, private+mention or none",
                         "[notify]: не понимаю {other:?}: all, private, mention, private+mention или none"
                     ));
                 }

@@ -4,120 +4,161 @@
 
 pub struct Command {
     pub name: &'static str,
-    pub args: &'static str,
-    pub about: &'static str,
+    /// In English and in Russian; [`Command::args`] picks.
+    pub args: [&'static str; 2],
+    pub about: [&'static str; 2],
+}
+
+impl Command {
+    pub fn args(&self) -> &'static str {
+        self.args[usize::from(crate::lang::russian())]
+    }
+
+    pub fn about(&self) -> &'static str {
+        self.about[usize::from(crate::lang::russian())]
+    }
 }
 
 pub const COMMANDS: &[Command] = &[
     Command {
         name: "/msg",
-        args: "JID [ТЕКСТ]",
-        about: "личный чат; с текстом — сразу отправить",
+        args: ["JID [TEXT]", "JID [ТЕКСТ]"],
+        about: [
+            "a direct chat; with text, sends it at once",
+            "личный чат; с текстом — сразу отправить",
+        ],
     },
     Command {
         name: "/join",
-        args: "КОМНАТА [НИК]",
-        about: "войти в комнату",
+        args: ["ROOM [NICK]", "КОМНАТА [НИК]"],
+        about: ["join a room", "войти в комнату"],
     },
     Command {
         name: "/leave",
-        args: "",
-        about: "выйти из текущей комнаты",
+        args: ["", ""],
+        about: ["leave the current room", "выйти из текущей комнаты"],
     },
     Command {
         name: "/add",
-        args: "JID [ИМЯ]",
-        about: "добавить контакт и попросить подписку",
+        args: ["JID [NAME]", "JID [ИМЯ]"],
+        about: [
+            "add a contact and ask to see their status",
+            "добавить контакт и попросить подписку",
+        ],
     },
     Command {
         name: "/accept",
-        args: "JID",
-        about: "разрешить видеть ваш статус",
+        args: ["JID", "JID"],
+        about: ["let them see your status", "разрешить видеть ваш статус"],
     },
     Command {
         name: "/refuse",
-        args: "JID",
-        about: "отказать в подписке",
+        args: ["JID", "JID"],
+        about: ["refuse a subscription request", "отказать в подписке"],
     },
     Command {
         name: "/devices",
-        args: "",
-        about: "устройства OMEMO собеседника",
+        args: ["", ""],
+        about: ["the contact's OMEMO devices", "устройства OMEMO собеседника"],
     },
     Command {
         name: "/services",
-        args: "[АДРЕС]",
-        about: "сервисы и команды сервера",
+        args: ["[ADDRESS]", "[АДРЕС]"],
+        about: ["the server's services and commands", "сервисы и команды сервера"],
     },
     Command {
         name: "/folder",
-        args: "[ПАПКА]",
-        about: "положить чат в папку; без имени — вынуть",
+        args: ["[FOLDER]", "[ПАПКА]"],
+        about: [
+            "put the chat in a folder; without a name, take it out",
+            "положить чат в папку; без имени — вынуть",
+        ],
     },
     Command {
         name: "/rename-folder",
-        args: "СТАРАЯ НОВАЯ",
-        about: "переименовать папку",
+        args: ["OLD NEW", "СТАРАЯ НОВАЯ"],
+        about: ["rename a folder", "переименовать папку"],
     },
     Command {
         name: "/help",
-        args: "",
-        about: "этот список",
+        args: ["", ""],
+        about: ["this list", "этот список"],
     },
     Command {
         name: "/upload",
-        args: "ПУТЬ",
-        about: "отправить файл или картинку",
+        args: ["PATH", "ПУТЬ"],
+        about: ["send a file or a picture", "отправить файл или картинку"],
     },
     Command {
         name: "/reply",
-        args: "",
-        about: "ответить на выделенное или последнее сообщение",
+        args: ["", ""],
+        about: [
+            "reply to the selected or the last message",
+            "ответить на выделенное или последнее сообщение",
+        ],
     },
     Command {
         name: "/settings",
-        args: "",
-        about: "настройки",
+        args: ["", ""],
+        about: ["settings", "настройки"],
     },
     Command {
         name: "/keys",
-        args: "[АДРЕС]",
-        about: "ключи OMEMO: отпечатки, доверие, старые устройства",
+        args: ["[ADDRESS]", "[АДРЕС]"],
+        about: [
+            "OMEMO keys: fingerprints, trust, old devices",
+            "ключи OMEMO: отпечатки, доверие, старые устройства",
+        ],
     },
     Command {
         name: "/create",
-        args: "ИМЯ [НАЗВАНИЕ]",
-        about: "новая закрытая комната (для OMEMO)",
+        args: ["NAME [TITLE]", "ИМЯ [НАЗВАНИЕ]"],
+        about: [
+            "a new closed room (for OMEMO)",
+            "новая закрытая комната (для OMEMO)",
+        ],
     },
     Command {
         name: "/invite",
-        args: "JID",
-        about: "позвать в комнату (сделать участником)",
+        args: ["JID", "JID"],
+        about: [
+            "invite to the room (make a member)",
+            "позвать в комнату (сделать участником)",
+        ],
     },
     Command {
         name: "/nick",
-        args: "НИК",
-        about: "сменить свой ник в комнате",
+        args: ["NICK", "НИК"],
+        about: ["change your nick in the room", "сменить свой ник в комнате"],
     },
     Command {
         name: "/topic",
-        args: "[ТЕКСТ]",
-        about: "тема комнаты: показать или сменить",
+        args: ["[TEXT]", "[ТЕКСТ]"],
+        about: [
+            "the room's topic: show or change it",
+            "тема комнаты: показать или сменить",
+        ],
     },
     Command {
         name: "/name",
-        args: "НАЗВАНИЕ",
-        about: "название комнаты (только владелец)",
+        args: ["TITLE", "НАЗВАНИЕ"],
+        about: [
+            "the room's title (owner only)",
+            "название комнаты (только владелец)",
+        ],
     },
     Command {
         name: "/close",
-        args: "",
-        about: "закрыть чат; комнату — покинуть",
+        args: ["", ""],
+        about: [
+            "close the chat; a room is left",
+            "закрыть чат; комнату — покинуть",
+        ],
     },
     Command {
         name: "/quit",
-        args: "",
-        about: "выйти из omtalk",
+        args: ["", ""],
+        about: ["quit omtalk", "выйти из omtalk"],
     },
 ];
 

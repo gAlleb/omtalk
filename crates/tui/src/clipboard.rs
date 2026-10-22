@@ -51,31 +51,43 @@ pub fn image_to(folder: &std::path::Path) -> Result<std::path::PathBuf, String> 
         .output()
         .map_err(|e| format!("wl-paste: {e}"))?;
     if !output.status.success() || output.stdout.is_empty() {
-        return Err("картинку из буфера не получить".into());
+        return Err(tr!(
+            "cannot get the picture from the clipboard",
+            "картинку из буфера не получить"
+        )
+        .into());
     }
     std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    let path = folder.join(format!("картинка-{stamp}.png"));
+    let path = folder.join(trf!("picture-{stamp}.png", "картинка-{stamp}.png"));
     std::fs::write(&path, &output.stdout).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
 fn paste(args: &[&str]) -> Result<String, String> {
     if !wayland() {
-        return Err("нет Wayland: вставка из буфера только через терминал (Shift+средняя кнопка)".into());
+        return Err(tr!(
+            "no Wayland: paste through the terminal (Shift+middle button)",
+            "нет Wayland: вставка из буфера только через терминал (Shift+средняя кнопка)"
+        )
+        .into());
     }
     let output = Command::new("wl-paste")
         .args(args)
         .stderr(Stdio::null())
         .output()
         .map_err(|_| {
-            "нет wl-paste (пакет wl-clipboard): вставка через терминал — Shift+средняя кнопка".to_string()
+            tr!(
+                "no wl-paste (package wl-clipboard): paste through the terminal, Shift+middle button",
+                "нет wl-paste (пакет wl-clipboard): вставка через терминал — Shift+средняя кнопка"
+            )
+            .to_string()
         })?;
     if !output.status.success() {
-        return Err("буфер пуст".into());
+        return Err(tr!("the clipboard is empty", "буфер пуст").into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

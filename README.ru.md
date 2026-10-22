@@ -57,6 +57,7 @@ mouse = true           # false — мышь у терминала (выделе�
 read_markers = true    # false — собеседник не видит, что вы прочитали
 typing = true          # false — собеседник не видит, что вы печатаете
 avatars = false        # true — аватарки собеседника и комнаты в правой панели
+language = "ru"        # язык интерфейса: en (по умолчанию) или ru
 
 [notify]               # у каждого: all, private, mention, private+mention или none
 sound = "canberra-gtk-play -i message-new-instant"   # любая команда; "" — без звука
@@ -70,6 +71,9 @@ accent = "#7aa2f7"     # имя (blue, bright-red, gray), #rrggbb или ном�
 # selection_text = "black"  selection_background = "yellow"   # выделенная строка
 # nicks = ["red", "green", "#ff8800"]                         # цвета ников по кругу
 ```
+
+Интерфейс по умолчанию английский; `language = "ru"` в `[ui]` или строка «Language / Язык»
+в настройках включает русский, сразу.
 
 Настройки из `[ui]` и `[notify]` можно менять и в самом omtalk: `/settings` или
 префикс+`p`. Стрелки выбирают, `Enter` или клик меняет, `←`/`→` листают значения.

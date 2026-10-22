@@ -195,8 +195,14 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.chats.is_empty() && inner.height > 2 {
         let hint = Paragraph::new(vec![
-            TextLine::from(Span::styled("нет чатов", Style::default().fg(theme::dim()))),
-            TextLine::from(Span::styled("/msg или /join", Style::default().fg(theme::dim()))),
+            TextLine::from(Span::styled(
+                tr!("no chats", "нет чатов"),
+                Style::default().fg(theme::dim()),
+            )),
+            TextLine::from(Span::styled(
+                tr!("/msg or /join", "/msg или /join"),
+                Style::default().fg(theme::dim()),
+            )),
         ]);
         // Below the headings, if any.
         if y + 2 <= inner.bottom() {
@@ -208,7 +214,10 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
 /// An account's heading in the chat list: fold mark, state, address, and while folded
 /// the unread count of its chats, so nothing hides there unnoticed.
 fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragraph<'static> {
-    let online = app.connection.get(account).is_some_and(|s| s == "в сети");
+    let online = app
+        .connection
+        .get(account)
+        .is_some_and(crate::app::Connection::online);
     let mark = if folded { "▸ " } else { "▾ " };
     let unread: usize = app
         .chats
@@ -389,7 +398,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 .map(|c| c.client.clone())
                 .collect();
             let seen = if clients.is_empty() {
-                "не в сети".to_owned()
+                tr!("offline", "не в сети").to_owned()
             } else {
                 clients.join(", ")
             };
@@ -422,9 +431,9 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         let names = app.typing_now(&chat.account, &chat.jid, chrono::Utc::now().timestamp());
         if !names.is_empty() {
             let verb = if names.len() == 1 {
-                "печатает"
+                tr!("is typing", "печатает")
             } else {
-                "печатают"
+                tr!("are typing", "печатают")
             };
             block = block.title_bottom(
                 TextLine::from(Span::styled(
@@ -520,6 +529,18 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     leader_keys(frame, app, input);
 }
 
+/// A client's presence, in words.
+fn state_words(state: omtalk_xmpp::presence::State) -> &'static str {
+    use omtalk_xmpp::presence::State;
+    match state {
+        State::Chat => tr!("free to chat", "готов общаться"),
+        State::Online => tr!("online", "в сети"),
+        State::Away => tr!("away", "отошёл"),
+        State::Dnd => tr!("do not disturb", "не беспокоить"),
+        State::Xa => tr!("away for long", "давно отошёл"),
+    }
+}
+
 /// Connected clients, one a row: the program, its state, its own words.
 fn client_rows(rows: &mut Vec<TextLine<'static>>, clients: &[&omtalk_xmpp::presence::Online], width: u16) {
     use omtalk_xmpp::presence::State;
@@ -530,11 +551,16 @@ fn client_rows(rows: &mut Vec<TextLine<'static>>, clients: &[&omtalk_xmpp::prese
             State::Away | State::Xa => theme::accent(),
             State::Dnd => theme::warn(),
         };
-        let mut words = state.words().to_owned();
+        let mut words = state_words(state).to_owned();
         if let Some(status) = &client.status {
             words = format!("{words} · {status}");
         }
-        let line = format!("{}  {words}", client.client);
+        let name = if client.client.is_empty() {
+            tr!("client", "клиент")
+        } else {
+            client.client.as_str()
+        };
+        let line = format!("{name}  {words}");
         rows.push(TextLine::from(vec![
             Span::styled("● ", Style::default().fg(colour)),
             Span::raw(truncate(&line, (width as usize).saturating_sub(2))),
@@ -593,7 +619,10 @@ fn replying(frame: &mut Frame, app: &App, input: Rect) {
             ),
             Style::default().fg(theme::dim()),
         ),
-        Span::styled("  Esc — отменить", Style::default().fg(theme::dim())),
+        Span::styled(
+            tr!("  Esc cancels", "  Esc — отменить"),
+            Style::default().fg(theme::dim()),
+        ),
     ]);
     clear(frame, place);
     frame.render_widget(Paragraph::new(line), place);
@@ -626,10 +655,10 @@ fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
     if !app.leader_pending {
         return;
     }
-    let left = LEADER_KEYS.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
+    let left = LEADER_KEYS.iter().map(|(k, ..)| k.width()).max().unwrap_or(0);
     let width = (LEADER_KEYS
         .iter()
-        .map(|(_, a)| left + 3 + a.width())
+        .map(|(_, en, ru)| left + 3 + if crate::lang::russian() { ru } else { en }.width())
         .max()
         .unwrap_or(0) as u16
         + 2)
@@ -657,7 +686,8 @@ fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
     frame.render_widget(block, area);
     let lines: Vec<TextLine> = LEADER_KEYS
         .iter()
-        .map(|(key, about)| {
+        .map(|(key, en, ru)| {
+            let about = if crate::lang::russian() { ru } else { en };
             TextLine::from(vec![
                 Span::styled(
                     format!("{key:<left$}"),
@@ -680,7 +710,7 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
             .enumerate()
             .map(|(i, text)| {
                 let text = text.trim_end().trim_end_matches(':').to_owned();
-                let about = complete::about(&text).map(|c| c.about).unwrap_or("");
+                let about = complete::about(&text).map(|c| c.about()).unwrap_or("");
                 (text, about, i == c.index)
             })
             .collect(),
@@ -688,8 +718,8 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
             .into_iter()
             .map(|c| {
                 (
-                    format!("{} {}", c.name, c.args).trim_end().to_owned(),
-                    c.about,
+                    format!("{} {}", c.name, c.args()).trim_end().to_owned(),
+                    c.about(),
                     false,
                 )
             })
@@ -718,7 +748,7 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(theme::border(true))
         .title(Span::styled(
-            " Tab — дописать ",
+            tr!(" Tab completes ", " Tab — дописать "),
             Style::default().fg(theme::dim()),
         ));
     let inner = block.inner(area);
@@ -753,15 +783,18 @@ fn empty_state(frame: &mut Frame, area: Rect) {
         )),
         TextLine::from(""),
         TextLine::from(Span::styled(
-            "/msg имя@сервер — написать",
+            tr!("/msg name@server to write", "/msg имя@сервер — написать"),
             Style::default().fg(theme::dim()),
         )),
         TextLine::from(Span::styled(
-            "/join комната@conference.сервер — войти в группу",
+            tr!(
+                "/join room@conference.server to join a group",
+                "/join комната@conference.сервер — войти в группу"
+            ),
             Style::default().fg(theme::dim()),
         )),
         TextLine::from(Span::styled(
-            "/help — все команды",
+            tr!("/help for all commands", "/help — все команды"),
             Style::default().fg(theme::dim()),
         )),
     ];
@@ -920,22 +953,28 @@ pub fn message_rows(
             let (icon, state, colour) = match &slot.state {
                 MediaState::Offered => (
                     if slot.image { icons.picture } else { icons.file },
-                    "скачать".to_owned(),
+                    tr!("download", "скачать").to_owned(),
                     theme::accent(),
                 ),
                 MediaState::Downloading(percent) => (
                     if slot.image { icons.picture } else { icons.file },
-                    format!("загружается {percent}%"),
+                    trf!("downloading {percent}%", "загружается {percent}%"),
                     theme::dim(),
                 ),
                 MediaState::Loading => (
                     if slot.image { icons.picture } else { icons.file },
-                    "загружается…".to_owned(),
+                    tr!("downloading…", "загружается…").to_owned(),
                     theme::dim(),
                 ),
-                MediaState::Ready(_) if slot.image => (icons.picture, "открыть".to_owned(), theme::accent()),
-                MediaState::Ready(_) => (icons.file, "открыть".to_owned(), theme::accent()),
-                MediaState::Failed(e) => (icons.file, format!("не загрузилось: {e}"), theme::warn()),
+                MediaState::Ready(_) if slot.image => {
+                    (icons.picture, tr!("open", "открыть").to_owned(), theme::accent())
+                }
+                MediaState::Ready(_) => (icons.file, tr!("open", "открыть").to_owned(), theme::accent()),
+                MediaState::Failed(e) => (
+                    icons.file,
+                    trf!("not downloaded: {e}", "не загрузилось: {e}"),
+                    theme::warn(),
+                ),
             };
             let mut spans = vec![Span::raw("  ")];
             if !line.encrypted {
@@ -1042,7 +1081,7 @@ pub fn message_rows(
                 // From a device refused or not decided on.
                 if line.untrusted && first {
                     spans.push(Span::styled(
-                        "⚠ непроверенное устройство · ",
+                        tr!("⚠ unverified device · ", "⚠ непроверенное устройство · "),
                         Style::default().fg(theme::warn()),
                     ));
                 }
@@ -1119,7 +1158,7 @@ fn delivery_mark(delivery: &Delivery) -> (String, Style) {
             Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         ),
         Delivery::Failed(reason) => (
-            format!("✗ не отправлено: {reason}"),
+            trf!("✗ not sent: {reason}", "✗ не отправлено: {reason}"),
             Style::default().fg(theme::warn()),
         ),
     }
@@ -1246,8 +1285,11 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     let attach = format!(" {} ", app.icons.attach);
     // The hint as long as the border has room for beside the lock.
     let hint = [
-        " Enter ⏎ · Alt+Enter — новая строка ",
-        " ⏎ · Alt+⏎ строка ",
+        tr!(
+            " Enter ⏎ · Alt+Enter new line ",
+            " Enter ⏎ · Alt+Enter — новая строка "
+        ),
+        tr!(" ⏎ · Alt+⏎ line ", " ⏎ · Alt+⏎ строка "),
         " ⏎ ",
     ]
     .into_iter()
@@ -1280,7 +1322,10 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         let hint = if app.current().is_some() {
             ""
         } else {
-            "/msg имя@сервер или /join комната"
+            tr!(
+                "/msg name@server or /join room",
+                "/msg имя@сервер или /join комната"
+            )
         };
         frame.render_widget(
             Paragraph::new(Span::styled(hint, Style::default().fg(theme::dim()))),
@@ -1352,9 +1397,9 @@ const AVATAR_WIDTH: u16 = 12;
 
 fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
     let title = match app.current() {
-        Some(chat) if chat.is_room() => format!("Участники {}", chat.occupants.len()),
-        Some(chat) if chat.kind == ChatKind::Server => "Аккаунт".to_owned(),
-        Some(_) => "Собеседник".to_owned(),
+        Some(chat) if chat.is_room() => trf!("Participants {}", "Участники {}", chat.occupants.len()),
+        Some(chat) if chat.kind == ChatKind::Server => tr!("Account", "Аккаунт").to_owned(),
+        Some(_) => tr!("Contact", "Собеседник").to_owned(),
         None => "—".to_owned(),
     };
     let picking = app.focus == Focus::People;
@@ -1446,7 +1491,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             if !away.is_empty() {
                 rows.push(TextLine::default());
                 rows.push(TextLine::from(Span::styled(
-                    format!("не в сети {}", away.len()),
+                    trf!("offline {}", "не в сети {}", away.len()),
                     Style::default().fg(theme::dim()),
                 )));
                 for member in away {
@@ -1479,10 +1524,10 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             // What can be done with the room, so nobody has to look for it.
             rows.push(TextLine::default());
             for command in [
-                "/topic тема",
-                "/name название",
-                "/invite адрес",
-                "/nick ник",
+                tr!("/topic topic", "/topic тема"),
+                tr!("/name title", "/name название"),
+                tr!("/invite address", "/invite адрес"),
+                tr!("/nick nick", "/nick ник"),
                 "/close",
             ] {
                 rows.push(TextLine::from(Span::styled(
@@ -1492,8 +1537,12 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             }
         }
         ChatKind::Server => {
-            let state = app.connection.get(&chat.account).cloned().unwrap_or_default();
-            let colour = if state == "в сети" {
+            let state = app
+                .connection
+                .get(&chat.account)
+                .cloned()
+                .unwrap_or(crate::app::Connection::Connecting);
+            let colour = if state.online() {
                 theme::ok()
             } else {
                 theme::warn()
@@ -1506,7 +1555,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 ),
             ]));
             rows.push(TextLine::from(Span::styled(
-                format!("  {state}"),
+                format!("  {}", state.words()),
                 Style::default().fg(theme::dim()),
             )));
             rows.push(TextLine::default());
@@ -1519,11 +1568,15 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                     Span::raw(value),
                 ])
             };
-            rows.push(label("сервер", chat.account.domain().to_string()));
-            rows.push(label("чаты", direct.to_string()));
-            rows.push(label("комнаты", rooms.to_string()));
+            rows.push(label(tr!("server", "сервер"), chat.account.domain().to_string()));
+            rows.push(label(tr!("chats", "чаты"), direct.to_string()));
+            rows.push(label(tr!("rooms", "комнаты"), rooms.to_string()));
             rows.push(TextLine::default());
-            for command in ["/services", "/add адрес", "/join комната"] {
+            for command in [
+                "/services",
+                tr!("/add address", "/add адрес"),
+                tr!("/join room", "/join комната"),
+            ] {
                 rows.push(TextLine::from(Span::styled(
                     command,
                     Style::default().fg(theme::accent()),
@@ -1531,7 +1584,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             }
             rows.push(TextLine::default());
             rows.push(TextLine::from(Span::styled(
-                "свои клиенты",
+                tr!("your clients", "свои клиенты"),
                 Style::default().fg(theme::dim()),
             )));
             let own = app.own_resource.get(&chat.account);
@@ -1542,20 +1595,20 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 .collect();
             for client in &mut clients {
                 if Some(&client.resource) == own {
-                    client.client = format!("{} (это)", client.client);
+                    client.client = trf!("{} (this)", "{} (это)", client.client);
                 }
             }
             client_rows(&mut rows, &clients.iter().collect::<Vec<_>>(), inner.width);
         }
         ChatKind::Direct => {
             rows.push(TextLine::from(Span::styled(
-                "в сети",
+                tr!("online", "в сети"),
                 Style::default().fg(theme::dim()),
             )));
             let clients = app.clients(&chat.account, &chat.jid);
             if clients.is_empty() {
                 rows.push(TextLine::from(Span::styled(
-                    "  никого",
+                    tr!("  nobody", "  никого"),
                     Style::default().fg(theme::dim()),
                 )));
             }
@@ -1563,7 +1616,7 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             rows.push(TextLine::default());
             devices_from = Some(rows.len());
             rows.push(TextLine::from(Span::styled(
-                "устройства OMEMO · ключи",
+                tr!("OMEMO devices · keys", "устройства OMEMO · ключи"),
                 Style::default().fg(theme::dim()),
             )));
             let devices = match &chat.devices {
@@ -1576,11 +1629,11 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 }
                 Some(devices) if devices.is_empty() => {
                     rows.push(TextLine::from(Span::styled(
-                        "нет OMEMO-устройств:",
+                        tr!("no OMEMO devices:", "нет OMEMO-устройств:"),
                         Style::default().fg(theme::warn()),
                     )));
                     rows.push(TextLine::from(Span::styled(
-                        "без шифрования: ^O",
+                        tr!("unencrypted: ^O", "без шифрования: ^O"),
                         Style::default().fg(theme::dim()),
                     )));
                     &[][..]
@@ -1604,14 +1657,14 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 ];
                 if device.this_device {
                     header.push(Span::styled(
-                        " это устройство",
+                        tr!(" this device", " это устройство"),
                         Style::default().fg(theme::accent()),
                     ));
                 }
                 rows.push(TextLine::from(header));
                 let detail = match &device.fingerprint {
                     Some(fp) => fp.clone(),
-                    None => "нет ключей".to_owned(),
+                    None => tr!("no keys", "нет ключей").to_owned(),
                 };
                 for part in wrap(&detail, inner.width.saturating_sub(2) as usize) {
                     rows.push(TextLine::from(Span::styled(
@@ -1672,15 +1725,15 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     let dim = |t: &str| Span::styled(t.to_owned(), Style::default().fg(theme::dim()));
     let hints = TextLine::from(vec![
         Span::styled(leader_label(app), Style::default().fg(theme::accent())),
-        dim(" клавиши  "),
+        dim(tr!(" keys  ", " клавиши  ")),
         key("O"),
         dim(" OMEMO  "),
         Span::styled("Tab", Style::default().fg(theme::accent())),
-        dim(" дописать/фокус  "),
+        dim(tr!(" complete/focus  ", " дописать/фокус  ")),
         Span::styled("/", Style::default().fg(theme::accent())),
-        dim(" команды  "),
+        dim(tr!(" commands  ", " команды  ")),
         key("Q"),
-        dim(" выход "),
+        dim(tr!(" quit ", " выход ")),
     ]);
     // A message for the user takes the line: first, in full, in place of the hints and
     // with the connections down to their dots. It fades after a while (the runtime
@@ -1692,7 +1745,7 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
             .map(|state| {
                 Span::styled(
                     "●",
-                    Style::default().fg(if state == "в сети" {
+                    Style::default().fg(if state.online() {
                         theme::ok()
                     } else {
                         theme::warn()
@@ -1711,14 +1764,14 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     }
     let mut left = Vec::new();
     for (account, state) in &app.connection {
-        let colour = if state == "в сети" {
+        let colour = if state.online() {
             theme::ok()
         } else {
             theme::warn()
         };
         left.push(Span::styled("● ", Style::default().fg(colour)));
         left.push(Span::styled(
-            format!("{account} {state}  "),
+            format!("{account} {}  ", state.words()),
             Style::default().fg(theme::dim()),
         ));
     }
@@ -1731,7 +1784,7 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
             .map(|state| {
                 Span::styled(
                     "● ",
-                    Style::default().fg(if state == "в сети" {
+                    Style::default().fg(if state.online() {
                         theme::ok()
                     } else {
                         theme::warn()
@@ -1761,8 +1814,8 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     app.areas.key_window = area;
     clear(frame, area);
     let title = match &keys.peer {
-        Some(peer) => format!("Ключи OMEMO · {peer}"),
-        None => "Ключи OMEMO".to_owned(),
+        Some(peer) => trf!("OMEMO keys · {peer}", "Ключи OMEMO · {peer}"),
+        None => tr!("OMEMO keys", "Ключи OMEMO").to_owned(),
     };
     let block = pane(&title, true);
     let inner = block.inner(area);
@@ -1794,7 +1847,7 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 lines.push((TextLine::default(), None));
             }
             let heading = if row.owner == keys.account {
-                format!("ваши устройства · {}", row.owner)
+                trf!("your devices · {}", "ваши устройства · {}", row.owner)
             } else {
                 row.owner.to_string()
             };
@@ -1814,7 +1867,7 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         };
         let mut state = crate::keys::trust_words(row.trust).to_owned();
         if row.this_device {
-            state = "это устройство".into();
+            state = tr!("this device", "это устройство").into();
         } else if let Some(at) = row.seen {
             state = format!(
                 "{state} · {}",
@@ -1835,7 +1888,10 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             ]),
             Some(index),
         ));
-        let fingerprint = row.fingerprint.clone().unwrap_or_else(|| "нет ключей".into());
+        let fingerprint = row
+            .fingerprint
+            .clone()
+            .unwrap_or_else(|| tr!("no keys", "нет ключей").into());
         lines.push((
             TextLine::styled(format!("   {fingerprint}"), Style::default().fg(theme::dim())),
             Some(index),
@@ -1843,7 +1899,10 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     if keys.rows.is_empty() && !keys.loading {
         lines.push((
-            TextLine::styled("устройств нет", Style::default().fg(theme::dim())),
+            TextLine::styled(
+                tr!("no devices", "устройств нет"),
+                Style::default().fg(theme::dim()),
+            ),
             None,
         ));
     }
@@ -1872,9 +1931,15 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
 
     let (words, style) = match (&keys.problem, keys.loading, keys.confirm_remove) {
         (Some(problem), _, _) => (problem.clone(), Style::default().fg(theme::warn())),
-        (None, true, _) => ("загрузка…".to_owned(), Style::default().fg(theme::dim())),
+        (None, true, _) => (
+            tr!("loading…", "загрузка…").to_owned(),
+            Style::default().fg(theme::dim()),
+        ),
         (None, false, Some(device)) => (
-            format!("удалить {device}? Ещё раз — удалить"),
+            trf!(
+                "remove {device}? Once more removes it",
+                "удалить {device}? Ещё раз — удалить"
+            ),
             Style::default().fg(theme::warn()),
         ),
         _ => (String::new(), Style::default()),
@@ -1906,8 +1971,11 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         x += w + 1;
     }
     frame.render_widget(
-        Paragraph::new(" v проверено · d не доверять · b вслепую · x удалить своё · Esc")
-            .style(Style::default().fg(theme::dim())),
+        Paragraph::new(tr!(
+            " v verified · d distrust · b blind trust · x remove your own · Esc",
+            " v проверено · d не доверять · b вслепую · x удалить своё · Esc"
+        ))
+        .style(Style::default().fg(theme::dim())),
         hint,
     );
     app.areas.key_rows = row_areas;
@@ -1933,7 +2001,7 @@ fn settings_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     };
     app.areas.settings_window = area;
     clear(frame, area);
-    let block = pane("Настройки", true);
+    let block = pane(tr!("Settings", "Настройки"), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 4 || inner.width < 20 {
@@ -1957,9 +2025,9 @@ fn settings_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 lines.push((TextLine::default(), None));
             }
             let heading = if section == "notify" {
-                "Уведомления"
+                tr!("Notifications", "Уведомления")
             } else {
-                "Интерфейс"
+                tr!("Interface", "Интерфейс")
             };
             lines.push((
                 TextLine::styled(
@@ -2037,15 +2105,22 @@ fn settings_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     let (words, style) = match &settings.problem {
         Some(problem) => (problem.clone(), Style::default().fg(theme::warn())),
         None => (
-            "меняется сразу и сохраняется в config.toml".to_owned(),
+            tr!(
+                "takes effect at once and is saved in config.toml",
+                "меняется сразу и сохраняется в config.toml"
+            )
+            .to_owned(),
             Style::default().fg(theme::dim()),
         ),
     };
     frame.render_widget(Paragraph::new(format!(" {words}")).style(style), status);
     let keys = if settings.editing.is_some() {
-        " Enter сохранить · Esc отмена"
+        tr!(" Enter saves · Esc cancels", " Enter сохранить · Esc отмена")
     } else {
-        " ↑↓ выбрать · Enter или клик изменить · ← → значение · Esc"
+        tr!(
+            " ↑↓ pick · Enter or a click changes · ← → value · Esc",
+            " ↑↓ выбрать · Enter или клик изменить · ← → значение · Esc"
+        )
     };
     frame.render_widget(
         Paragraph::new(keys).style(Style::default().fg(theme::dim())),
@@ -2075,7 +2150,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     };
     let title = match &services.form {
         Some(form) => format!("{} · {}", form.title, form.jid),
-        None => format!("Сервисы · {place}"),
+        None => trf!("Services · {place}", "Сервисы · {place}"),
     };
     let block = pane(&title, true);
     let inner = block.inner(area);
@@ -2087,7 +2162,10 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     // rows each: servers write whole sentences.
     let (status, problem_style) = match (&services.problem, services.loading) {
         (Some(text), _) => (text.clone(), Style::default().fg(theme::warn())),
-        (None, true) => ("загрузка…".to_owned(), Style::default().fg(theme::dim())),
+        (None, true) => (
+            tr!("loading…", "загрузка…").to_owned(),
+            Style::default().fg(theme::dim()),
+        ),
         (None, false) => (String::new(), Style::default()),
     };
     let text_width = inner.width.saturating_sub(2) as usize;
@@ -2148,9 +2226,19 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             }
             let listing = services.listing.clone().unwrap_or_default();
             let mut row = 0;
-            for (heading, entries, icon) in [
-                ("Сервисы", &listing.items, app.icons.service),
-                ("Команды", &listing.commands, app.icons.command),
+            for (heading, entries, icon, commands) in [
+                (
+                    tr!("Services", "Сервисы"),
+                    &listing.items,
+                    app.icons.service,
+                    false,
+                ),
+                (
+                    tr!("Commands", "Команды"),
+                    &listing.commands,
+                    app.icons.command,
+                    true,
+                ),
             ] {
                 if entries.is_empty() {
                     continue;
@@ -2168,8 +2256,8 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                         .name
                         .clone()
                         .unwrap_or_else(|| entry.node.clone().unwrap_or_else(|| entry.jid.to_string()));
-                    let address = match (&entry.node, heading) {
-                        (_, "Команды") => String::new(),
+                    let address = match (&entry.node, commands) {
+                        (_, true) => String::new(),
                         (Some(node), _) => format!("  {} · {node}", entry.jid),
                         (None, _) if name != entry.jid.as_str() => format!("  {}", entry.jid),
                         (None, _) => String::new(),
@@ -2216,7 +2304,10 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             }
             if services.listing.is_some() && row == 0 && services.problem.is_none() {
                 lines.push((
-                    TextLine::styled("здесь ничего нет", Style::default().fg(theme::dim())),
+                    TextLine::styled(
+                        tr!("nothing here", "здесь ничего нет"),
+                        Style::default().fg(theme::dim()),
+                    ),
                     None,
                 ));
             }
@@ -2242,11 +2333,15 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 frame.render_widget(Paragraph::new(line), place);
             }
             labels = vec![
-                ("Назад".into(), ServiceButton::Back, false),
-                ("Обновить".into(), ServiceButton::Reload, false),
-                ("Закрыть".into(), ServiceButton::Close, false),
+                (tr!("Back", "Назад").into(), ServiceButton::Back, false),
+                (tr!("Reload", "Обновить").into(), ServiceButton::Reload, false),
+                (tr!("Close", "Закрыть").into(), ServiceButton::Close, false),
             ];
-            hint_text = "Enter открыть · ← назад · r обновить · Esc закрыть".into();
+            hint_text = tr!(
+                "Enter opens · ← back · r reload · Esc closes",
+                "Enter открыть · ← назад · r обновить · Esc закрыть"
+            )
+            .into();
         }
         Some(form) => {
             let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
@@ -2370,19 +2465,31 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                             Some(a) == default,
                         )
                     })
-                    .chain([("Отмена".to_owned(), ServiceButton::Close, false)])
+                    .chain([(tr!("Cancel", "Отмена").to_owned(), ServiceButton::Close, false)])
                     .collect();
-                hint_text = "Tab поле · Пробел/←→ выбрать · Enter дальше · Esc отменить".into();
+                hint_text = tr!(
+                    "Tab field · Space/←→ choose · Enter next · Esc cancel",
+                    "Tab поле · Пробел/←→ выбрать · Enter дальше · Esc отменить"
+                )
+                .into();
             } else {
                 let done = match form.step.status {
-                    CommandStatus::Canceled => "отменено",
-                    _ => "выполнено",
+                    CommandStatus::Canceled => tr!("cancelled", "отменено"),
+                    _ => tr!("done", "выполнено"),
                 };
                 labels = vec![
-                    (format!("К списку ({done})"), ServiceButton::Dismiss, true),
-                    ("Закрыть".into(), ServiceButton::Close, false),
+                    (
+                        trf!("Back to the list ({done})", "К списку ({done})"),
+                        ServiceButton::Dismiss,
+                        true,
+                    ),
+                    (tr!("Close", "Закрыть").into(), ServiceButton::Close, false),
                 ];
-                hint_text = "Enter к списку · Esc закрыть".into();
+                hint_text = tr!(
+                    "Enter back to the list · Esc closes",
+                    "Enter к списку · Esc закрыть"
+                )
+                .into();
             }
         }
     }
@@ -2506,11 +2613,11 @@ fn field_value(field: &FieldState, focused: bool, editing: bool) -> String {
 
 fn step_label(action: CommandAction) -> &'static str {
     match action {
-        CommandAction::Execute => "Выполнить",
-        CommandAction::Prev => "Назад",
-        CommandAction::Next => "Далее",
-        CommandAction::Complete => "Готово",
-        CommandAction::Cancel => "Отмена",
+        CommandAction::Execute => tr!("Run", "Выполнить"),
+        CommandAction::Prev => tr!("Back", "Назад"),
+        CommandAction::Next => tr!("Next", "Далее"),
+        CommandAction::Complete => tr!("Done", "Готово"),
+        CommandAction::Cancel => tr!("Cancel", "Отмена"),
     }
 }
 
@@ -2565,9 +2672,9 @@ mod tests {
         assert!(text.contains("omtalk"), "chat list pane");
         assert!(text.contains("@ bob"), "the chat in the list");
         assert!(text.contains("привет"));
-        let mark = format!("{}это без шифрования", theme::NERD.plain_mark);
+        let mark = format!("{}это без шифрования", theme::nerd().plain_mark);
         assert!(text.contains(&mark), "plain text is marked\n{text}");
-        assert!(text.contains(theme::NERD.locked), "the lock on the input");
+        assert!(text.contains(theme::nerd().locked), "the lock on the input");
         assert!(
             !text.chars().any(|c| ('\u{1F300}'..='\u{1FAFF}').contains(&c)),
             "no colour emoji in the interface"
@@ -2616,8 +2723,8 @@ mod tests {
         let text = screen(&mut app, 120, 20);
         let button = app.areas.omemo_button;
         let row: String = text.lines().nth(button.y as usize).unwrap().chars().collect();
-        assert!(row.contains(theme::NERD.locked));
-        assert!(button.width >= theme::NERD.locked.width() as u16);
+        assert!(row.contains(theme::nerd().locked));
+        assert!(button.width >= theme::nerd().locked.width() as u16);
     }
 
     #[test]
@@ -2885,7 +2992,8 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         let (home, work) = (jid("me@home.org"), jid("me@work.org"));
         let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
-        app.connection.insert(home.clone(), "в сети".into());
+        app.connection
+            .insert(home.clone(), crate::app::Connection::Online);
         let a = app.chat(&home, &jid("anna@home.org"), ChatKind::Direct);
         let b = app.chat(&work, &jid("boss@work.org"), ChatKind::Direct);
         let c = app.chat(&home, &jid("carl@home.org"), ChatKind::Direct);
@@ -3624,7 +3732,7 @@ mod tests {
         use omtalk_xmpp::presence::{Online, State};
         let me = jid("me@home.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
-        app.connection.insert(me.clone(), "в сети".into());
+        app.connection.insert(me.clone(), crate::app::Connection::Online);
         let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
         app.select(bob);
         assert!(screen(&mut app, 120, 24).contains("не в сети"));
@@ -3655,10 +3763,12 @@ mod tests {
             "{text}"
         );
         // This side offline: what was heard may be stale, nobody is shown online.
-        app.connection
-            .insert(me.clone(), "переподключение (сервер не отвечает)".into());
+        app.connection.insert(
+            me.clone(),
+            crate::app::Connection::Reconnecting("the server does not answer".into()),
+        );
         assert!(screen(&mut app, 120, 24).contains("bob@home.org · не в сети"));
-        app.connection.insert(me.clone(), "в сети".into());
+        app.connection.insert(me.clone(), crate::app::Connection::Online);
 
         // Gone: off the list.
         app.presence(&me, client("bob@home.org", "gajim.1", "Gajim", None), 2);
@@ -4543,7 +4653,15 @@ mod tests {
         assert!(!app.mouse);
 
         // The modifier, by keys: Alt now holds the shortcuts.
-        app.settings.as_mut().unwrap().cursor = 0;
+        let modifier = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.key == "modifier")
+            .unwrap();
+        app.settings.as_mut().unwrap().cursor = modifier;
         let actions = app.on_key(key(KeyCode::Right));
         assert_eq!(app.modifier, KeyModifiers::ALT, "{actions:?}");
 
@@ -4936,5 +5054,104 @@ mod tests {
             "nothing styled in a block of code"
         );
         assert_eq!(find("let").fg, theme::accent());
+    }
+
+    #[test]
+    fn in_english_no_screen_says_a_word_of_russian() {
+        use crate::services::Listing;
+        use crossterm::event::{KeyCode, KeyEvent};
+        use omtalk_xmpp::services::{CommandStatus, CommandStep, ServiceItem};
+        crate::lang::for_this_thread(crate::lang::Language::English);
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        app.icons = crate::theme::nerd();
+        let server = app.server_chat(&me);
+        app.server_log(&me, "x", 1);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.chats[room]
+            .occupants
+            .insert("ann".into(), Some(jid("ann@home.org")));
+        app.chats[room].members = vec![jid("carl@home.org")];
+        app.chats[bob].devices = Some(vec![crate::app::DeviceRow {
+            device: 1,
+            seen: Some(1),
+            fingerprint: Some("aaaa".into()),
+            has_session: true,
+            this_device: false,
+            trust: omtalk_omemo::Trust::Undecided,
+        }]);
+        app.push(
+            bob,
+            Line::message(1_700_000_000, "bob".into(), "hello".into(), false, false),
+        );
+        app.rename_occupant(room, "ann", "anna", 2);
+        let cyrillic = |text: &str| {
+            text.chars()
+                .find(|c| matches!(c, 'а'..='я' | 'А'..='Я' | 'ё' | 'Ё'))
+        };
+        let check = |app: &mut App, what: &str| {
+            // The language's own row says it in both, on purpose.
+            let text = screen(app, 130, 40).replace("Язык", "").replace("Русский", "");
+            assert_eq!(cyrillic(&text), None, "{what}:\n{text}");
+        };
+        for index in [server, bob, room] {
+            app.select(index);
+            check(&mut app, "a chat");
+        }
+        app.focus = Focus::Input;
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        check(&mut app, "the commands");
+        app.input.clear();
+        app.leader_pending = true;
+        check(&mut app, "the prefix keys");
+        app.leader_pending = false;
+        app.open_settings();
+        check(&mut app, "the settings");
+        app.settings = None;
+        app.select(bob);
+        app.open_keys(None);
+        app.keys.as_mut().unwrap().loaded(Ok(Vec::new()));
+        check(&mut app, "the keys");
+        app.keys = None;
+        app.open_services(None);
+        let host: omtalk_xmpp::Jid = "home.org".parse().unwrap();
+        app.services.as_mut().unwrap().listed(
+            &host,
+            &None,
+            Ok(Listing {
+                info: None,
+                items: vec![ServiceItem {
+                    jid: "muc.home.org".parse().unwrap(),
+                    node: None,
+                    name: None,
+                }],
+                commands: vec![ServiceItem {
+                    jid: host.clone(),
+                    node: Some("x".into()),
+                    name: Some("X".into()),
+                }],
+            }),
+        );
+        check(&mut app, "the services");
+        let form: omtalk_xmpp::Element =
+            r#"<x xmlns="jabber:x:data" type="form"><field var="a" type="boolean" label="A"/></x>"#
+                .parse()
+                .unwrap();
+        let step = CommandStep {
+            node: "x".into(),
+            session: Some("s".into()),
+            status: CommandStatus::Executing,
+            form: Some(form.try_into().unwrap()),
+            notes: Vec::new(),
+            actions: vec![CommandAction::Complete],
+            default_action: Some(CommandAction::Complete),
+        };
+        app.services.as_mut().unwrap().stepped(host, "X".into(), Ok(step));
+        check(&mut app, "a form");
     }
 }

@@ -28,18 +28,6 @@ pub enum State {
     Xa,
 }
 
-impl State {
-    pub fn words(self) -> &'static str {
-        match self {
-            State::Chat => "готов общаться",
-            State::Online => "в сети",
-            State::Away => "отошёл",
-            State::Dnd => "не беспокоить",
-            State::Xa => "давно отошёл",
-        }
-    }
-}
-
 /// What a presence says about a client, if it is about one: not a room's (see
 /// [`crate::muc`]), not a subscription, not an error.
 pub fn online(presence: &Presence) -> Option<Online> {
@@ -113,11 +101,8 @@ pub fn client_name(node: &str, resource: &str) -> String {
             return name.to_owned();
         }
     }
-    if resource.is_empty() {
-        "клиент".to_owned()
-    } else {
-        resource.to_owned()
-    }
+    // Nothing to tell it by: the interface names it in its own words.
+    resource.to_owned()
 }
 
 #[cfg(test)]

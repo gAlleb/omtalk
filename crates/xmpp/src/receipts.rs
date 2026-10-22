@@ -109,11 +109,17 @@ pub fn marks(message: &Message) -> Vec<Mark> {
     found
 }
 
-/// A message of one's that came back as an error: its id, and why, in words. The
-/// reason the server gives (for example "server does not accept other servers") follows
-/// what the condition means.
-pub fn bounce(message: &Message) -> Option<(String, String)> {
-    use xmpp_parsers::stanza_error::{DefinedCondition as C, StanzaError};
+/// A message of one's that came back as an error: its id, why (the condition), and what
+/// the server said of it ("server does not accept other servers"), if anything. The
+/// interface puts it in words.
+pub fn bounce(
+    message: &Message,
+) -> Option<(
+    String,
+    xmpp_parsers::stanza_error::DefinedCondition,
+    Option<String>,
+)> {
+    use xmpp_parsers::stanza_error::StanzaError;
     if message.type_ != MessageType::Error {
         return None;
     }
@@ -122,24 +128,13 @@ pub fn bounce(message: &Message) -> Option<(String, String)> {
         .payloads
         .iter()
         .find_map(|p| StanzaError::try_from(p.clone()).ok())?;
-    let what = match error.defined_condition {
-        C::PolicyViolation => "сервер получателя не принимает такие сообщения (policy-violation)",
-        C::RemoteServerNotFound => "сервер получателя не найден",
-        C::RemoteServerTimeout => "сервер получателя не отвечает",
-        C::ServiceUnavailable => "получатель не принимает сообщения",
-        C::ItemNotFound => "такого адреса нет",
-        C::Forbidden | C::NotAllowed | C::NotAuthorized => "отказано",
-        C::NotAcceptable => "сообщение не принято",
-        C::ResourceConstraint => "у получателя не хватает места",
-        C::RecipientUnavailable => "получатель недоступен",
-        C::JidMalformed => "неверный адрес",
-        _ => "ошибка",
-    };
-    let reason = match error.texts.values().next() {
-        Some(text) if !text.trim().is_empty() => format!("{what}: {}", text.trim()),
-        _ => what.to_owned(),
-    };
-    Some((id, reason))
+    let text = error
+        .texts
+        .values()
+        .next()
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty());
+    Some((id, error.defined_condition, text))
 }
 
 /// Whether the sender asked for a receipt (only chats; never for an error).
@@ -249,12 +244,13 @@ mod tests {
               <text xmlns="urn:ietf:params:xml:ns:xmpp-stanzas">Server does not accept other servers</text></error></message>"#
             .parse()
             .unwrap();
-        let (id, reason) = bounce(&Message::try_from(error).unwrap()).unwrap();
+        let (id, condition, text) = bounce(&Message::try_from(error).unwrap()).unwrap();
         assert_eq!(id, "q1");
-        assert!(
-            reason.contains("не принимает") && reason.contains("does not accept"),
-            "{reason}"
+        assert_eq!(
+            condition,
+            xmpp_parsers::stanza_error::DefinedCondition::PolicyViolation
         );
+        assert_eq!(text.as_deref(), Some("Server does not accept other servers"));
         assert!(bounce(&asked).is_none());
     }
 }

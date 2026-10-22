@@ -99,9 +99,12 @@ pub fn parse_colour(text: &str) -> Result<Color, String> {
     if lower == "default" || lower == "terminal" {
         return Ok(Color::Reset);
     }
-    lower
-        .parse()
-        .map_err(|_| format!("не понимаю цвет {text:?}: имя (blue, bright-red), #rrggbb или 0–255"))
+    lower.parse().map_err(|_| {
+        trf!(
+            "cannot read colour {text:?}: a name (blue, bright-red), #rrggbb or 0–255",
+            "не понимаю цвет {text:?}: имя (blue, bright-red), #rrggbb или 0–255"
+        )
+    })
 }
 
 /// A selected row: the terminal's own colours swapped, or the theme's selection colours.
@@ -151,28 +154,33 @@ pub struct Icons {
 }
 
 /// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal, U+F07B folder, U+F0C6 paperclip.
-pub const NERD: Icons = Icons {
-    locked: "\u{f023} OMEMO",
-    unlocked: "\u{f09c} без шифрования",
-    plain_mark: "\u{f09c} без шифрования · ",
-    chat_unlocked: " \u{f09c}",
-    picture: "\u{f03e}",
-    file: "\u{f15b}",
-    service: "\u{f233}",
-    command: "\u{f120}",
-    folder: "\u{f07b}",
-    attach: "\u{f0c6}",
-};
+/// Made when asked: some carry words, in the interface's language.
+pub fn nerd() -> Icons {
+    Icons {
+        locked: "\u{f023} OMEMO",
+        unlocked: tr!("\u{f09c} unencrypted", "\u{f09c} без шифрования"),
+        plain_mark: tr!("\u{f09c} unencrypted · ", "\u{f09c} без шифрования · "),
+        chat_unlocked: " \u{f09c}",
+        picture: "\u{f03e}",
+        file: "\u{f15b}",
+        service: "\u{f233}",
+        command: "\u{f120}",
+        folder: "\u{f07b}",
+        attach: "\u{f0c6}",
+    }
+}
 
-pub const TEXT_ICONS: Icons = Icons {
-    locked: "[OMEMO]",
-    unlocked: "[без шифрования]",
-    plain_mark: "[без шифрования] · ",
-    chat_unlocked: " [откр.]",
-    picture: "[картинка]",
-    file: "[файл]",
-    service: "›",
-    command: "$",
-    folder: "/",
-    attach: "[файл]",
-};
+pub fn text_icons() -> Icons {
+    Icons {
+        locked: "[OMEMO]",
+        unlocked: tr!("[unencrypted]", "[без шифрования]"),
+        plain_mark: tr!("[unencrypted] · ", "[без шифрования] · "),
+        chat_unlocked: tr!(" [open]", " [откр.]"),
+        picture: tr!("[picture]", "[картинка]"),
+        file: tr!("[file]", "[файл]"),
+        service: "›",
+        command: "$",
+        folder: "/",
+        attach: tr!("[file]", "[файл]"),
+    }
+}

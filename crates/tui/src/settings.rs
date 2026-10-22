@@ -4,27 +4,31 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// A choice: as the config writes it, as it is said in English, in Russian.
+pub type Options = &'static [(&'static str, &'static str, &'static str)];
+
 /// When a signal sounds, as `[notify]` writes it, and as it is said.
-pub const WHEN: &[(&str, &str)] = &[
-    ("private+mention", "личные и упоминания"),
-    ("private", "личные"),
-    ("mention", "упоминания"),
-    ("all", "все"),
-    ("none", "никогда"),
+pub const WHEN: Options = &[
+    ("private+mention", "direct and mentions", "личные и упоминания"),
+    ("private", "direct", "личные"),
+    ("mention", "mentions", "упоминания"),
+    ("all", "all", "все"),
+    ("none", "never", "никогда"),
 ];
-const MODIFIERS: &[(&str, &str)] = &[
-    ("ctrl", "Ctrl"),
-    ("alt", "Alt"),
-    ("super", "Super"),
-    ("none", "нет, только префикс"),
+const MODIFIERS: Options = &[
+    ("ctrl", "Ctrl", "Ctrl"),
+    ("alt", "Alt", "Alt"),
+    ("super", "Super", "Super"),
+    ("none", "none, the prefix only", "нет, только префикс"),
 ];
-const ICONS: &[(&str, &str)] = &[("nerd", "Nerd Font"), ("text", "текст")];
+const ICONS: Options = &[("nerd", "Nerd Font", "Nerd Font"), ("text", "text", "текст")];
+const LANGUAGES: Options = &[("en", "English", "English"), ("ru", "Русский", "Русский")];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Bool(bool),
     /// One of the written words; the index into them.
-    Choice(&'static [(&'static str, &'static str)], usize),
+    Choice(Options, usize),
     Number {
         value: u16,
         min: u16,
@@ -37,9 +41,12 @@ impl Value {
     /// As the window shows it.
     pub fn words(&self) -> String {
         match self {
-            Value::Bool(true) => "да".into(),
-            Value::Bool(false) => "нет".into(),
-            Value::Choice(options, at) => options[*at].1.into(),
+            Value::Bool(true) => tr!("yes", "да").into(),
+            Value::Bool(false) => tr!("no", "нет").into(),
+            Value::Choice(options, at) => {
+                let (_, en, ru) = options[*at];
+                if crate::lang::russian() { ru } else { en }.into()
+            }
             Value::Number { value, .. } => value.to_string(),
             Value::Text(text) if text.is_empty() => "—".into(),
             Value::Text(text) => text.clone(),
@@ -120,10 +127,10 @@ pub struct Current<'a> {
     pub notify: &'a crate::notify::NotifyConfig,
 }
 
-fn choice(options: &'static [(&'static str, &'static str)], written: &str) -> Value {
+fn choice(options: Options, written: &str) -> Value {
     let at = options
         .iter()
-        .position(|(w, _)| *w == written.trim())
+        .position(|(w, ..)| *w == written.trim())
         .unwrap_or(0);
     Value::Choice(options, at)
 }
@@ -133,7 +140,7 @@ fn when(written: &str) -> Value {
     let parsed = crate::notify::When::parse(written).unwrap_or(crate::notify::When::NEVER);
     let word = WHEN
         .iter()
-        .map(|(w, _)| *w)
+        .map(|(w, ..)| *w)
         .find(|w| crate::notify::When::parse(w).ok() == Some(parsed))
         .unwrap_or("none");
     choice(WHEN, word)
@@ -161,19 +168,30 @@ impl Settings {
         };
         // The older switch: bell = false is bell_on = "none".
         let bell_on = if ui.bell { notify.bell_on.as_str() } else { "none" };
+        let language = match crate::lang::current() {
+            crate::lang::Language::English => "en",
+            crate::lang::Language::Russian => "ru",
+        };
         let rows = vec![
+            // Said in both, so that whoever cannot read the one finds the other.
+            row("ui", "language", "Language / Язык", choice(LANGUAGES, language)),
             row(
                 "ui",
                 "modifier",
-                "Модификатор сочетаний",
+                tr!("Shortcut modifier", "Модификатор сочетаний"),
                 choice(MODIFIERS, modifier),
             ),
-            row("ui", "leader", "Префикс", Value::Text(ui.leader.clone())),
-            row("ui", "icons", "Значки", choice(ICONS, icons)),
+            row(
+                "ui",
+                "leader",
+                tr!("Prefix", "Префикс"),
+                Value::Text(ui.leader.clone()),
+            ),
+            row("ui", "icons", tr!("Icons", "Значки"), choice(ICONS, icons)),
             row(
                 "ui",
                 "left",
-                "Ширина списка чатов",
+                tr!("Chat list width", "Ширина списка чатов"),
                 Value::Number {
                     value: ui.left,
                     min: crate::app::MIN_PANE,
@@ -183,48 +201,68 @@ impl Settings {
             row(
                 "ui",
                 "right",
-                "Ширина правой панели",
+                tr!("Right pane width", "Ширина правой панели"),
                 Value::Number {
                     value: ui.right,
                     min: crate::app::MIN_PANE,
                     max: 80,
                 },
             ),
-            row("ui", "mouse", "Мышь в omtalk", Value::Bool(ui.mouse)),
+            row(
+                "ui",
+                "mouse",
+                tr!("Mouse in omtalk", "Мышь в omtalk"),
+                Value::Bool(ui.mouse),
+            ),
             row(
                 "ui",
                 "read_markers",
-                "Отправлять «прочитано»",
+                tr!("Send read markers", "Отправлять «прочитано»"),
                 Value::Bool(ui.read_markers),
             ),
-            row("ui", "typing", "Отправлять «печатает»", Value::Bool(ui.typing)),
+            row(
+                "ui",
+                "typing",
+                tr!("Send typing", "Отправлять «печатает»"),
+                Value::Bool(ui.typing),
+            ),
             row(
                 "ui",
                 "auto_download",
-                "Скачивать файлы сразу",
+                tr!("Download files at once", "Скачивать файлы сразу"),
                 Value::Bool(ui.auto_download),
             ),
             row(
                 "ui",
                 "viewer",
-                "Чем открывать файлы",
+                tr!("Open files with", "Чем открывать файлы"),
                 Value::Text(ui.viewer.clone()),
             ),
-            row("ui", "avatars", "Аватарки", Value::Bool(ui.avatars)),
-            row("notify", "sound_on", "Звук", when(&notify.sound_on)),
+            row(
+                "ui",
+                "avatars",
+                tr!("Avatars", "Аватарки"),
+                Value::Bool(ui.avatars),
+            ),
+            row("notify", "sound_on", tr!("Sound", "Звук"), when(&notify.sound_on)),
             row(
                 "notify",
                 "sound",
-                "Команда звука",
+                tr!("Sound command", "Команда звука"),
                 Value::Text(notify.sound.clone()),
             ),
             row(
                 "notify",
                 "desktop_on",
-                "Всплывающие (notify-send)",
+                tr!("Pop-ups (notify-send)", "Всплывающие (notify-send)"),
                 when(&notify.desktop_on),
             ),
-            row("notify", "bell_on", "Звонок терминала", when(bell_on)),
+            row(
+                "notify",
+                "bell_on",
+                tr!("Terminal bell", "Звонок терминала"),
+                when(bell_on),
+            ),
         ];
         Self {
             rows,
@@ -372,9 +410,13 @@ pub fn write(path: &std::path::Path, section: &str, key: &str, value: &Written) 
     if !doc.contains_table(section) {
         doc.insert(section, Item::Table(Table::new()));
     }
-    let table = doc[section]
-        .as_table_mut()
-        .ok_or_else(|| format!("{}: [{section}] — не таблица", path.display()))?;
+    let table = doc[section].as_table_mut().ok_or_else(|| {
+        trf!(
+            "{}: [{section}] is not a table",
+            "{}: [{section}] — не таблица",
+            path.display()
+        )
+    })?;
     let item = match value {
         Written::Bool(on) => v(*on),
         Written::Number(n) => v(*n),

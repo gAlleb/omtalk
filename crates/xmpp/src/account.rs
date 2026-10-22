@@ -355,7 +355,9 @@ async fn run(
                     heard = tokio::time::Instant::now();
                 } else if !lost {
                     lost = true;
-                    emit(Event::Disconnected { reason: "сервер не отвечает".into() });
+                    emit(Event::Disconnected {
+                        reason: "the server does not answer".into(),
+                    });
                 }
                 // Lost: try the password once, and again each minute while it lasts.
                 if lost && login_asked.is_none_or(|at| at.elapsed() >= LOGIN_RECHECK) {

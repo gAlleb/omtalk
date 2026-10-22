@@ -202,28 +202,28 @@ pub fn seen_words(at: i64, now: i64) -> String {
     };
     let days = (now.date_naive() - at.date_naive()).num_days();
     match days {
-        0 => format!("писало сегодня {}", at.format("%H:%M")),
-        1 => format!("писало вчера {}", at.format("%H:%M")),
-        _ => format!("писало {}", at.format("%d.%m.%Y")),
+        0 => trf!("wrote today {}", "писало сегодня {}", at.format("%H:%M")),
+        1 => trf!("wrote yesterday {}", "писало вчера {}", at.format("%H:%M")),
+        _ => trf!("wrote {}", "писало {}", at.format("%d.%m.%Y")),
     }
 }
 
 pub fn trust_words(trust: Trust) -> &'static str {
     match trust {
-        Trust::Blind => "вслепую",
-        Trust::Verified => "проверено",
-        Trust::Distrusted => "не доверяю",
-        Trust::Undecided => "не решено",
+        Trust::Blind => tr!("blind trust", "вслепую"),
+        Trust::Verified => tr!("verified", "проверено"),
+        Trust::Distrusted => tr!("distrusted", "не доверяю"),
+        Trust::Undecided => tr!("undecided", "не решено"),
     }
 }
 
 pub fn button_words(button: KeyButton) -> &'static str {
     match button {
-        KeyButton::Verify => "Проверено",
-        KeyButton::Distrust => "Не доверять",
-        KeyButton::Blind => "Вслепую",
-        KeyButton::Remove => "Удалить",
-        KeyButton::Close => "Закрыть",
+        KeyButton::Verify => tr!("Verified", "Проверено"),
+        KeyButton::Distrust => tr!("Distrust", "Не доверять"),
+        KeyButton::Blind => tr!("Blind trust", "Вслепую"),
+        KeyButton::Remove => tr!("Remove", "Удалить"),
+        KeyButton::Close => tr!("Close", "Закрыть"),
     }
 }
 
