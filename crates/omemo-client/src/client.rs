@@ -346,23 +346,35 @@ impl Omemo {
         let mut session = decrypted.received.session;
         let answer_needed =
             decrypted.received.used_pre_key.is_some() || session.receiving_length() > STALE_CHAIN;
+        // The answer that completes the key exchange (so the sender stops attaching it),
+        // or resets a long one-sided chain: made here, as it moves the session on.
+        let answer = if answer_needed {
+            Some(message::empty(state.keys.device_id, [(device, &mut session)])?)
+        } else {
+            None
+        };
+        // The session is kept before the pre key is spent and before anything goes over
+        // the network: lost now, a repeat of the key exchange would find neither, and the
+        // first message would be gone. A repeat decrypts in the session kept.
+        self.persist.session(&key.0, key.1, &session)?;
+        state.sessions.insert(key, session);
         if let Some(pre_key) = decrypted.received.used_pre_key {
             state.keys.remove_pre_key(pre_key);
             state.keys.refill_pre_keys()?;
             self.persist.keys(&state.keys)?;
-            self.publish_bundle(&state).await?;
         }
-        if answer_needed {
-            // Completes the key exchange, so the sender stops attaching it, or resets a
-            // long one-sided chain.
-            let empty = message::empty(state.keys.device_id, [(device, &mut session)])?;
+        // On the network, last, and not at the message's cost: a bundle not republished
+        // or an answer not sent now goes with the next login or the next message.
+        if decrypted.received.used_pre_key.is_some() {
+            let _ = self.publish_bundle(&state).await;
+        }
+        if let Some(empty) = answer {
             // To the sender's account, also for group messages: it concerns one session.
-            self.account
+            let _ = self
+                .account
                 .send(stanza(MessageType::Chat, envelope.sender.clone(), empty, None))
-                .await?;
+                .await;
         }
-        self.persist.session(&key.0, key.1, &session)?;
-        state.sessions.insert(key, session);
         let untrusted = !state.trust_of(&envelope.sender, device).receives();
 
         Ok(Incoming {
