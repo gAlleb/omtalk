@@ -343,17 +343,6 @@ impl Omemo {
     async fn receive(&self, envelope: Received, encrypted: xml::Encrypted) -> Result<Incoming, Error> {
         let device = encrypted.header.sid;
         let key = (envelope.sender.clone(), device);
-        // A device seen for the first time must be one its account lists: else anyone
-        // who passes for the account (a made-up room, a forged archive) could slip in
-        // a key of their own as one of its devices. The list is read with the state
-        // free: other chats go on meanwhile.
-        let known = self.state.lock().await.identities.contains_key(&key);
-        if !known && !self.listed(&envelope.sender, device).await? {
-            return Err(Error::UnlistedDevice {
-                jid: envelope.sender.clone(),
-                device,
-            });
-        }
         let mut state = self.state.lock().await;
         let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &encrypted)?;
 
@@ -834,33 +823,6 @@ impl Omemo {
 
     /// Records a device's first identity key, with the trust it starts with (BTBV), and
     /// refuses a changed one.
-    /// Whether `jid` lists `device`: the cached list, else the list read afresh.
-    async fn listed(&self, jid: &BareJid, device: DeviceId) -> Result<bool, Error> {
-        if self
-            .state
-            .lock()
-            .await
-            .device_lists
-            .get(jid)
-            .is_some_and(|list| list.contains(&device))
-        {
-            return Ok(true);
-        }
-        let list = match self.account.items(jid, DEVICE_LIST_NODE).await {
-            Ok(items) => parse_device_list(&items),
-            // No list at all: no device is listed.
-            Err(omtalk_xmpp::Error::Stanza(e))
-                if e.defined_condition == omtalk_xmpp::stanza_error::DefinedCondition::ItemNotFound =>
-            {
-                BTreeSet::new()
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let listed = list.contains(&device);
-        self.state.lock().await.device_lists.insert(jid.clone(), list);
-        Ok(listed)
-    }
-
     fn record_identity(
         &self,
         state: &mut State,

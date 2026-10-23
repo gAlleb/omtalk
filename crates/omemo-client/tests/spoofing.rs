@@ -216,10 +216,11 @@ async fn a_stranger_cannot_make_up_a_room_and_speak_as_carol_in_it() {
     assert!(!recorded, "carol's devices now include a key mallory made up");
 }
 
-/// A device never seen before is taken only if its account lists it: one made up on the
-/// spot, with throwaway keys, gets nowhere.
+/// A device never seen before is taken at once, as Gajim and Conversations take it, without
+/// asking for its account's list first: the server vouches for the account it came from.
+/// One made up on the spot, with throwaway keys, speaks only for that account.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_device_its_account_does_not_list_is_not_taken() {
+async fn a_made_up_device_speaks_only_for_its_own_account() {
     let (_b, mut bob_events, bob_account, bob_full) = login("u72", None).await;
     let bob = Omemo::new(bob_account.clone(), State::new(OwnKeys::generate(0).unwrap()));
     bob.announce().await.unwrap();
@@ -252,14 +253,17 @@ async fn a_device_its_account_does_not_list_is_not_taken() {
     .await
     .expect("an answer");
     let mallory_jid: BareJid = "u73@localhost".parse().unwrap();
-    let recorded = bob
-        .with_state(|s| s.identities.contains_key(&(mallory_jid.clone(), keys.device_id)))
+    let elsewhere = bob
+        .with_state(|s| {
+            s.identities
+                .keys()
+                .any(|(jid, device)| *device == keys.device_id && *jid != mallory_jid)
+        })
         .await;
     mallory.stop().await;
     bob_account.stop().await;
-    assert!(
-        matches!(&got, Err(e) if e.contains("not in the device list")),
-        "refused for that: {got:?}"
-    );
-    assert!(!recorded, "the made-up key is not kept");
+    let message = got.expect("taken, as other clients take it");
+    assert_eq!(message.sender, mallory_jid, "shown as the account it came from");
+    assert_eq!(text(&message), "from nowhere");
+    assert!(!elsewhere, "the made-up key belongs to no other account");
 }
