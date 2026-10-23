@@ -1190,7 +1190,19 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
 /// After every new login: announce the device, read what was missed, enter the rooms.
 async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
-    match omemo.announce().await {
+    // The first requests of a session sometimes go unanswered: tried again, so that
+    // the device is in its list and its keys out for this session, not the next.
+    let mut announced = omemo.announce().await;
+    for wait in [3, 10] {
+        match &announced {
+            Err(e) if e.is_transient() => {
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                announced = omemo.announce().await;
+            }
+            _ => break,
+        }
+    }
+    match announced {
         Ok(()) => {
             let fingerprint = omtalk_omemo::fingerprint(&omemo.identity_key().await);
             tell(Msg::Log {

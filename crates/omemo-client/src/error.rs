@@ -25,6 +25,21 @@ pub enum Error {
     IdentityChanged { jid: BareJid, device: DeviceId },
 }
 
+impl Error {
+    /// Whether trying again later may go through: no answer, or no connection.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Xmpp(
+                omtalk_xmpp::Error::Timeout
+                    | omtalk_xmpp::Error::Queued
+                    | omtalk_xmpp::Error::NotConfirmed
+                    | omtalk_xmpp::Error::Send(_)
+            )
+        )
+    }
+}
+
 impl From<omemo::Error> for Error {
     fn from(error: omemo::Error) -> Self {
         Self::Omemo(error.into())
