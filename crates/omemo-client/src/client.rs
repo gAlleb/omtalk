@@ -21,6 +21,8 @@ const STALE_CHAIN: u32 = 53;
 const ARCHIVE_PAGE: usize = 50;
 /// How much of a room's past the first entry shows, as Gajim does.
 const ROOM_HISTORY: usize = 50;
+/// How many of the account's last messages a new device reads: the chats there were.
+const FIRST_HISTORY: usize = 100;
 
 /// The body other clients show when they cannot decrypt.
 const FALLBACK_BODY: &str = "This message is OMEMO encrypted, and your client cannot decrypt it.";
@@ -121,6 +123,9 @@ pub struct CatchUp {
     /// Encrypted messages with no key for this device: written before it existed, or by
     /// a client that did not know it yet. Nobody can read them here.
     pub unreadable: usize,
+    /// Whom the messages read were with, the unreadable ones too: on a new device, the
+    /// chats there were before it.
+    pub peers: BTreeSet<BareJid>,
 }
 
 /// Which devices a message reached.
@@ -446,7 +451,14 @@ impl Omemo {
                         self.take_archived(room, archived, &mut caught).await?;
                     }
                 }
+                // A new device: the last messages, so that the chats there were show up
+                // (what was encrypted before it existed only counted), then on from the
+                // newest.
                 None => {
+                    let page = self.account.archive_last(None, FIRST_HISTORY).await?;
+                    for archived in page.messages {
+                        self.open_archived(None, archived, &mut caught).await;
+                    }
                     if let Some(newest) = self.account.archive_newest(room).await? {
                         self.set_archive_position(&archive, &newest).await?;
                     }
@@ -531,6 +543,13 @@ impl Omemo {
             None => Ok(envelope::open_archived(&own, archived.message)),
             Some(room) => envelope::open_room_archived(&own, room, archived.message),
         };
+        if let Ok(Some(envelope)) = &envelope
+            && room.is_none()
+            && envelope.peer != own
+            && envelope.peer.node().is_some()
+        {
+            caught.peers.insert(envelope.peer.clone());
+        }
         let result = match envelope {
             Ok(Some(envelope)) if self.has_no_key(&envelope) => {
                 caught.unreadable += 1;

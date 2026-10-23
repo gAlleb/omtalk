@@ -221,6 +221,11 @@ enum Msg {
         jid: BareJid,
         rows: Vec<DeviceRow>,
     },
+    /// Chats the account had, found in its archive by a new device: listed, not opened.
+    Chats {
+        account: BareJid,
+        peers: Vec<BareJid>,
+    },
     Joined {
         account: BareJid,
         room: BareJid,
@@ -655,6 +660,9 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
                 message.shared_file,
             );
             line.id = message.id;
+            line.reply_to = message.reply_to;
+            line.archive_id = message.archive_id;
+            line.untrusted = message.untrusted;
             line.delivery = message.delivery.map(|d| match d {
                 omtalk_store::Delivery::Sent => Delivery::Sent,
                 omtalk_store::Delivery::Delivered => Delivery::Delivered,
@@ -879,6 +887,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         Msg::Devices { account, jid, rows } => {
             let index = app.chat(&account, &jid, ChatKind::Direct);
             app.chats[index].devices = Some(rows);
+        }
+        Msg::Chats { account, peers } => {
+            let closed = shared.store.closed_chats(&account).unwrap_or_default();
+            for peer in peers.iter().filter(|p| !closed.contains(p)) {
+                app.chat(&account, peer, ChatKind::Direct);
+            }
         }
         Msg::Joined {
             account,
@@ -1174,6 +1188,9 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
                 at,
                 id: message.id.clone(),
                 shared_file: message.shared_file,
+                reply_to: message.reply_to.clone(),
+                archive_id: message.archive_id.clone(),
+                untrusted: message.untrusted,
                 // One's own, come back from the room: it got there.
                 delivery: (message.direction == Direction::Outgoing && message.nick.is_some())
                     .then_some(omtalk_store::Delivery::Sent),
@@ -1250,6 +1267,12 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             for message in caught.messages {
                 deliver(&shared, &account, message);
             }
+            if !caught.peers.is_empty() {
+                tell(Msg::Chats {
+                    account: account.clone(),
+                    peers: caught.peers.into_iter().collect(),
+                });
+            }
         }
         Err(e) => tell(Msg::Notice {
             account: account.clone(),
@@ -1257,7 +1280,22 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             text: trf!("archive: {e}", "архив: {e}"),
         }),
     }
-    for (room, _) in shared.store.rooms(&account).unwrap_or_default() {
+    // The rooms entered here before, and those the account's clients enter by themselves
+    // (autojoin in its bookmarks, as Gajim and Conversations keep them): on a new device
+    // the bookmarks are all there is.
+    let mut rooms: Vec<BareJid> = shared
+        .store
+        .rooms(&account)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(room, _)| room)
+        .collect();
+    for mark in xmpp.bookmarks().await.unwrap_or_default() {
+        if mark.autojoin && !rooms.contains(&mark.room) {
+            rooms.push(mark.room);
+        }
+    }
+    for room in rooms {
         join(&account, &xmpp, &omemo, &shared, room, None, false).await;
     }
 }
@@ -1662,6 +1700,7 @@ async fn perform(action: Action, shared: Shared) {
                 return;
             };
             fetch_if_media(&text, false, &shared);
+            let reply_to = reply.as_ref().map(|(to, _)| to.id.clone());
             // A reply names what it answers, beside the body (outside the encryption).
             let extra = reply
                 .map(|(to, length)| omtalk_xmpp::replies::elements(&to, length))
@@ -1691,6 +1730,7 @@ async fn perform(action: Action, shared: Shared) {
                                 encrypted: true,
                                 delivery: Some(omtalk_store::Delivery::Sent),
                                 shared_file: false,
+                                reply_to: reply_to.clone(),
                             },
                         );
                         delivery(Delivery::Sent);
@@ -1734,6 +1774,7 @@ async fn perform(action: Action, shared: Shared) {
                                 encrypted: true,
                                 delivery: None,
                                 shared_file: false,
+                                reply_to: reply_to.clone(),
                             },
                         );
                         delivery(Delivery::Queued);
@@ -1765,6 +1806,7 @@ async fn perform(action: Action, shared: Shared) {
                                     encrypted: false,
                                     delivery: Some(omtalk_store::Delivery::Sent),
                                     shared_file: false,
+                                    reply_to: reply_to.clone(),
                                 },
                             );
                         }
@@ -1782,6 +1824,7 @@ async fn perform(action: Action, shared: Shared) {
                                     encrypted: false,
                                     delivery: None,
                                     shared_file: false,
+                                    reply_to: reply_to.clone(),
                                 },
                             );
                         }
@@ -1947,6 +1990,7 @@ async fn perform(action: Action, shared: Shared) {
                                 encrypted,
                                 delivery: Some(omtalk_store::Delivery::Sent),
                                 shared_file: true,
+                                reply_to: None,
                             },
                         );
                     }
@@ -2388,6 +2432,8 @@ struct Own {
     delivery: Option<omtalk_store::Delivery>,
     /// A file shared (one's own upload), not text.
     shared_file: bool,
+    /// The id of the message it answers.
+    reply_to: Option<String>,
 }
 
 /// Keeps a message sent from here, as on the server: its ✓ is kept with it.
@@ -2405,6 +2451,9 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, id: 
             id: Some(id.to_owned()),
             delivery: own.delivery,
             shared_file: own.shared_file,
+            reply_to: own.reply_to,
+            archive_id: None,
+            untrusted: false,
         },
     );
 }

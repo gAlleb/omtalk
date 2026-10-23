@@ -75,6 +75,9 @@ mod tests {
             id: None,
             delivery: None,
             shared_file: false,
+            reply_to: None,
+            archive_id: None,
+            untrusted: false,
         };
         store.save_message(&me, &message).unwrap();
         assert!(

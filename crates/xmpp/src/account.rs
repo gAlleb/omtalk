@@ -260,10 +260,15 @@ async fn supervise(
         quiet: config.keepalive,
         answer: config.keepalive_answer,
     };
-    if let Ended::Lost = run(connect(&config), &config, &mut commands, &emit, liveness).await {
+    // tokio-xmpp's own task ends only when it fails inside; the account would stay
+    // offline till omtalk restarts. A new connection instead, after a pause that grows.
+    let mut pause = Duration::from_secs(2);
+    while let Ended::Lost = run(connect(&config), &config, &mut commands, &emit, liveness).await {
         emit(Event::Disconnected {
-            reason: "the connection task ended".into(),
+            reason: "the connection task ended; connecting again".into(),
         });
+        tokio::time::sleep(pause).await;
+        pause = (pause * 2).min(Duration::from_secs(60));
     }
 }
 

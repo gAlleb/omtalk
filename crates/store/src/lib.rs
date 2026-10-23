@@ -81,6 +81,7 @@ const MIGRATIONS: &[&str] = &[
     seen::MIGRATION,
     history::MIGRATION_DELIVERY,
     history::MIGRATION_SHARED,
+    history::MIGRATION_REPLIES,
 ];
 
 #[derive(Clone)]

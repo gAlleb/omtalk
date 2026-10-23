@@ -62,7 +62,9 @@ pub fn image_to(folder: &std::path::Path) -> Result<std::path::PathBuf, String> 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    let path = folder.join(trf!("picture-{stamp}.png", "картинка-{stamp}.png"));
+    // The name goes to the server and the other side: plain Latin, whatever the
+    // interface's language.
+    let path = folder.join(format!("picture-{stamp}.png"));
     std::fs::write(&path, &output.stdout).map_err(|e| e.to_string())?;
     Ok(path)
 }

@@ -40,6 +40,15 @@ pub(crate) const MIGRATION_SHARED: &str = "
     ALTER TABLE messages ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// Schema 11: what the message answers, the archive's id for it (a reply in a room
+/// names that), and whether it came from a device not trusted: kept, so that after a
+/// restart a reply still shows what it answers and a ⚠ stays.
+pub(crate) const MIGRATION_REPLIES: &str = "
+    ALTER TABLE messages ADD COLUMN reply_to TEXT;
+    ALTER TABLE messages ADD COLUMN archive_id TEXT;
+    ALTER TABLE messages ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0;
+";
+
 /// How far one's own message got, as kept: each step only moves forward, and a failure
 /// is final.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +97,12 @@ pub struct StoredMessage {
     pub delivery: Option<Delivery>,
     /// The body is a file shared, not a link written (XEP-0066).
     pub shared_file: bool,
+    /// The id of the message this one answers (XEP-0461).
+    pub reply_to: Option<String>,
+    /// The archive's id for it (the room's, in a room).
+    pub archive_id: Option<String>,
+    /// Written on a device refused or not decided on.
+    pub untrusted: bool,
 }
 
 /// A chat with history, newest activity first.
@@ -104,8 +119,8 @@ impl Store {
         // A message that has an id is kept once: the archive read again, a carbon and
         // its original, bring it more than once.
         self.db.lock().unwrap().execute(
-            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
              WHERE ?9 IS NULL OR NOT EXISTS (
                  SELECT 1 FROM messages WHERE account = ?1 AND chat = ?2 AND sender = ?3 AND id = ?9
              )",
@@ -125,6 +140,9 @@ impl Store {
                     _ => None,
                 },
                 message.shared_file,
+                message.reply_to,
+                message.archive_id,
+                message.untrusted,
             ],
         )?;
         Ok(())
@@ -174,7 +192,7 @@ impl Store {
     ) -> Result<Vec<StoredMessage>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
-            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared FROM messages
+            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted FROM messages
              WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3",
         )?;
         let rows = query.query_map(params![account.as_str(), chat.as_str(), limit as i64], |r| {
@@ -189,11 +207,28 @@ impl Store {
                 r.get::<_, Option<i64>>(7)?,
                 r.get::<_, Option<String>>(8)?,
                 r.get::<_, bool>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, bool>(12)?,
             ))
         })?;
         let mut messages = Vec::new();
         for row in rows {
-            let (sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared_file) = row?;
+            let (
+                sender,
+                nick,
+                outgoing,
+                encrypted,
+                body,
+                at,
+                id,
+                delivery,
+                failure,
+                shared_file,
+                reply_to,
+                archive_id,
+                untrusted,
+            ) = row?;
             messages.push(StoredMessage {
                 chat: chat.clone(),
                 sender: parse_jid(&sender)?,
@@ -205,6 +240,9 @@ impl Store {
                 id,
                 delivery: Delivery::from_code(delivery, failure),
                 shared_file,
+                reply_to,
+                archive_id,
+                untrusted,
             });
         }
         messages.reverse();
@@ -282,6 +320,9 @@ mod tests {
             id: None,
             delivery: None,
             shared_file: false,
+            reply_to: None,
+            archive_id: None,
+            untrusted: false,
         }
     }
 
@@ -310,6 +351,25 @@ mod tests {
             ["привет", "без id", "без id"],
             "one with an id once; without, as they come"
         );
+    }
+
+    #[test]
+    fn a_reply_its_archive_id_and_an_untrusted_device_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omtalk.db");
+        let me = jid("me@example.org");
+        let reply = StoredMessage {
+            reply_to: Some("orig-1".into()),
+            archive_id: Some("arch-7".into()),
+            untrusted: true,
+            ..message("bob@example.org", "да", 1)
+        };
+        Store::open(&path).unwrap().save_message(&me, &reply).unwrap();
+        let read = Store::open(&path)
+            .unwrap()
+            .recent_messages(&me, &jid("bob@example.org"), 10)
+            .unwrap();
+        assert_eq!(read, [reply]);
     }
 
     #[test]
