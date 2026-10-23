@@ -106,6 +106,14 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/search",
+        args: ["WORDS", "СЛОВА"],
+        about: [
+            "find words in this chat's history; Enter shows the message",
+            "найти слова в истории этого чата; Enter покажет сообщение",
+        ],
+    },
+    Command {
         name: "/away",
         args: ["[TEXT]", "[ТЕКСТ]"],
         about: [

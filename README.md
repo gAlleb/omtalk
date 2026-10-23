@@ -139,7 +139,7 @@ switches focus.
 
 Commands: `/msg`, `/join`, `/leave`, `/add`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/reply`, `/react`, `/edit`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+`/name`, `/nick`, `/reply`, `/react`, `/edit`, `/search`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
 
 Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last message of
 the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
@@ -154,9 +154,14 @@ and the 50 before it come: first from what this device keeps, then from the serv
 archive (MAM). What was encrypted before this device existed cannot be read there and is
 only counted, as in every OMEMO client.
 
+Search: `/search words` looks through the open chat's history kept here, whatever the
+case, encrypted messages too (they are kept decrypted). The results show over the chat;
+`↑`/`↓` and Enter (or a click) show the chat from that message on, Esc closes.
+
 Your status: `/away [words]`, `/dnd [words]`, `/online [words]`, for all accounts at
-once. Contacts and the rooms you are in see it; it is said again after a reconnect and on
-entering a room, and shows by the account at the bottom. omtalk starts online.
+once, kept after a restart. Contacts and the rooms you are in see it; omtalk asks the rooms
+now and then whether you are still in them and enters again if not; it is said again after a reconnect and on
+entering a room, and shows by the account at the bottom. A room's participants show theirs.
 
 Reactions (XEP-0444): a right click on a message offers 👍 ❤️ 😂 😮 😢 🙏; a click puts one
 on, again takes it off. `/react 👍` does the same for the message selected with the mouse,

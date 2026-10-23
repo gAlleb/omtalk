@@ -17,6 +17,7 @@ mod event;
 mod login;
 pub mod mam;
 pub mod muc;
+pub mod nick;
 pub mod pep;
 pub mod presence;
 pub mod reactions;

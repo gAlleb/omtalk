@@ -35,6 +35,8 @@ const FEATURES: &[&str] = &[
     "urn:xmpp:styling:0",
     // Avatars: a change is pushed (XEP-0084).
     "urn:xmpp:avatar:metadata+notify",
+    // The names people give themselves (XEP-0172).
+    "http://jabber.org/protocol/nick+notify",
 ];
 
 pub fn info() -> DiscoInfoResult {

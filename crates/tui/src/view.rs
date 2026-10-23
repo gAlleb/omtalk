@@ -85,6 +85,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     keys_window(frame, app, area);
     settings_window(frame, app, area);
     reaction_picker(frame, app, area);
+    search_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -501,6 +502,15 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             let height = inner.height as usize;
             let max_scroll = rows.len().saturating_sub(height);
             let chat = &mut app.chats[index];
+            // Shown from a search result: that message at the top.
+            if let Some(at) = chat.jump_to.take()
+                && let Some(row) = rows.iter().position(|r| {
+                    r.line
+                        .is_some_and(|l| chat.lines.get(l).is_some_and(|l| l.at >= at))
+                })
+            {
+                chat.scroll = rows.len().saturating_sub(row + height);
+            }
             chat.scroll = chat.scroll.min(max_scroll);
             let end = rows.len() - chat.scroll;
             let start = end.saturating_sub(height);
@@ -1973,6 +1983,84 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hints_width)]).areas(area);
     frame.render_widget(Paragraph::new(TextLine::from(left)), left_area);
     frame.render_widget(Paragraph::new(hints), right_area);
+}
+
+/// The results of `/search`, over the conversation.
+fn search_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(search) = app.search.as_ref() else { return };
+    let messages = app.areas.messages;
+    let place = if messages.width > 10 { messages } else { screen };
+    let width = place.width.saturating_sub(4).min(100);
+    let height = place.height.saturating_sub(2).min(22);
+    let area = Rect::new(place.x + (place.width - width) / 2, place.y + 1, width, height);
+    clear(frame, area);
+    let count = search.found.as_ref().map(Vec::len);
+    let title = match count {
+        Some(n) => trf!(" Search: «{}» · {n} ", " Поиск: «{}» · {n} ", search.words),
+        None => trf!(" Search: «{}» ", " Поиск: «{}» ", search.words),
+    };
+    let block = pane(&title, true).title_bottom(
+        TextLine::from(Span::styled(
+            tr!(
+                " ↑↓ pick · Enter show · Esc close ",
+                " ↑↓ выбор · Enter показать · Esc закрыть "
+            ),
+            Style::default().fg(theme::dim()),
+        ))
+        .alignment(Alignment::Center),
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(found) = search.found.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                tr!("looking…", "ищу…"),
+                Style::default().fg(theme::dim()),
+            )),
+            inner,
+        );
+        return;
+    };
+    if found.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                tr!("nothing found", "ничего не нашлось"),
+                Style::default().fg(theme::dim()),
+            )),
+            inner,
+        );
+        return;
+    }
+    // The picked one kept in sight.
+    let rows = inner.height as usize;
+    let first = search.cursor.saturating_sub(rows.saturating_sub(1));
+    let mut buttons = Vec::new();
+    for (offset, (index, hit)) in found.iter().enumerate().skip(first).take(rows).enumerate() {
+        let y = inner.y + offset as u16;
+        let when = Local
+            .timestamp_opt(hit.at, 0)
+            .single()
+            .map(|t| t.format("%d.%m.%y %H:%M").to_string())
+            .unwrap_or_default();
+        let text: String = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let head = format!("{when} {}: ", hit.who);
+        let room = (inner.width as usize).saturating_sub(head.width());
+        let line = TextLine::from(vec![
+            Span::styled(when, Style::default().fg(theme::dim())),
+            Span::raw(" "),
+            Span::styled(format!("{}: ", hit.who), theme::nick(&hit.who)),
+            Span::styled(truncate(&text, room), Style::default().fg(theme::text())),
+        ]);
+        let line = if index == search.cursor {
+            line.style(theme::selected())
+        } else {
+            line
+        };
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        frame.render_widget(Paragraph::new(line), row);
+        buttons.push((row, index));
+    }
+    app.areas.search_rows = buttons;
 }
 
 /// The reactions a right click on a message offers, beside where it was clicked.
@@ -5468,6 +5556,56 @@ mod tests {
         );
         let text = screen(&mut app, 140, 20);
         assert!(text.contains("bob · отошёл: обед"), "{text}");
+    }
+
+    #[test]
+    fn search_results_show_over_the_chat_and_one_picked_is_shown_at_the_top() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        app.input = "/search встреча".into();
+        app.cursor = app.input.chars().count();
+        app.focus = Focus::Input;
+        let asked = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(&asked[..], [Action::Search { words, .. }] if words == "встреча"),
+            "{asked:?}"
+        );
+        let found = vec![
+            crate::app::Found {
+                at: 50,
+                who: "bob".into(),
+                text: "встреча перенесена".into(),
+            },
+            crate::app::Found {
+                at: 10,
+                who: "bob".into(),
+                text: "встреча в пять".into(),
+            },
+        ];
+        app.found(&me, &jid("bob@example.org"), "встреча", found);
+        let text = screen(&mut app, 120, 24);
+        assert!(
+            text.contains("Поиск: «встреча» · 2") && text.contains("встреча в пять"),
+            "{text}"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let jump = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&jump[..], [Action::Jump { at: 10, .. }]), "{jump:?}");
+        assert!(app.search.is_none());
+
+        // The chat from there on: that message at the top, though many follow.
+        let lines: Vec<_> = (0..100)
+            .map(|i| crate::app::Line::message(10 + i, "bob".into(), format!("сообщение {i}"), true, false))
+            .collect();
+        app.jumped(&me, &jid("bob@example.org"), lines, 10);
+        let text = screen(&mut app, 120, 24);
+        assert!(
+            text.contains("сообщение 0") && !text.contains("сообщение 99"),
+            "{text}"
+        );
     }
 
     #[test]

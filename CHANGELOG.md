@@ -5,6 +5,8 @@
 - **Your status is remembered**: after `/away` and a restart you are still away.
 - **A room that let you go is entered again** (XEP-0410): omtalk asks each room every five minutes, and after a connection comes back, whether you are still in it; a network that changed or a server restart could leave a room silent with nothing showing it. What was missed comes with entering again.
 - **A room's participants show their status**: "bob · away: lunch", the dot in another colour.
+- **Contacts with no name in your roster go by the one they gave themselves** (XEP-0172), as Conversations and Dino show it.
+- **`/search words`** finds them in the open chat's history, whatever the case, encrypted messages too; Enter or a click shows the chat from that message.
 
 ## 0.1.4 — 2026-10-23
 

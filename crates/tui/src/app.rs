@@ -173,6 +173,8 @@ pub struct Chat {
     pub older_done: bool,
     /// Where the archive's next older page ends: the oldest of the last page read.
     pub older_before: Option<String>,
+    /// Show the chat from its first message at or after this time (a search result).
+    pub jump_to: Option<i64>,
     /// Room occupants by nick, with the real account when the room shows it.
     pub occupants: BTreeMap<String, Option<BareJid>>,
     /// Their status where it is not plain online: away, do not disturb…
@@ -206,6 +208,7 @@ impl Chat {
             older_loading: false,
             older_done: false,
             older_before: None,
+            jump_to: None,
             occupants: BTreeMap::new(),
             occupant_status: BTreeMap::new(),
             members: Vec::new(),
@@ -325,6 +328,8 @@ pub struct Areas {
     pub older: Option<Rect>,
     /// The reactions of the picker open over a message, each where it is drawn.
     pub reaction_buttons: Vec<(Rect, &'static str)>,
+    /// The search results on screen, each with its index.
+    pub search_rows: Vec<(Rect, usize)>,
     pub left: Option<Rect>,
     pub right: Option<Rect>,
     pub messages: Rect,
@@ -394,6 +399,19 @@ pub enum Action {
     },
     /// One's own status, for every account (`/away`, `/dnd`, `/online`).
     SetStatus(omtalk_xmpp::presence::OwnStatus),
+    /// The messages of `chat` holding `words`.
+    Search {
+        account: BareJid,
+        chat: BareJid,
+        words: String,
+    },
+    /// `chat` shown from the time `at` on (a search result picked).
+    Jump {
+        account: BareJid,
+        chat: BareJid,
+        room: bool,
+        at: i64,
+    },
     /// One's reactions to the message `id` (XEP-0444), all of them now; as `by` they
     /// are kept.
     React {
@@ -668,6 +686,25 @@ pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
     ("Esc", "cancel", "отмена"),
 ];
 
+/// A message `/search` found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub at: i64,
+    pub who: String,
+    pub text: String,
+}
+
+/// The results of `/search` in a chat, over the conversation until one is picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Search {
+    pub account: BareJid,
+    pub chat: BareJid,
+    pub words: String,
+    /// `None` while the store is looked through.
+    pub found: Option<Vec<Found>>,
+    pub cursor: usize,
+}
+
 /// The reactions a right click on a message offers, as messengers do.
 pub const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
@@ -808,10 +845,14 @@ pub struct App {
     pub active: Option<BareJid>,
     /// Contacts' names in each account's roster: a chat with one opened later takes it.
     pub names: BTreeMap<(BareJid, BareJid), String>,
+    /// The names contacts gave themselves (XEP-0172), after the roster's.
+    pub nicknames: BTreeMap<(BareJid, BareJid), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
     pub own_status: omtalk_xmpp::presence::OwnStatus,
     /// The reaction picker, if a right click opened one.
     pub picker: Option<Picker>,
+    /// `/search` results, while open.
+    pub search: Option<Search>,
     /// When Ctrl+C was pressed once: a second one within [`QUIT_AGAIN`] quits.
     pub quit_asked: Option<std::time::Instant>,
     pub quit: bool,
@@ -892,8 +933,10 @@ impl App {
             quit: false,
             quit_asked: None,
             picker: None,
+            search: None,
             own_status: Default::default(),
             names: BTreeMap::new(),
+            nicknames: BTreeMap::new(),
         }
     }
 
@@ -910,18 +953,39 @@ impl App {
     pub fn contact_names(&mut self, account: &BareJid, names: Vec<(BareJid, Option<String>)>) {
         for (jid, name) in names {
             let name = name.filter(|n| !n.trim().is_empty());
-            for chat in self
-                .chats
-                .iter_mut()
-                .filter(|c| &c.account == account && c.jid == jid && c.kind == ChatKind::Direct)
-            {
-                chat.name = name.clone();
-            }
             let key = (account.clone(), jid);
             match name {
-                Some(name) => drop(self.names.insert(key, name)),
+                Some(name) => drop(self.names.insert(key.clone(), name)),
                 None => drop(self.names.remove(&key)),
             }
+            self.rename(&key);
+        }
+    }
+
+    /// The name `jid` gave themselves (XEP-0172), for when the roster has none.
+    pub fn nickname(&mut self, account: &BareJid, jid: &BareJid, nick: Option<String>) {
+        let key = (account.clone(), jid.clone());
+        match nick {
+            Some(nick) => drop(self.nicknames.insert(key.clone(), nick)),
+            None => drop(self.nicknames.remove(&key)),
+        }
+        self.rename(&key);
+    }
+
+    /// What a contact is called: the name in the roster, else the one they gave
+    /// themselves; neither, and the address shows.
+    fn name_of(&self, key: &(BareJid, BareJid)) -> Option<String> {
+        self.names.get(key).or(self.nicknames.get(key)).cloned()
+    }
+
+    fn rename(&mut self, key: &(BareJid, BareJid)) {
+        let name = self.name_of(key);
+        for chat in self
+            .chats
+            .iter_mut()
+            .filter(|c| c.account == key.0 && c.jid == key.1 && c.kind == ChatKind::Direct)
+        {
+            chat.name = name.clone();
         }
     }
 
@@ -949,7 +1013,7 @@ impl App {
         }
         let mut chat = Chat::new(account.clone(), jid.clone(), kind);
         if chat.kind == ChatKind::Direct {
-            chat.name = self.names.get(&(account.clone(), jid.clone())).cloned();
+            chat.name = self.name_of(&(account.clone(), jid.clone()));
         }
         self.chats.push(chat);
         if self.selected.is_none() {
@@ -1681,6 +1745,30 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // The search results take the arrows, Enter and Esc; another key closes them
+        // and goes on as it would.
+        if let Some(search) = self.search.as_mut() {
+            let count = search.found.as_ref().map_or(0, Vec::len);
+            match key.code {
+                KeyCode::Up => {
+                    search.cursor = search.cursor.saturating_sub(1);
+                    return Vec::new();
+                }
+                KeyCode::Down => {
+                    search.cursor = (search.cursor + 1).min(count.saturating_sub(1));
+                    return Vec::new();
+                }
+                KeyCode::Enter => {
+                    let cursor = search.cursor;
+                    return self.jump(cursor);
+                }
+                KeyCode::Esc => {
+                    self.search = None;
+                    return Vec::new();
+                }
+                _ => self.search = None,
+            }
+        }
         // A key closes the reaction picker; Esc does only that.
         if self.picker.take().is_some() && key.code == KeyCode::Esc {
             return Vec::new();
@@ -2544,6 +2632,28 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/search", _) => {
+                let words = line["/search".len()..].trim();
+                let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
+                    return self.say(tr!("open a chat to search in", "откройте чат, в котором искать"));
+                };
+                if words.is_empty() {
+                    return self.say(tr!("as: /search words", "так: /search слова"));
+                }
+                let (account, chat) = (chat.account.clone(), chat.jid.clone());
+                self.search = Some(Search {
+                    account: account.clone(),
+                    chat: chat.clone(),
+                    words: words.to_owned(),
+                    found: None,
+                    cursor: 0,
+                });
+                return vec![Action::Search {
+                    account,
+                    chat,
+                    words: words.to_owned(),
+                }];
+            }
             ("/away" | "/dnd" | "/online", _) => {
                 use xmpp_parsers::presence::Show;
                 let show = match name {
@@ -3615,6 +3725,59 @@ impl App {
         Vec::new()
     }
 
+    /// Shows the chat from result `index` of the search on; the search closes.
+    pub fn jump(&mut self, index: usize) -> Vec<Action> {
+        let Some(search) = self.search.take() else {
+            return Vec::new();
+        };
+        let Some(found) = search.found.as_ref().and_then(|f| f.get(index)) else {
+            return Vec::new();
+        };
+        let room = self
+            .chats
+            .iter()
+            .find(|c| c.account == search.account && c.jid == search.chat)
+            .is_some_and(|c| c.is_room());
+        vec![Action::Jump {
+            account: search.account,
+            chat: search.chat,
+            room,
+            at: found.at,
+        }]
+    }
+
+    /// The search's results came.
+    pub fn found(&mut self, account: &BareJid, chat: &BareJid, words: &str, found: Vec<Found>) {
+        if let Some(search) = self
+            .search
+            .as_mut()
+            .filter(|s| &s.account == account && &s.chat == chat && s.words == words)
+        {
+            search.found = Some(found);
+            search.cursor = 0;
+        }
+    }
+
+    /// The chat shown from `at` on (see [`Action::Jump`]): what comes before is had by
+    /// scrolling up, as ever.
+    pub fn jumped(&mut self, account: &BareJid, jid: &BareJid, lines: Vec<Line>, at: i64) {
+        let Some(index) = self
+            .chats
+            .iter()
+            .position(|c| &c.account == account && &c.jid == jid)
+        else {
+            return;
+        };
+        let chat = &mut self.chats[index];
+        chat.lines = lines;
+        chat.scroll = 0;
+        chat.older_loading = false;
+        chat.older_done = false;
+        chat.older_before = None;
+        chat.jump_to = Some(at);
+        self.focus = Focus::Messages;
+    }
+
     /// Asks for the open chat's messages before those it shows, once at a time.
     pub fn ask_older(&mut self) -> Vec<Action> {
         let Some(chat) = self.current_mut() else {
@@ -3681,6 +3844,25 @@ impl App {
         }
         if self.settings.is_some() {
             return self.settings_mouse(mouse);
+        }
+        // The search results: a click picks one, the wheel goes through them, a click
+        // elsewhere closes them.
+        if self.search.is_some() {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(&(_, index)) = self.areas.search_rows.iter().find(|(r, _)| inside(*r)) {
+                        return self.jump(index);
+                    }
+                    self.search = None;
+                }
+                MouseEventKind::ScrollUp => {
+                    return self.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+                }
+                MouseEventKind::ScrollDown => {
+                    return self.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                }
+                _ => return Vec::new(),
+            }
         }
         // The reaction picker takes the next click: on a reaction, it goes; anywhere
         // else, the picker closes.
@@ -4419,6 +4601,21 @@ mod tests {
             vec![(jid("carol@example.org"), Some("x".into()))],
         );
         assert_eq!(app.chats[carol].title(), "Кэрол");
+    }
+
+    #[test]
+    fn a_contact_without_a_name_in_the_roster_goes_by_the_one_they_gave_themselves() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.nickname(&me, &jid("bob@example.org"), Some("Бобби".into()));
+        assert_eq!(app.chats[bob].title(), "Бобби");
+        app.contact_names(&me, vec![(jid("bob@example.org"), Some("Боб".into()))]);
+        assert_eq!(app.chats[bob].title(), "Боб", "the roster's comes first");
+        app.contact_names(&me, vec![(jid("bob@example.org"), None)]);
+        assert_eq!(app.chats[bob].title(), "Бобби", "and theirs again without it");
+        app.nickname(&me, &jid("bob@example.org"), None);
+        assert_eq!(app.chats[bob].title(), "bob");
     }
 
     #[test]

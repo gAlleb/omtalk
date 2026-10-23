@@ -298,6 +298,20 @@ enum Msg {
         room: BareJid,
         name: Option<String>,
     },
+    /// What `/search` found.
+    Found {
+        account: BareJid,
+        chat: BareJid,
+        words: String,
+        found: Vec<crate::app::Found>,
+    },
+    /// A chat from a search result on (see [`Action::Jump`]).
+    Jumped {
+        account: BareJid,
+        chat: BareJid,
+        lines: Vec<Line>,
+        at: i64,
+    },
     /// A chat's messages before those shown (see [`Action::Older`]).
     Older {
         account: BareJid,
@@ -310,6 +324,12 @@ enum Msg {
     Reactions {
         account: BareJid,
         reactions: omtalk_xmpp::reactions::Reactions,
+    },
+    /// The name `jid` gave themselves (XEP-0172), or none any more.
+    Nickname {
+        account: BareJid,
+        jid: BareJid,
+        nick: Option<String>,
     },
     /// Names the account's contacts have in its roster (none: the address shows).
     Names {
@@ -846,7 +866,20 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             None => drop(app.avatars.remove(&jid)),
         },
         Msg::Names { account, names } => app.contact_names(&account, names),
+        Msg::Nickname { account, jid, nick } => app.nickname(&account, &jid, nick),
         Msg::Reactions { account, reactions } => drop(app.reacted(&account, &reactions)),
+        Msg::Found {
+            account,
+            chat,
+            words,
+            found,
+        } => app.found(&account, &chat, &words, found),
+        Msg::Jumped {
+            account,
+            chat,
+            lines,
+            at,
+        } => app.jumped(&account, &chat, lines, at),
         Msg::Older {
             account,
             chat,
@@ -1211,6 +1244,18 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     tell(Msg::ReadElsewhere {
                         account: account.clone(),
                         chat,
+                    });
+                }
+            }
+            // The name someone gave themselves (XEP-0172).
+            Event::Pep {
+                from, node, items, ..
+            } if node == omtalk_xmpp::nick::NODE && *from != account => {
+                if let Some(nick) = omtalk_xmpp::nick::of(items) {
+                    tell(Msg::Nickname {
+                        account: account.clone(),
+                        jid: from.clone(),
+                        nick,
                     });
                 }
             }
@@ -2161,6 +2206,49 @@ async fn perform(action: Action, shared: Shared) {
                 done,
             });
         }
+        Action::Search { account, chat, words } => {
+            let found = shared
+                .store
+                .search(&account, &chat, &words, SEARCH_LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| crate::app::Found {
+                    at: m.at,
+                    who: match (&m.nick, m.outgoing) {
+                        (Some(nick), _) => nick.clone(),
+                        (None, true) => tr!("me", "я").to_owned(),
+                        (None, false) => m.sender.node().map(|n| n.to_string()).unwrap_or_default(),
+                    },
+                    text: m.body,
+                })
+                .collect();
+            tell(Msg::Found {
+                account,
+                chat,
+                words,
+                found,
+            });
+        }
+        Action::Jump {
+            account,
+            chat,
+            room,
+            at,
+        } => {
+            let mut lines = stored_lines(
+                shared
+                    .store
+                    .messages_since(&account, &chat, at, JUMP_LIMIT)
+                    .unwrap_or_default(),
+            );
+            with_reactions(&shared.store, &account, &chat, room, &mut lines);
+            tell(Msg::Jumped {
+                account,
+                chat,
+                lines,
+                at,
+            });
+        }
         Action::SetStatus(status) => {
             // For the next run too: away stays away after a restart.
             let kept = (status != Default::default()).then(|| status.to_kept());
@@ -2785,6 +2873,12 @@ async fn perform(action: Action, shared: Shared) {
 
 /// Where one's own status is kept between runs.
 const KEPT_STATUS: &str = "status";
+
+/// How many results `/search` shows.
+const SEARCH_LIMIT: usize = 200;
+
+/// How many messages a chat shown from a search result holds from it on.
+const JUMP_LIMIT: usize = 5000;
 
 /// How many older messages one scroll to the top brings.
 const OLDER_PAGE: usize = 50;

@@ -238,32 +238,80 @@ impl Store {
         skip: usize,
         limit: usize,
     ) -> Result<Vec<StoredMessage>, Error> {
-        let db = self.db.lock().unwrap();
-        let mut query = db.prepare(
-            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited FROM messages
-             WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3 OFFSET ?4",
-        )?;
-        let rows = query.query_map(
+        let mut messages = self.read_messages(
+            chat,
+            "WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3 OFFSET ?4",
             params![account.as_str(), chat.as_str(), limit as i64, skip as i64],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, bool>(2)?,
-                    r.get::<_, bool>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, Option<String>>(6)?,
-                    r.get::<_, Option<i64>>(7)?,
-                    r.get::<_, Option<String>>(8)?,
-                    r.get::<_, bool>(9)?,
-                    r.get::<_, Option<String>>(10)?,
-                    r.get::<_, Option<String>>(11)?,
-                    r.get::<_, bool>(12)?,
-                    r.get::<_, bool>(13)?,
-                ))
-            },
         )?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// The messages of `chat` from the time `at` on, oldest first, at most `limit`: a
+    /// chat shown from a message found by [`Store::search`].
+    pub fn messages_since(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        at: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, Error> {
+        self.read_messages(
+            chat,
+            "WHERE account = ?1 AND chat = ?2 AND at >= ?3 ORDER BY at, rowid LIMIT ?4",
+            params![account.as_str(), chat.as_str(), at, limit as i64],
+        )
+    }
+
+    /// The messages of `chat` whose text holds `words`, whatever the case, newest first,
+    /// at most `limit`. Encrypted ones too: what is kept is decrypted.
+    pub fn search(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        words: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, Error> {
+        let words = words.to_lowercase();
+        let mut found = self.read_messages(
+            chat,
+            "WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC",
+            params![account.as_str(), chat.as_str()],
+        )?;
+        // SQLite folds only ASCII case; Cyrillic is folded here.
+        found.retain(|m| m.body.to_lowercase().contains(&words));
+        found.truncate(limit);
+        Ok(found)
+    }
+
+    fn read_messages(
+        &self,
+        chat: &BareJid,
+        rest: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<StoredMessage>, Error> {
+        let db = self.db.lock().unwrap();
+        let mut query = db.prepare(&format!(
+            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited FROM messages {rest}"
+        ))?;
+        let rows = query.query_map(params, |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, bool>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, bool>(12)?,
+                r.get::<_, bool>(13)?,
+            ))
+        })?;
         let mut messages = Vec::new();
         for row in rows {
             let (
@@ -299,7 +347,6 @@ impl Store {
                 edited,
             });
         }
-        messages.reverse();
         Ok(messages)
     }
 
@@ -509,6 +556,38 @@ mod tests {
             Some(Delivery::Failed("отказано".into())),
             "a failure stays"
         );
+    }
+
+    #[test]
+    fn a_search_finds_words_whatever_their_case_and_shows_from_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let (me, bob) = (jid("me@example.org"), jid("bob@example.org"));
+        for (body, at) in [
+            ("Встреча в пять", 10),
+            ("обед", 20),
+            ("встреча перенесена", 30),
+            ("ок", 40),
+        ] {
+            store
+                .save_message(&me, &message("bob@example.org", body, at))
+                .unwrap();
+        }
+        let found: Vec<_> = store
+            .search(&me, &bob, "ВСТРЕЧА", 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.at)
+            .collect();
+        assert_eq!(found, [30, 10], "newest first, any case");
+        assert_eq!(store.search(&me, &bob, "встреча", 1).unwrap().len(), 1);
+        let from: Vec<_> = store
+            .messages_since(&me, &bob, 20, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        assert_eq!(from, ["обед", "встреча перенесена", "ок"]);
     }
 
     #[test]
