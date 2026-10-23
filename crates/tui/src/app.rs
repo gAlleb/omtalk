@@ -609,6 +609,9 @@ pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
     ("Esc", "cancel", "отмена"),
 ];
 
+/// How soon a second Ctrl+C has to follow the first to quit.
+const QUIT_AGAIN: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct App {
     pub accounts: Vec<BareJid>,
     /// Account → connection state, as shown in the status line.
@@ -706,6 +709,8 @@ pub struct App {
     pub folders: Vec<Folder>,
     /// The account commands act for: the last one picked, by its chat or its heading.
     pub active: Option<BareJid>,
+    /// When Ctrl+C was pressed once: a second one within [`QUIT_AGAIN`] quits.
+    pub quit_asked: Option<std::time::Instant>,
     pub quit: bool,
 }
 
@@ -781,6 +786,7 @@ impl App {
             folders: Vec::new(),
             active: None,
             quit: false,
+            quit_asked: None,
         }
     }
 
@@ -1512,10 +1518,20 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        // Ctrl+C always leaves, whatever the modifier, as in any terminal program.
+        // Ctrl+C leaves, whatever the modifier, as in any terminal program; but only
+        // pressed twice, a reflex in a chat costs nothing.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
-            return vec![Action::Quit];
+            let now = std::time::Instant::now();
+            if self
+                .quit_asked
+                .is_some_and(|at| now.duration_since(at) < QUIT_AGAIN)
+            {
+                self.quit = true;
+                return vec![Action::Quit];
+            }
+            self.quit_asked = Some(now);
+            self.status = tr!("Ctrl+C again to quit", "ещё раз Ctrl+C — выход").into();
+            return Vec::new();
         }
         if let Some(services) = self.services.as_mut() {
             let outcome = services.on_key(key);
@@ -1559,15 +1575,14 @@ impl App {
         if !self.modifier.is_empty() && key.modifiers.contains(self.modifier) {
             return self.shortcut(key.code);
         }
-        // Typing away from the input line is typing into it: a printable key that does
-        // nothing in the pane with the focus takes the focus to the line, and goes there.
+        // Typing away from the input line is typing into it: any printable key takes the
+        // focus to the line and goes there. The panes move with the arrows, Home and End.
         if let KeyCode::Char(c) = key.code
             && self.focus != Focus::Input
             && !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
             && !c.is_control()
-            && !self.pane_key(c)
         {
             self.focus = Focus::Input;
             return self.input_key(key.code);
@@ -1668,44 +1683,24 @@ impl App {
         }
     }
 
+    /// Letters are typed, never taken here (see [`App::on_key`]): the list moves with the
+    /// arrows, ← folds.
     fn chats_key(&mut self, code: KeyCode) -> Vec<Action> {
         match code {
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Up => self.move_selection(-1),
+            KeyCode::Down => self.move_selection(1),
             KeyCode::Enter => {
                 self.focus = Focus::Input;
                 Vec::new()
             }
-            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if let Some(group) = self.selected.map(|i| self.group_of(i)) {
                     self.toggle_group(&group);
                 }
                 Vec::new()
             }
-            KeyCode::Char('z') => {
-                self.focus_group();
-                Vec::new()
-            }
-            // Into a folder: the command, ready to be given a name.
-            KeyCode::Char('m') => {
-                self.input = "/folder ".into();
-                self.cursor = self.input.chars().count();
-                self.focus = Focus::Input;
-                Vec::new()
-            }
             _ => Vec::new(),
         }
-    }
-
-    /// Whether `c` does something in the pane with the focus (moving, folding…).
-    fn pane_key(&self, c: char) -> bool {
-        let keys = match self.focus {
-            Focus::Chats => " hjkmz",
-            Focus::Messages => "gGijkr",
-            Focus::People => "gGjk",
-            Focus::Input => return false,
-        };
-        keys.contains(c)
     }
 
     /// Who the current room's pane lists, in its order: those here, then members away.
@@ -1732,10 +1727,10 @@ impl App {
         let last = people.len() - 1;
         self.people_cursor = self.people_cursor.min(last);
         match code {
-            KeyCode::Up | KeyCode::Char('k') => self.people_cursor = self.people_cursor.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => self.people_cursor = (self.people_cursor + 1).min(last),
-            KeyCode::Home | KeyCode::Char('g') => self.people_cursor = 0,
-            KeyCode::End | KeyCode::Char('G') => self.people_cursor = last,
+            KeyCode::Up => self.people_cursor = self.people_cursor.saturating_sub(1),
+            KeyCode::Down => self.people_cursor = (self.people_cursor + 1).min(last),
+            KeyCode::Home => self.people_cursor = 0,
+            KeyCode::End => self.people_cursor = last,
             KeyCode::Esc => self.focus = Focus::Input,
             // As a click on them: a direct chat.
             KeyCode::Enter => {
@@ -1759,15 +1754,14 @@ impl App {
 
     fn messages_key(&mut self, code: KeyCode) -> Vec<Action> {
         match code {
-            KeyCode::Up | KeyCode::Char('k') => self.scroll(1),
-            KeyCode::Down | KeyCode::Char('j') => self.scroll(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.scroll(isize::MAX / 2),
-            KeyCode::Char('G') | KeyCode::End => self.scroll(isize::MIN / 2),
-            KeyCode::Enter | KeyCode::Char('i') => {
+            KeyCode::Up => self.scroll(1),
+            KeyCode::Down => self.scroll(-1),
+            KeyCode::Home => self.scroll(isize::MAX / 2),
+            KeyCode::End => self.scroll(isize::MIN / 2),
+            KeyCode::Enter => {
                 self.focus = Focus::Input;
                 Vec::new()
             }
-            KeyCode::Char('r') => self.reply_here(),
             _ => Vec::new(),
         }
     }
@@ -3697,6 +3691,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_quits_only_when_pressed_twice() {
+        let mut app = app();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.on_key(ctrl_c).is_empty());
+        assert!(!app.quit, "once: it asks");
+        assert!(app.status.contains("Ctrl+C"), "{}", app.status);
+        assert_eq!(app.on_key(ctrl_c), [Action::Quit]);
+        assert!(app.quit);
+
+        // Long after the first, it asks again.
+        let mut app = super::tests::app();
+        app.quit_asked = Some(std::time::Instant::now() - QUIT_AGAIN * 2);
+        assert!(app.on_key(ctrl_c).is_empty());
+        assert!(!app.quit);
+    }
+
+    #[test]
     fn typing_away_from_the_input_line_types_into_it() {
         let mut app = app();
         app.focus = Focus::Chats;
@@ -3708,7 +3719,16 @@ mod tests {
         app.cursor = 0;
         app.focus = Focus::Chats;
         type_keys(&mut app, "j");
-        assert_eq!(app.focus, Focus::Chats, "a key of the pane stays the pane's");
+        assert_eq!(
+            (app.focus, app.input.as_str()),
+            (Focus::Input, "j"),
+            "any letter, the panes keep none"
+        );
+        app.input.clear();
+        app.cursor = 0;
+        app.focus = Focus::Chats;
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.focus, Focus::Chats, "the arrows stay the pane's");
         app.focus = Focus::Messages;
         type_keys(&mut app, "5");
         assert_eq!((app.focus, app.input.as_str()), (Focus::Input, "5"));

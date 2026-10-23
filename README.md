@@ -92,8 +92,8 @@ takes effect at once and is written to `config.toml`; the comments in it are kep
 
 Three columns: chats, the conversation, and the room's participants or the contact's
 devices. With several accounts, the chats on the left are grouped by account. A click on
-an account heading (or `Space` in the chat list) folds its chats; a folded account shows
-its unread count. `z` keeps only the current account open; `z` again opens them all.
+an account heading (or `←` in the chat list) folds its chats; a folded account shows
+its unread count. Prefix+`z` keeps only the current account open; again, it opens them all.
 Commands go from the account on the contact's server, otherwise from the last one picked
 (it is underlined). A click on a nick in a room, or on a participant, opens a direct chat
 with them.
@@ -101,8 +101,8 @@ with them.
 Your own folders, inside each account (omtalk only; rooms can go in them too): the list on
 the left is a tree of account → folders → chats. `/folder NAME` puts the current chat into
 a folder of its account (creating it if needed); `/folder` with no name takes it out. You
-can also drag a chat with the mouse onto a folder heading, or back onto the account. `m` in
-the chat list starts the same command. A folder folds like an account. An empty folder
+can also drag a chat with the mouse onto a folder heading, or back onto the account. A
+folder folds like an account. An empty folder
 disappears. `/rename-folder OLD NEW` (for names with spaces: `old folder → new`).
 
 Colours come from the terminal palette (pywal and similar tools recolour omtalk along with
@@ -113,11 +113,12 @@ input line turns OMEMO on and off for the chat, the wheel scrolls.
 
 Keys: the `leader` prefix (Ctrl+X), release, then a letter. A list pops up after the
 prefix: `o` OMEMO, `b`/`r` left and right panes, `↑`/`↓` chats, `←`/`→` width of the chat
-list, `s` services, `p` settings, `z` current account only, `q` quit. The same letters work
+list, `s` services, `p` settings, `z` current account only, `q` quit (or Ctrl+C twice). The same letters work
 with `modifier` held, except those the input line needs. `Tab` switches focus,
 `PgUp`/`PgDn` scroll. Typing anywhere else types into the input line (the focus goes
-there), except the keys a pane uses itself (`j`/`k` and the like). In a room, `Tab` after the input line goes to the participants on
-the right: `↑`/`↓` (`k`/`j`) pick someone, `Enter` opens a direct chat with them, `Esc`
+there): every letter is typed, the panes move with `↑`/`↓`, `Home`/`End` and the mouse.
+In a room, `Tab` after the input line goes to the participants on
+the right: `↑`/`↓` pick someone, `Enter` opens a direct chat with them, `Esc`
 goes back to the input line.
 
 The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, to the end; Ctrl+Y
@@ -174,8 +175,7 @@ shown at once.
 ## Replies and quotes
 
 Replies (XEP-0461), as in Conversations, Gajim and Monal: double-click a message,
-prefix+`a`, or `r` in the conversation (a reply to the last incoming message), or
-`/reply`. The part of a message selected with the mouse is what gets quoted. While you
+prefix+`a` (a reply to the last incoming message), or `/reply`. The part of a message selected with the mouse is what gets quoted. While you
 write the reply, the input line shows what it answers; Esc cancels. The quote goes as
 `> ` lines at the start of the text (visible in any client) along with a mark saying which
 message it answers. The first line of the quote is the author's nick (`> bob:`), so it is

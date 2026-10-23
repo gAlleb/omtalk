@@ -3196,11 +3196,11 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.selected, Some(a), "folded chats are skipped");
 
-        // z: only the current account; again, all of them.
+        // Ctrl+z: only the current account; again, all of them.
         app.collapsed.clear();
-        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert_eq!(app.visible_chats(), [a, c]);
-        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert_eq!(app.visible_chats(), [a, c, b]);
 
         // Commands go from the account on the peer's server, else from the one last picked.
@@ -3298,18 +3298,18 @@ mod tests {
                 .is_empty()
         );
 
-        // Folded, the folder hides its chats; Space folds the current chat's heading.
+        // Folded, the folder hides its chats; ← folds the current chat's heading.
         app.toggle_group(&folder);
         assert_eq!(app.visible_chats(), [anna]);
         app.toggle_group(&folder);
         app.select(boss);
         app.focus = Focus::Chats;
-        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(app.collapsed.contains(&folder));
         app.collapsed.clear();
 
-        // z folds other accounts; with one there are none, and nothing hides.
-        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        // Ctrl+z folds other accounts; with one there are none, and nothing hides.
+        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert_eq!(app.visible_chats(), [boss, team, anna]);
 
         // Renamed; dragged out on to the account; the last one out takes the folder along.
@@ -5193,7 +5193,7 @@ mod tests {
 
         // Down twice: carol, who is away; Enter opens a chat with her.
         app.on_key(key(KeyCode::Down));
-        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.people_cursor, 2, "not past the last");
         app.on_key(key(KeyCode::Enter));
