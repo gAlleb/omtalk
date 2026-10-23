@@ -49,6 +49,16 @@ pub(crate) const MIGRATION_REPLIES: &str = "
     ALTER TABLE messages ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// Schema 12: chats known without a message kept, as one a new device finds in the
+/// account's archive with nothing it can read: still listed after a restart.
+pub(crate) const MIGRATION_KNOWN: &str = "
+    CREATE TABLE known_chats (
+        account TEXT NOT NULL,
+        chat    TEXT NOT NULL,
+        PRIMARY KEY (account, chat)
+    );
+";
+
 /// How far one's own message got, as kept: each step only moves forward, and a failure
 /// is final.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,10 +259,24 @@ impl Store {
         Ok(messages)
     }
 
+    /// Keeps `chat` in the list though no message of it is kept. A chat closed stays
+    /// closed.
+    pub fn keep_chat(&self, account: &BareJid, chat: &BareJid) -> Result<(), Error> {
+        self.db.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO known_chats (account, chat) VALUES (?1, ?2)",
+            params![account.as_str(), chat.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// The chats with history, and those kept without ([`Store::keep_chat`]) after them.
     pub fn chats(&self, account: &BareJid) -> Result<Vec<ChatSummary>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
-            "SELECT chat, MAX(at) FROM messages WHERE account = ?1 GROUP BY chat ORDER BY MAX(at) DESC",
+            "SELECT chat, MAX(at) FROM (
+                 SELECT chat, at FROM messages WHERE account = ?1
+                 UNION ALL SELECT chat, 0 FROM known_chats WHERE account = ?1
+             ) GROUP BY chat ORDER BY MAX(at) DESC",
         )?;
         let rows = query.query_map([account.as_str()], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -418,6 +442,41 @@ mod tests {
             state("m2"),
             Some(Delivery::Failed("отказано".into())),
             "a failure stays"
+        );
+    }
+
+    #[test]
+    fn a_chat_kept_without_messages_is_listed_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omtalk.db");
+        let me = jid("me@example.org");
+        {
+            let store = Store::open(&path).unwrap();
+            store.keep_chat(&me, &jid("alice@example.org")).unwrap();
+            store.keep_chat(&me, &jid("bob@example.org")).unwrap();
+            store.keep_chat(&me, &jid("bob@example.org")).unwrap();
+            store
+                .save_message(&me, &message("bob@example.org", "привет", 5))
+                .unwrap();
+        }
+        let chats: Vec<BareJid> = Store::open(&path)
+            .unwrap()
+            .chats(&me)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.chat)
+            .collect();
+        assert_eq!(
+            chats,
+            [jid("bob@example.org"), jid("alice@example.org")],
+            "once each, those with history first"
+        );
+        assert!(
+            Store::open(&path)
+                .unwrap()
+                .chats(&jid("other@example.org"))
+                .unwrap()
+                .is_empty()
         );
     }
 

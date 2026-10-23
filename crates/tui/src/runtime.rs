@@ -892,6 +892,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             let closed = shared.store.closed_chats(&account).unwrap_or_default();
             for peer in peers.iter().filter(|p| !closed.contains(p)) {
                 app.chat(&account, peer, ChatKind::Direct);
+                let _ = shared.store.keep_chat(&account, peer);
             }
         }
         Msg::Joined {
