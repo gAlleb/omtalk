@@ -1490,11 +1490,32 @@ async fn join(
                 nick,
                 open,
             });
-            // Shown and kept page by page: a long absence fills the room as it is read.
-            match omemo
-                .catch_up_room_each(&room, |message| deliver(shared, account, message))
-                .await
-            {
+            // Kept page by page; the room shows its newest, the rest comes on scrolling up.
+            // A long absence says how far it has got.
+            let name = room
+                .node()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| room.to_string());
+            let mut read = 0;
+            let caught = omemo
+                .catch_up_room_each(&room, |message| {
+                    read += 1;
+                    if read % 100 == 0 {
+                        tell(Msg::Status(trf!(
+                            "{name}: {read} from the archive…",
+                            "{name}: из архива {read}…"
+                        )));
+                    }
+                    deliver(shared, account, message);
+                })
+                .await;
+            if read >= 100 {
+                tell(Msg::Status(trf!(
+                    "{name}: {read} from the archive",
+                    "{name}: из архива {read}"
+                )));
+            }
+            match caught {
                 Ok(caught) => {
                     if caught.position_lost {
                         tell(Msg::Notice {

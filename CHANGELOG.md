@@ -5,6 +5,8 @@
 - **What was missed in a room shows as it is read**, page by page, not all at once at the end: a long absence (hundreds of encrypted messages) no longer leaves the room looking empty for a while.
 - **Nothing read from an archive is lost when a later page fails**: before, all that had been read was thrown away while the place to go on from had already moved past it, so those messages never showed.
 - A room whose archive was empty on the first visit is read from its start the next time, not just its last 50 messages.
+- **A long absence does not flood a room**: all that was missed is read and kept, but the room shows its newest few hundred, the rest comes on scrolling up; the bottom line counts the reading. Messages from an archive stand in their place by time.
+- **A right click on a message offers reactions** (👍 ❤️ 😂 😮 😢 🙏); `/react` also takes names (`:+1:`, `heart`, `joy`…).
 
 ## 0.1.4 — 2026-10-23
 

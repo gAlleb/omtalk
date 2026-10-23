@@ -145,6 +145,10 @@ Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last me
 the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
 message, yours or someone else's, changes in place and is marked "edited".
 
+After a long absence a room's missed messages are all read and kept (OMEMO has to read
+them in order), but the room shows only its newest few hundred; the bottom line says how
+far the reading has got.
+
 Older history: scroll up past the oldest message shown (or click "↑ earlier" above it)
 and the 50 before it come: first from what this device keeps, then from the server's
 archive (MAM). What was encrypted before this device existed cannot be read there and is
@@ -154,8 +158,9 @@ Your status: `/away [words]`, `/dnd [words]`, `/online [words]`, for all account
 once. Contacts and the rooms you are in see it; it is said again after a reconnect and on
 entering a room, and shows by the account at the bottom. omtalk starts online.
 
-Reactions (XEP-0444): `/react 👍` reacts to the message selected with the mouse, or the
-last one from someone; the same again takes it back. Reactions show under the message,
+Reactions (XEP-0444): a right click on a message offers 👍 ❤️ 😂 😮 😢 🙏; a click puts one
+on, again takes it off. `/react 👍` does the same for the message selected with the mouse,
+or the last one from someone, and knows names too (`/react :+1:`, `heart`, `joy`, `fire`…). Reactions show under the message,
 each with how many sent it. As in Conversations and Gajim they go unencrypted, also in an
 encrypted chat.
 

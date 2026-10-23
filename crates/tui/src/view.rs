@@ -84,6 +84,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     services_window(frame, app, area);
     keys_window(frame, app, area);
     settings_window(frame, app, area);
+    reaction_picker(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -1959,6 +1960,35 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hints_width)]).areas(area);
     frame.render_widget(Paragraph::new(TextLine::from(left)), left_area);
     frame.render_widget(Paragraph::new(hints), right_area);
+}
+
+/// The reactions a right click on a message offers, beside where it was clicked.
+fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(picker) = app.picker else { return };
+    // Each reaction in a cell of four: an emoji is two wide, some draw wider than said.
+    let width = (crate::app::QUICK_REACTIONS.len() * 4 + 2) as u16;
+    let height = 3;
+    let x = picker.x.min(screen.right().saturating_sub(width));
+    let y = if picker.y >= screen.y + height {
+        picker.y - height
+    } else {
+        picker.y + 1
+    };
+    let area = Rect::new(x, y, width.min(screen.width), height);
+    clear(frame, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    for (i, reaction) in crate::app::QUICK_REACTIONS.iter().enumerate() {
+        let place = Rect::new(inner.x + (i * 4) as u16, inner.y, 4, 1);
+        if place.right() > inner.right() {
+            break;
+        }
+        frame.render_widget(Paragraph::new(format!(" {reaction}")), place);
+        app.areas.reaction_buttons.push((place, reaction));
+    }
 }
 
 /// The keys window, over the middle of the screen.
@@ -5253,6 +5283,57 @@ mod tests {
         assert!(text.contains("nick39"), "{text}");
         app.on_mouse(wheel(MouseEventKind::ScrollUp));
         assert_eq!(app.people_cursor, 36);
+    }
+
+    #[test]
+    fn a_right_click_on_a_message_offers_reactions_to_it() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        for (i, text) in ["первое", "второе", "третье"].iter().enumerate() {
+            let mut line = crate::app::Line::message(i as i64, "bob".into(), (*text).into(), true, false);
+            line.id = Some(format!("b{i}"));
+            app.chats[bob].lines.push(line);
+        }
+        screen(&mut app, 100, 20);
+        // The first message, not the last.
+        let &(row, _) = app
+            .areas
+            .message_lines
+            .iter()
+            .find(|(_, line)| *line == 0)
+            .expect("on screen");
+        let at = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Right), row.x + 4, row.y));
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("👍") && text.contains("🙏"), "{text}");
+        let &(button, reaction) = &app.areas.reaction_buttons[2];
+        let sent = app.on_mouse(at(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        assert!(
+            matches!(&sent[..], [Action::React { id, reactions, .. }] if id == "b0" && reactions == &[reaction.to_owned()]),
+            "{sent:?}"
+        );
+        assert!(app.picker.is_none(), "it closes");
+        assert_eq!(app.chats[bob].lines[0].reactions.len(), 1);
+
+        // Esc closes it with nothing sent.
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Right), row.x + 4, row.y));
+        assert!(
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert!(app.picker.is_none());
     }
 
     #[test]

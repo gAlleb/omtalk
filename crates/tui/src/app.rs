@@ -320,6 +320,8 @@ pub struct Areas {
     pub top_shown: bool,
     /// The "↑ earlier" row above the oldest message: a click asks for older ones.
     pub older: Option<Rect>,
+    /// The reactions of the picker open over a message, each where it is drawn.
+    pub reaction_buttons: Vec<(Rect, &'static str)>,
     pub left: Option<Rect>,
     pub right: Option<Rect>,
     pub messages: Rect,
@@ -663,6 +665,42 @@ pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
     ("Esc", "cancel", "отмена"),
 ];
 
+/// The reactions a right click on a message offers, as messengers do.
+pub const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+/// The reaction picker, open over message `line` of chat `chat`, where it was clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picker {
+    pub chat: usize,
+    pub line: usize,
+    pub x: u16,
+    pub y: u16,
+}
+
+/// What `/react` is given as a reaction: an emoji as it is, or a name for one
+/// (":+1:", "heart") as people write them.
+pub fn reaction_of(text: &str) -> String {
+    let name = text.trim().trim_matches(':').to_lowercase();
+    let emoji = match name.as_str() {
+        "+1" | "thumbsup" | "like" | "ok" => "👍",
+        "-1" | "thumbsdown" => "👎",
+        "heart" | "love" | "<3" => "❤️",
+        "joy" | "laugh" | "lol" | "rofl" => "😂",
+        "wow" | "open_mouth" | "o" => "😮",
+        "cry" | "sad" => "😢",
+        "pray" | "thanks" | "thx" => "🙏",
+        "fire" => "🔥",
+        "tada" | "party" => "🎉",
+        "eyes" => "👀",
+        _ => return text.trim().to_owned(),
+    };
+    emoji.to_owned()
+}
+
+/// How many messages a chat holds once an archive has filled it: the rest stay in the
+/// store, for scrolling up.
+pub const SHOWN: usize = 300;
+
 /// How soon a second Ctrl+C has to follow the first to quit.
 const QUIT_AGAIN: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -769,6 +807,8 @@ pub struct App {
     pub names: BTreeMap<(BareJid, BareJid), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
     pub own_status: omtalk_xmpp::presence::OwnStatus,
+    /// The reaction picker, if a right click opened one.
+    pub picker: Option<Picker>,
     /// When Ctrl+C was pressed once: a second one within [`QUIT_AGAIN`] quits.
     pub quit_asked: Option<std::time::Instant>,
     pub quit: bool,
@@ -848,6 +888,7 @@ impl App {
             active: None,
             quit: false,
             quit_asked: None,
+            picker: None,
             own_status: Default::default(),
             names: BTreeMap::new(),
         }
@@ -1465,6 +1506,29 @@ impl App {
         chat.lines.push(line);
     }
 
+    /// A message read from an archive: in its place by time (live ones may have come
+    /// first), and the chat cut to its newest [`SHOWN`]: a long absence is kept whole in
+    /// the store and comes back from there on scrolling up, not all at once.
+    fn push_archived(&mut self, index: usize, line: Line) {
+        let seen = self.selected == Some(index) && self.focused;
+        let chat = &mut self.chats[index];
+        if !seen && !line.notice && !line.outgoing {
+            chat.unread += 1;
+        }
+        let at = chat
+            .lines
+            .iter()
+            .rposition(|l| l.at <= line.at)
+            .map_or(0, |i| i + 1);
+        chat.lines.insert(at, line);
+        // Not while one reads further up: the lines there would go from under one.
+        if chat.scroll == 0 && chat.lines.len() > SHOWN + SHOWN / 2 {
+            let cut = chat.lines.len() - SHOWN;
+            chat.lines.drain(..cut);
+            chat.older_done = false;
+        }
+    }
+
     /// A message arrived (or one's own came back): shown, and its read marker owed. What
     /// to do about it comes back: the marker, while the chat is in sight.
     pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) -> Vec<Action> {
@@ -1518,7 +1582,11 @@ impl App {
         if message.direction == Direction::Incoming {
             line.id = message.id.clone();
         }
-        self.push(index, line);
+        if message.at.is_some() {
+            self.push_archived(index, line);
+        } else {
+            self.push(index, line);
+        }
         if message.direction == Direction::Incoming {
             let chat = &mut self.chats[index];
             if message.markable {
@@ -1607,6 +1675,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // A key closes the reaction picker; Esc does only that.
+        if self.picker.take().is_some() && key.code == KeyCode::Esc {
+            return Vec::new();
+        }
         // Ctrl+C leaves, whatever the modifier, as in any terminal program; but only
         // pressed twice, a reflex in a chat costs nothing.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -1917,8 +1989,12 @@ impl App {
     /// Reacts with `reaction` to the message under the selection, else to the last one
     /// from someone (`/react 👍`); again, and it is taken back.
     pub fn react_here(&mut self, reaction: &str) -> Vec<Action> {
+        let reaction = reaction_of(reaction);
         if reaction.is_empty() || reaction.chars().count() > 8 {
-            return self.say(tr!("as: /react 👍", "так: /react 👍"));
+            return self.say(tr!(
+                "as: /react 👍 (or :+1:, :heart:, :joy:…); a right click on a message offers some",
+                "так: /react 👍 (или :+1:, :heart:, :joy:…); правый клик по сообщению предлагает готовые"
+            ));
         }
         let Some(index) = self.selected else {
             return Vec::new();
@@ -1930,8 +2006,25 @@ impl App {
                 .find(|(r, _)| r.y == a.1)
                 .map(|&(_, line)| line)
         });
-        let chat = &mut self.chats[index];
-        let line = under.or_else(|| chat.lines.iter().rposition(|l| !l.notice && !l.outgoing));
+        let line = under.or_else(|| {
+            self.chats[index]
+                .lines
+                .iter()
+                .rposition(|l| !l.notice && !l.outgoing)
+        });
+        match line {
+            Some(line) => self.react_line(index, line, &reaction),
+            None => self.say(tr!("nothing to react to", "не на что реагировать")),
+        }
+    }
+
+    /// Reacts with `reaction` to message `line` of chat `index`; again, and it is taken
+    /// back.
+    pub fn react_line(&mut self, index: usize, line: usize, reaction: &str) -> Vec<Action> {
+        let Some(chat) = self.chats.get_mut(index) else {
+            return Vec::new();
+        };
+        let line = Some(line);
         let room = chat.is_room();
         let by = match &chat.kind {
             ChatKind::Room { nick } => nick.clone(),
@@ -3583,6 +3676,21 @@ impl App {
         if self.settings.is_some() {
             return self.settings_mouse(mouse);
         }
+        // The reaction picker takes the next click: on a reaction, it goes; anywhere
+        // else, the picker closes.
+        if let Some(picker) = self.picker {
+            return match mouse.kind {
+                MouseEventKind::Down(_) => {
+                    self.picker = None;
+                    let chosen = self.areas.reaction_buttons.iter().find(|(r, _)| inside(*r));
+                    match chosen.map(|&(_, reaction)| reaction) {
+                        Some(reaction) => self.react_line(picker.chat, picker.line, reaction),
+                        None => Vec::new(),
+                    }
+                }
+                _ => Vec::new(),
+            };
+        }
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
             || self.areas.files.iter().any(|(r, _)| inside(*r))
@@ -3639,6 +3747,18 @@ impl App {
             MouseEventKind::Down(MouseButton::Middle) => {
                 self.focus = Focus::Input;
                 return vec![Action::PastePrimary];
+            }
+            // A right click on a message offers reactions to it.
+            MouseEventKind::Down(MouseButton::Right)
+                if inside(self.areas.messages)
+                    && let (Some(chat), Some(&(_, line))) = (
+                        self.selected,
+                        self.areas.message_lines.iter().find(|(r, _)| inside(*r)),
+                    ) =>
+            {
+                self.selection = None;
+                self.picker = Some(Picker { chat, line, x, y });
+                return Vec::new();
             }
             MouseEventKind::Down(_) => self.selection = None,
             _ => {}
@@ -4016,6 +4136,60 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn an_archive_fills_a_chat_in_order_and_only_its_newest_stay() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        let message = |text: String, at: Option<i64>| Incoming {
+            peer: jid("team@muc.example.org"),
+            sender: jid("bob@example.org"),
+            nick: Some("bob".into()),
+            device: None,
+            direction: Direction::Incoming,
+            encrypted: false,
+            text: Some(text),
+            at,
+            not_for_this_device: false,
+            id: None,
+            markable: false,
+            archive_id: None,
+            untrusted: false,
+            reply_to: None,
+            replaces: None,
+            shared_file: false,
+        };
+        // Live first, then the archive's older one: in its place by time.
+        app.on_incoming(&me, &message("сейчас".into(), None), 1_000_000);
+        app.on_incoming(&me, &message("утром".into(), Some(10)), 10);
+        assert_eq!(app.chats[room].lines[0].text, "утром");
+
+        app.chats[room].older_done = true;
+        for i in 0..(SHOWN * 2) as i64 {
+            app.on_incoming(&me, &message(format!("из архива {i}"), Some(100 + i)), 100 + i);
+        }
+        let lines = &app.chats[room].lines;
+        assert!(lines.len() <= SHOWN + SHOWN / 2, "{}", lines.len());
+        assert_eq!(lines.last().unwrap().text, "сейчас", "the newest stay");
+        assert!(
+            !app.chats[room].older_done,
+            "the rest is to be had by scrolling up"
+        );
+    }
+
+    #[test]
+    fn reactions_can_be_named_as_people_write_them() {
+        assert_eq!(reaction_of(":+1:"), "👍");
+        assert_eq!(reaction_of("heart"), "❤️");
+        assert_eq!(reaction_of(":JOY:"), "😂");
+        assert_eq!(reaction_of("🦀"), "🦀", "an emoji as it is");
+        assert_eq!(reaction_of(" ok "), "👍");
     }
 
     #[test]
