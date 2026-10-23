@@ -2484,6 +2484,19 @@ async fn perform(action: Action, shared: Shared) {
             let _ = shared.store.forget_room(&account, &room);
             tell(Msg::Left { account, room });
         }
+        Action::RemoveContact { account, jid } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            // The roster push that follows takes its name away.
+            let text = match xmpp.remove_contact(&jid).await {
+                Ok(()) => tr!("removed from the contacts", "удалён из контактов").to_owned(),
+                Err(e) => trf!("not removed: {e}", "не удалён: {e}"),
+            };
+            tell(Msg::Notice {
+                account,
+                chat: Some(jid),
+                text,
+            });
+        }
         Action::AddContact { account, jid, name } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let text = match xmpp.add_contact(&jid, name.as_deref()).await {

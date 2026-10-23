@@ -402,6 +402,11 @@ pub enum Action {
     },
     /// One's own status, for every account (`/away`, `/dnd`, `/online`).
     SetStatus(omtalk_xmpp::presence::OwnStatus),
+    /// `jid` taken out of the account's roster (RFC 6121: the subscriptions go too).
+    RemoveContact {
+        account: BareJid,
+        jid: BareJid,
+    },
     /// A chat closed before is open again.
     ReopenChat {
         account: BareJid,
@@ -2624,6 +2629,19 @@ impl App {
                 Ok(vec![Action::AddContact { account, jid, name }])
             }
             ("/accept", Some(jid)) => Ok(vec![Action::Accept { account, jid }]),
+            ("/remove", Some(jid)) => Ok(vec![Action::RemoveContact { account, jid }]),
+            // Without an address: the contact of the open chat.
+            ("/remove", None) => match self.current().filter(|c| c.kind == ChatKind::Direct) {
+                Some(chat) => Ok(vec![Action::RemoveContact {
+                    account: chat.account.clone(),
+                    jid: chat.jid.clone(),
+                }]),
+                None => Err(tr!(
+                    "/remove: an address, or open a chat with the contact",
+                    "/remove: нужен адрес или открытый чат с контактом"
+                )
+                .into()),
+            },
             ("/refuse", Some(jid)) => Ok(vec![Action::Refuse { account, jid }]),
             ("/devices", _) => match self.current() {
                 Some(chat) if !chat.is_room() => Ok(vec![Action::Devices {
@@ -4496,6 +4514,22 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn remove_takes_the_open_chats_contact_or_the_address_given() {
+        let mut app = app();
+        type_text(&mut app, "/msg bob@example.org");
+        let removed = type_text(&mut app, "/remove");
+        assert!(
+            matches!(&removed[..], [Action::RemoveContact { jid, .. }] if jid.as_str() == "bob@example.org"),
+            "{removed:?}"
+        );
+        let removed = type_text(&mut app, "/remove carol@example.org");
+        assert!(
+            matches!(&removed[..], [Action::RemoveContact { jid, .. }] if jid.as_str() == "carol@example.org"),
+            "{removed:?}"
+        );
     }
 
     #[test]

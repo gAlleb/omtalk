@@ -138,7 +138,7 @@ does the same). `Tab` completes a command, a nick in a room (at the start of a l
 `/folder`. `Tab` again goes through the choices, `Shift+Tab` back. In an empty line `Tab`
 switches focus.
 
-Commands: `/msg`, `/join`, `/leave`, `/add`, `/accept`, `/refuse`, `/devices`,
+Commands: `/msg`, `/join`, `/leave`, `/add`, `/remove`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
 `/name`, `/nick`, `/reply`, `/react`, `/edit`, `/search`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
 

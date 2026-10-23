@@ -231,6 +231,14 @@ pub const COMMANDS: &[Command] = &[
         args: ["", ""],
         about: ["quit omtalk", "выйти из omtalk"],
     },
+    Command {
+        name: "/remove",
+        args: ["[JID]", "[JID]"],
+        about: [
+            "remove a contact (the open chat's, or the address given)",
+            "удалить контакт (открытого чата или по адресу)",
+        ],
+    },
 ];
 
 pub fn about(name: &str) -> Option<&'static Command> {
@@ -397,7 +405,7 @@ mod tests {
         assert_eq!(complete("/ser"), Some((0, vec!["/services ".into()])));
         assert_eq!(
             complete("/re").unwrap().1,
-            ["/refuse ", "/rename-folder ", "/reply ", "/react "]
+            ["/refuse ", "/rename-folder ", "/reply ", "/react ", "/remove "]
         );
         assert_eq!(
             commands_for("/f").iter().map(|c| c.name).collect::<Vec<_>>(),
