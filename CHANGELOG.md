@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **What is read is the same everywhere** (XEP-0490): on logging in omtalk takes from the server how far each chat was read, in Monal, Gajim or here, and shows as unread only what came after; a restart no longer makes everything look read. Opening a chat marks its newest message read for your other clients, messages from before this start too; Monal kept showing those as unread.
+
 ## 0.1.5 — 2026-10-23
 
 - **Your status is remembered**: after `/away` and a restart you are still away.

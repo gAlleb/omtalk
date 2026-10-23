@@ -193,9 +193,9 @@ pub struct Chat {
     /// The newest message here whose sender asked to learn when it is read, not yet
     /// marked read.
     pub markable: Option<String>,
-    /// The archive's id of the newest message here not yet reported read to one's own
-    /// other clients.
-    pub read_up_to: Option<String>,
+    /// Where the chat is read up to, as one's clients told the server (XEP-0490): the
+    /// archive's id of that message. Opening the chat moves it to the newest message.
+    pub read_mark: Option<String>,
 }
 
 impl Chat {
@@ -219,7 +219,7 @@ impl Chat {
             topic: None,
             devices: None,
             markable: None,
-            read_up_to: None,
+            read_mark: None,
         }
     }
 
@@ -1525,7 +1525,13 @@ impl App {
             .markable
             .take()
             .filter(|_| self.read_markers && !chat.is_room());
-        let archive_id = chat.read_up_to.take();
+        // Read up to the newest message here, whenever it came (before a restart too),
+        // if the server does not have it so already.
+        let newest = chat.lines.iter().rev().find_map(|l| l.archive_id.clone());
+        let archive_id = newest.filter(|id| chat.read_mark.as_ref() != Some(id));
+        if let Some(id) = &archive_id {
+            chat.read_mark = Some(id.clone());
+        }
         if marker.is_none() && archive_id.is_none() {
             return Vec::new();
         }
@@ -1538,17 +1544,38 @@ impl App {
         }]
     }
 
-    /// Another of one's clients read `chat`: nothing there is unread here either.
-    pub fn read_elsewhere(&mut self, account: &BareJid, chat: &BareJid) {
-        if let Some(c) = self
-            .chats
-            .iter_mut()
-            .find(|c| &c.account == account && &c.jid == chat)
-        {
-            c.unread = 0;
-            c.markable = None;
-            c.read_up_to = None;
+    /// Where chats are read up to, as the server has it from one's clients (XEP-0490):
+    /// the chat, the archive's id of the message, and how many came after it, if that is
+    /// known here. Read on another device, read here too; and the other way round, what
+    /// came after is unread here as there. The chat open in front is read at once.
+    pub fn read_marks(
+        &mut self,
+        account: &BareJid,
+        marks: Vec<(BareJid, String, Option<usize>)>,
+    ) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for (jid, id, after) in marks {
+            let Some(index) = self
+                .chats
+                .iter()
+                .position(|c| &c.account == account && c.jid == jid)
+            else {
+                continue;
+            };
+            let chat = &mut self.chats[index];
+            chat.read_mark = Some(id);
+            if let Some(after) = after {
+                chat.unread = after;
+                if after == 0 {
+                    chat.markable = None;
+                }
+            }
+            if self.selected == Some(index) && self.focused && chat.unread > 0 {
+                chat.unread = 0;
+                actions.extend(self.mark_read(index));
+            }
         }
+        actions
     }
 
     pub fn select(&mut self, index: usize) -> Vec<Action> {
@@ -1714,9 +1741,6 @@ impl App {
             let chat = &mut self.chats[index];
             if message.markable {
                 chat.markable = message.id.clone();
-            }
-            if message.archive_id.is_some() {
-                chat.read_up_to = message.archive_id.clone();
             }
             if self.selected == Some(index) {
                 return self.mark_read(index);
@@ -4514,6 +4538,47 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn what_is_read_is_as_the_server_says_and_opening_reads_to_the_newest() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
+        // As after a restart: the history from the store, nothing known as unread yet.
+        for (chat, ids) in [(bob, ["b1", "b2", "b3"]), (carol, ["c1", "c2", "c3"])] {
+            for (i, id) in ids.iter().enumerate() {
+                let mut line = Line::message(i as i64, "x".into(), "…".into(), true, false);
+                line.archive_id = Some((*id).into());
+                app.chats[chat].lines.push(line);
+            }
+        }
+        app.select(carol);
+        // The server: bob read up to b1 elsewhere, two came after; carol read to the end.
+        app.read_marks(
+            &me,
+            vec![
+                (jid("bob@example.org"), "b1".into(), Some(2)),
+                (jid("carol@example.org"), "c3".into(), Some(0)),
+            ],
+        );
+        assert_eq!((app.chats[bob].unread, app.chats[carol].unread), (2, 0));
+        // Opened here: read up to its newest, told to the server for the others.
+        let read = app.select(bob);
+        assert!(
+            read.iter()
+                .any(|a| matches!(a, Action::Displayed { archive_id: Some(id), .. } if id == "b3")),
+            "{read:?}"
+        );
+        assert_eq!(app.chats[bob].unread, 0);
+        // Opened again with nothing new: nothing to tell.
+        app.select(carol);
+        assert!(
+            !app.select(bob)
+                .iter()
+                .any(|a| matches!(a, Action::Displayed { .. }))
+        );
     }
 
     #[test]

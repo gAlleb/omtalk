@@ -360,10 +360,11 @@ enum Msg {
     },
     /// Text from a clipboard, for the input.
     Paste(String),
-    /// Another of one's clients read `chat`.
-    ReadElsewhere {
+    /// Where chats are read up to, as the server has it (XEP-0490), with how many came
+    /// after, if known here.
+    ReadMarks {
         account: BareJid,
-        chat: BareJid,
+        marks: Vec<(BareJid, String, Option<usize>)>,
     },
     /// How far one's message `id` got.
     Delivery {
@@ -913,7 +914,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 let _ = shared.store.set_delivery_in(&account, &chat, &id, &kept);
             }
         }
-        Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::ReadMarks { account, marks } => {
+            for action in app.read_marks(&account, marks) {
+                tokio::spawn(perform(action, shared.clone()));
+            }
+        }
         Msg::Restored { account, chat, lines } => {
             let index = app.chat(&account, &chat, ChatKind::Direct);
             let newer = std::mem::take(&mut app.chats[index].lines);
@@ -1344,12 +1349,13 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
             Event::Pep {
                 from, node, items, ..
             } if node == receipts::MDS && *from == account => {
-                for chat in receipts::read_elsewhere(items) {
-                    tell(Msg::ReadElsewhere {
-                        account: account.clone(),
-                        chat,
-                    });
-                }
+                // Read on another device (or here, coming back): what came after is
+                // all that is unread.
+                let marks = counted(&shared.store, &account, receipts::read_marks(items));
+                tell(Msg::ReadMarks {
+                    account: account.clone(),
+                    marks,
+                });
             }
             // The name someone gave themselves (XEP-0172).
             Event::Pep {
@@ -1525,6 +1531,26 @@ async fn still_in_rooms(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shar
 /// How often the rooms are asked whether one is still in them.
 const ROOM_CHECK: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Read marks with how many messages others wrote after each, as the store knows: the
+/// time of the message marked, then the count after it. Unknown here, no count.
+fn counted(
+    store: &Store,
+    account: &BareJid,
+    marks: Vec<(BareJid, String)>,
+) -> Vec<(BareJid, String, Option<usize>)> {
+    marks
+        .into_iter()
+        .map(|(chat, id)| {
+            let after = store
+                .archive_time(account, &chat, &id)
+                .ok()
+                .flatten()
+                .and_then(|at| store.incoming_after(account, &chat, at).ok());
+            (chat, id, after)
+        })
+        .collect()
+}
+
 /// With OMTALK_LOG set, each presence that comes into that file too, with what omtalk
 /// makes of it: for finding out why a room's participants do not show.
 fn trace_presence(account: &BareJid, presence: &xmpp_parsers::presence::Presence, xmpp: &Account) {
@@ -1661,6 +1687,19 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             ..Entry::default()
         };
         join(&account, &xmpp, &omemo, &shared, room, entry).await;
+    }
+    // Where each chat is read up to, as the account's clients left it on the server
+    // (XEP-0490): read there, read here; what came after, unread here as there. Asked
+    // after the missed messages are in, which it counts.
+    match xmpp.read_marks().await {
+        Ok(marks) => tell(Msg::ReadMarks {
+            account: account.clone(),
+            marks: counted(&shared.store, &account, marks),
+        }),
+        Err(e) => tell(Msg::Status(trf!(
+            "what is read was not learnt from the server: {e}",
+            "что прочитано, с сервера не узнать: {e}"
+        ))),
     }
 }
 

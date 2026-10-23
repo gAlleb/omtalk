@@ -1,7 +1,7 @@
 //! Chat history and the rooms to enter on start, per account.
 
 use omtalk_xmpp::BareJid;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{Error, Store, parse_jid};
 
@@ -350,6 +350,36 @@ impl Store {
         Ok(messages)
     }
 
+    /// When the message the archive calls `archive_id` came, if it is kept here.
+    pub fn archive_time(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        archive_id: &str,
+    ) -> Result<Option<i64>, Error> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT at FROM messages WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 LIMIT 1",
+                params![account.as_str(), chat.as_str(), archive_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// How many messages others wrote in `chat` after the time `at`: what is unread
+    /// when it was read up to then.
+    pub fn incoming_after(&self, account: &BareJid, chat: &BareJid, at: i64) -> Result<usize, Error> {
+        let count: i64 = self.db.lock().unwrap().query_row(
+            "SELECT COUNT(*) FROM messages WHERE account = ?1 AND chat = ?2 AND outgoing = 0 AND at > ?3",
+            params![account.as_str(), chat.as_str(), at],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Keeps `chat` in the list though no message of it is kept. A chat closed stays
     /// closed.
     pub fn keep_chat(&self, account: &BareJid, chat: &BareJid) -> Result<(), Error> {
@@ -556,6 +586,34 @@ mod tests {
             Some(Delivery::Failed("отказано".into())),
             "a failure stays"
         );
+    }
+
+    #[test]
+    fn what_is_unread_after_a_read_mark_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let (me, bob) = (jid("me@example.org"), jid("bob@example.org"));
+        for (body, at, archive, outgoing) in [
+            ("а", 10, "A1", false),
+            ("б", 20, "A2", false),
+            ("я", 25, "A3", true),
+            ("в", 30, "A4", false),
+        ] {
+            let m = StoredMessage {
+                archive_id: Some(archive.into()),
+                outgoing,
+                ..message("bob@example.org", body, at)
+            };
+            store.save_message(&me, &m).unwrap();
+        }
+        assert_eq!(store.archive_time(&me, &bob, "A2").unwrap(), Some(20));
+        assert_eq!(store.archive_time(&me, &bob, "nope").unwrap(), None);
+        assert_eq!(
+            store.incoming_after(&me, &bob, 20).unwrap(),
+            1,
+            "only others' after it"
+        );
+        assert_eq!(store.incoming_after(&me, &bob, 0).unwrap(), 3);
     }
 
     #[test]

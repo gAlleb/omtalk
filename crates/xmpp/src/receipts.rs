@@ -31,6 +31,41 @@ impl crate::Account {
     }
 }
 
+/// Where each chat was read up to, as the read marks (XEP-0490) say: the chat, and the
+/// archive's id of the last message read there.
+pub fn read_marks(items: &[crate::PepItem]) -> Vec<(xmpp_parsers::jid::BareJid, String)> {
+    items
+        .iter()
+        .filter(|item| item.payload.is("displayed", MDS))
+        .filter_map(|item| {
+            let chat = item.id.as_ref()?.parse().ok()?;
+            let id = item
+                .payload
+                .get_child("stanza-id", ns::SID)?
+                .attr(xml_ncname!("id"))?
+                .to_owned();
+            Some((chat, id))
+        })
+        .collect()
+}
+
+impl crate::Account {
+    /// All the read marks one's clients left (XEP-0490), as read now from the server:
+    /// none, if no client ever left one.
+    pub async fn read_marks(&self) -> Result<Vec<(xmpp_parsers::jid::BareJid, String)>, crate::Error> {
+        let own = self.jid().clone();
+        match self.items(&own, MDS).await {
+            Ok(items) => Ok(read_marks(&items)),
+            Err(crate::Error::Stanza(e))
+                if e.defined_condition == xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound =>
+            {
+                Ok(Vec::new())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// The chats a notification of [`MDS`] says were read on another of one's clients.
 pub fn read_elsewhere(items: &[crate::PepItem]) -> Vec<xmpp_parsers::jid::BareJid> {
     items

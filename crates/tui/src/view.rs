@@ -4080,7 +4080,7 @@ mod tests {
         };
         app.on_incoming(&me, &fourth, 9);
         assert_eq!(app.chats[bob].unread, 1);
-        app.read_elsewhere(&me, &jid("bob@home.org"));
+        app.read_marks(&me, vec![(jid("bob@home.org"), "a4".into(), Some(0))]);
         assert_eq!(app.chats[bob].unread, 0);
         assert!(
             !app.select(bob)
