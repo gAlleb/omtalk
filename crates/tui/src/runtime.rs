@@ -486,6 +486,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
     app.own_status = kept_status;
+    if let Some(kept) = store.kept(KEPT_FOLDED).ok().flatten() {
+        app.collapsed = folded_from_kept(&kept);
+    }
     // OMEMO turned off (or on) by hand in a chat stays so.
     for (key, on) in store.kept_under(KEPT_OMEMO).unwrap_or_default() {
         if let Some((account, chat)) = key.split_once('/')
@@ -576,10 +579,16 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut terminate = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     // The terminal starts with the mouse captured (main.rs).
     let mut mouse_captured = true;
+    // Folded folders and accounts, kept as they change.
+    let mut folded = app.collapsed.clone();
     loop {
         terminal
             .draw(|frame| view::draw(frame, &mut app, &mut pictures))
             .map_err(|e| e.to_string())?;
+        if app.collapsed != folded {
+            folded = app.collapsed.clone();
+            let _ = shared.store.keep(KEPT_FOLDED, Some(&folded_to_kept(&folded)));
+        }
         // Handing the mouse to the terminal and back, as asked.
         if app.mouse != mouse_captured {
             let toggled = if app.mouse {
@@ -2289,6 +2298,28 @@ async fn perform(action: Action, shared: Shared) {
                 at,
             });
         }
+        Action::NoAutojoin { account, room } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let marks = match xmpp.bookmarks().await {
+                Ok(marks) => marks,
+                Err(e) => {
+                    tell(Msg::Status(trf!(
+                        "the bookmark of {room} was not changed: {e}",
+                        "закладка {room} не изменилась: {e}"
+                    )));
+                    return;
+                }
+            };
+            if let Some(mut mark) = marks.into_iter().find(|m| m.room == room && m.autojoin) {
+                mark.autojoin = false;
+                if let Err(e) = xmpp.bookmark(&mark).await {
+                    tell(Msg::Status(trf!(
+                        "the bookmark of {room} was not changed: {e}",
+                        "закладка {room} не изменилась: {e}"
+                    )));
+                }
+            }
+        }
         Action::SetOmemo { account, chat, on } => {
             let key = format!("{KEPT_OMEMO}{account}/{chat}");
             let _ = shared.store.keep(&key, Some(if on { "1" } else { "0" }));
@@ -2918,6 +2949,34 @@ async fn perform(action: Action, shared: Shared) {
 /// Where one's own status is kept between runs.
 const KEPT_STATUS: &str = "status";
 
+/// Where the folded folders and accounts of the chat list are kept.
+const KEPT_FOLDED: &str = "folded";
+
+/// The folded groups as kept: a line each, "account\tJID" or "folder\tJID\tname".
+fn folded_to_kept(folded: &std::collections::BTreeSet<crate::app::Group>) -> String {
+    folded
+        .iter()
+        .map(|group| match group {
+            crate::app::Group::Account(account) => format!("account\t{account}"),
+            crate::app::Group::Folder(account, name) => format!("folder\t{account}\t{name}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn folded_from_kept(kept: &str) -> std::collections::BTreeSet<crate::app::Group> {
+    kept.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            match (parts.next()?, parts.next()?.parse().ok()?, parts.next()) {
+                ("account", account, None) => Some(crate::app::Group::Account(account)),
+                ("folder", account, Some(name)) => Some(crate::app::Group::Folder(account, name.to_owned())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Where a chat's OMEMO on or off is kept: this, then "account/chat".
 const KEPT_OMEMO: &str = "omemo/";
 
@@ -3117,6 +3176,19 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folded_groups_are_kept_and_read_back() {
+        use crate::app::Group;
+        let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
+        let folded: std::collections::BTreeSet<Group> = [
+            Group::Account(me.clone()),
+            Group::Folder(me.clone(), "Рабочие дела".into()),
+        ]
+        .into();
+        assert_eq!(super::folded_from_kept(&super::folded_to_kept(&folded)), folded);
+        assert!(super::folded_from_kept("nonsense\nfolder").is_empty());
+    }
+
     #[test]
     fn unreadable_messages_are_counted_in_proper_russian() {
         assert!(super::unreadable_words(1).starts_with("ещё 1 старое сообщение зашифровано"));

@@ -171,7 +171,9 @@ encrypted chat.
 
 A chat is closed with `/close`, prefix+`w` or a middle click on it in the list: it leaves
 the list, its history stays, and it comes back by itself when someone writes in it.
-Closing a room leaves it.
+A room: `/close` closes it here only (omtalk leaves it and does not enter it after a
+restart, your other clients still do); `/leave` leaves it for good, turning off "enter by
+itself" in its bookmark for all your clients. `/join` opens it again.
 
 `/join` without a nick takes the nick from the account's bookmarks (XEP-0402), as Gajim and
 other clients do, so all clients of one account count as one participant in the room. A

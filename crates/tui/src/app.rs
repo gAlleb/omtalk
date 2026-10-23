@@ -402,6 +402,12 @@ pub enum Action {
     },
     /// One's own status, for every account (`/away`, `/dnd`, `/online`).
     SetStatus(omtalk_xmpp::presence::OwnStatus),
+    /// `room`'s bookmark no longer says to enter it by itself, for all the account's
+    /// clients.
+    NoAutojoin {
+        account: BareJid,
+        room: BareJid,
+    },
     /// OMEMO turned on or off in `chat`, to be kept.
     SetOmemo {
         account: BareJid,
@@ -2576,8 +2582,9 @@ impl App {
                 let nick = args.get(1).map(|n| n.to_string());
                 Ok(vec![Action::Join { account, room, nick }])
             }
-            // Left, and closed here: not entered again on the next start, though its
-            // bookmark stays for the account's other clients.
+            // Left for good: closed here, and no longer entered by the account's clients
+            // by themselves (autojoin off in its bookmark, which stays). /close only
+            // hides it here.
             ("/leave", _) => match self.current() {
                 Some(Chat {
                     jid,
@@ -2593,6 +2600,10 @@ impl App {
                         account: account.clone(),
                         room: jid.clone(),
                         nick: nick.clone(),
+                    },
+                    Action::NoAutojoin {
+                        account: account.clone(),
+                        room: jid.clone(),
                     },
                 ]),
                 _ => Err(tr!("this is not a room", "это не комната").to_owned()),
@@ -4389,7 +4400,14 @@ mod tests {
         app.select(room);
         let actions = type_text(&mut app, "/leave");
         assert!(
-            matches!(&actions[..], [Action::CloseChat { .. }, Action::Leave { .. }]),
+            matches!(
+                &actions[..],
+                [
+                    Action::CloseChat { .. },
+                    Action::Leave { .. },
+                    Action::NoAutojoin { .. }
+                ]
+            ),
             "{actions:?}"
         );
         let actions = app.close_chat(room);
