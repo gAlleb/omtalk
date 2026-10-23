@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **↑/↓ in the input line go through what was sent** since omtalk started, as in a shell.
 - **`/me`**, as in IRC (XEP-0245): sent as written, shown as `* nick text`, in notifications too.
 
 ## 0.1.2 — 2026-10-23

@@ -117,7 +117,8 @@ goes back to the input line.
 The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, to the end; Ctrl+Y
 pastes what was cut; Ctrl+A/E go to the start and end; Ctrl+←/→ and Alt+B/F move by words.
 Alt+Enter (or Shift+Enter, where the terminal tells it apart) starts a new line in the
-message. Pasted text with several lines goes as one message, indentation kept; the input
+message. `↑`/`↓` go through what you sent since omtalk started (messages and commands), as
+in a shell; in a text of several lines they move between its lines first. Pasted text with several lines goes as one message, indentation kept; the input
 line grows up to 8 lines. Errors are shown in full in the bottom line and fade after 10 s;
 they stay in full in the account's server channel.
 

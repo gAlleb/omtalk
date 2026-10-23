@@ -657,6 +657,11 @@ pub struct App {
     /// Avatars drawn here with block characters (a terminal without pictures): the
     /// square picture by its key; with pictures, they are among the view's pictures.
     pub avatar_blocks: BTreeMap<String, image::DynamicImage>,
+    /// What was sent from the input line since omtalk started (messages and commands),
+    /// oldest first: ↑ and ↓ go through it, as in a shell.
+    pub sent: Vec<String>,
+    /// Which of `sent` the input line shows now, and the draft it replaced.
+    pub recall: Option<(usize, String)>,
     /// The participant picked in a room's pane, while it has the focus.
     pub people_cursor: usize,
     /// Direct chats whose history was asked of the archive already.
@@ -718,6 +723,8 @@ impl App {
             avatars_asked: BTreeSet::new(),
             history_asked: BTreeSet::new(),
             people_cursor: 0,
+            sent: Vec::new(),
+            recall: None,
             avatar_blocks: BTreeMap::new(),
             config_ui: crate::config::Ui {
                 left,
@@ -1738,6 +1745,17 @@ impl App {
     fn input_key(&mut self, code: KeyCode) -> Vec<Action> {
         // Any other key takes the completion as it stands.
         self.completion = None;
+        if matches!(code, KeyCode::Up | KeyCode::Down) {
+            self.recall_key(code == KeyCode::Up);
+            return Vec::new();
+        }
+        // Edited, a line from the history is the draft now.
+        if !matches!(
+            code,
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
+        ) {
+            self.recall = None;
+        }
         let len = self.input.chars().count();
         match code {
             KeyCode::Char(c) => {
@@ -1772,6 +1790,52 @@ impl App {
         Vec::new()
     }
 
+    /// ↑ (`up`) or ↓ in the input line: within a text of several lines, to the line above
+    /// or below; from its first line up (its last down), through what was sent before.
+    fn recall_key(&mut self, up: bool) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let line_start = |at: usize| chars[..at].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
+        let start = line_start(self.cursor);
+        let column = self.cursor - start;
+        if up && start > 0 {
+            let above = line_start(start - 1);
+            self.cursor = (above + column).min(start - 1);
+            return;
+        }
+        let end = chars[self.cursor..]
+            .iter()
+            .position(|c| *c == '\n')
+            .map(|i| self.cursor + i);
+        if !up && let Some(end) = end {
+            let next_end = chars[end + 1..]
+                .iter()
+                .position(|c| *c == '\n')
+                .map_or(chars.len(), |i| end + 1 + i);
+            self.cursor = (end + 1 + column).min(next_end);
+            return;
+        }
+        let shown = match (self.recall.take(), up) {
+            (None, true) if !self.sent.is_empty() => {
+                let draft = std::mem::take(&mut self.input);
+                Some((self.sent.len() - 1, draft))
+            }
+            (None, _) => None,
+            (Some((at, draft)), true) => Some((at.saturating_sub(1), draft)),
+            (Some((at, draft)), false) if at + 1 < self.sent.len() => Some((at + 1, draft)),
+            // Past the newest: back to what was being written.
+            (Some((_, draft)), false) => {
+                self.input = draft;
+                self.cursor = self.input.chars().count();
+                None
+            }
+        };
+        if let Some((at, draft)) = shown {
+            self.input = self.sent[at].clone();
+            self.cursor = self.input.chars().count();
+            self.recall = Some((at, draft));
+        }
+    }
+
     fn byte_at(&self, chars: usize) -> usize {
         self.input
             .char_indices()
@@ -1783,8 +1847,14 @@ impl App {
     fn submit(&mut self) -> Vec<Action> {
         let input = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.recall = None;
         if input.trim().is_empty() {
             return Vec::new();
+        }
+        // Kept for ↑, once: the same line twice in a row is one entry.
+        let kept = input.trim().to_owned();
+        if self.sent.last() != Some(&kept) {
+            self.sent.push(kept);
         }
         // "/me waves" is a message, sent as it is (XEP-0245); other "/…" are commands.
         if input.trim_start().starts_with('/') && !is_action(input.trim_start()) {

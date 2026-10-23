@@ -5437,4 +5437,46 @@ mod tests {
         assert!(text.contains("* я машет рукой"), "one's own too: {text}");
         assert!(!text.contains("/me"), "{text}");
     }
+
+    #[test]
+    fn up_and_down_go_through_what_was_sent_as_in_a_shell() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = app_with_chat();
+        app.focus = Focus::Input;
+        let key = |app: &mut App, code| drop(app.on_key(KeyEvent::new(code, KeyModifiers::NONE)));
+        let send = |app: &mut App, text: &str| {
+            for c in text.chars() {
+                key(app, KeyCode::Char(c));
+            }
+            key(app, KeyCode::Enter);
+        };
+        send(&mut app, "первое");
+        send(&mut app, "второе");
+        send(&mut app, "второе");
+        "черно".chars().for_each(|c| key(&mut app, KeyCode::Char(c)));
+
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.input, "второе", "the latest, once though sent twice");
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.input, "первое");
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.input, "первое", "no further back");
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.input, "второе");
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.input, "черно", "past the newest: the draft again");
+        assert_eq!(app.cursor, 5);
+
+        // Several lines: the arrows move between them first.
+        app.input = "раз\nдва".into();
+        app.cursor = 6;
+        key(&mut app, KeyCode::Up);
+        assert_eq!(
+            (app.input.as_str(), app.cursor),
+            ("раз\nдва", 2),
+            "to the line above"
+        );
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.input, "второе", "from the first line: the history");
+    }
 }
