@@ -110,7 +110,8 @@ Keys: the `leader` prefix (Ctrl+X), release, then a letter. A list pops up after
 prefix: `o` OMEMO, `b`/`r` left and right panes, `↑`/`↓` chats, `←`/`→` width of the chat
 list, `s` services, `p` settings, `z` current account only, `q` quit. The same letters work
 with `modifier` held, except those the input line needs. `Tab` switches focus,
-`PgUp`/`PgDn` scroll. In a room, `Tab` after the input line goes to the participants on
+`PgUp`/`PgDn` scroll. Typing anywhere else types into the input line (the focus goes
+there), except the keys a pane uses itself (`j`/`k` and the like). In a room, `Tab` after the input line goes to the participants on
 the right: `↑`/`↓` (`k`/`j`) pick someone, `Enter` opens a direct chat with them, `Esc`
 goes back to the input line.
 

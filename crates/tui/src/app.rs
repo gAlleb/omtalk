@@ -1517,6 +1517,19 @@ impl App {
         if !self.modifier.is_empty() && key.modifiers.contains(self.modifier) {
             return self.shortcut(key.code);
         }
+        // Typing away from the input line is typing into it: a printable key that does
+        // nothing in the pane with the focus takes the focus to the line, and goes there.
+        if let KeyCode::Char(c) = key.code
+            && self.focus != Focus::Input
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+            && !c.is_control()
+            && !self.pane_key(c)
+        {
+            self.focus = Focus::Input;
+            return self.input_key(key.code);
+        }
         match key.code {
             // In a line being typed, Tab completes; elsewhere it moves the focus.
             KeyCode::Tab | KeyCode::BackTab if self.focus == Focus::Input && !self.input.is_empty() => {
@@ -1640,6 +1653,17 @@ impl App {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Whether `c` does something in the pane with the focus (moving, folding…).
+    fn pane_key(&self, c: char) -> bool {
+        let keys = match self.focus {
+            Focus::Chats => " hjkmz",
+            Focus::Messages => "gGijkr",
+            Focus::People => "gGjk",
+            Focus::Input => return false,
+        };
+        keys.contains(c)
     }
 
     /// Who the current room's pane lists, in its order: those here, then members away.
@@ -3616,5 +3640,29 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert_eq!(app.on_mouse(click), [Action::Open("/cache/p.png".into())]);
+    }
+
+    #[test]
+    fn typing_away_from_the_input_line_types_into_it() {
+        let mut app = app();
+        app.focus = Focus::Chats;
+        type_keys(&mut app, "привет");
+        assert_eq!(app.focus, Focus::Input, "the focus jumps to the line");
+        assert_eq!(app.input, "привет", "with the letters typed");
+
+        app.input.clear();
+        app.cursor = 0;
+        app.focus = Focus::Chats;
+        type_keys(&mut app, "j");
+        assert_eq!(app.focus, Focus::Chats, "a key of the pane stays the pane's");
+        app.focus = Focus::Messages;
+        type_keys(&mut app, "5");
+        assert_eq!((app.focus, app.input.as_str()), (Focus::Input, "5"));
+    }
+
+    fn type_keys(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
     }
 }
