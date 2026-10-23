@@ -1849,7 +1849,7 @@ async fn perform(action: Action, shared: Shared) {
                             &link,
                             &id,
                             Own {
-                                encrypted: encrypted,
+                                encrypted,
                                 delivery: Some(omtalk_store::Delivery::Sent),
                                 shared_file: true,
                             },
