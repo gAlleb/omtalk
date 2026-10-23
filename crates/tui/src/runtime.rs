@@ -1665,6 +1665,14 @@ async fn join(
                 nick: given,
                 open,
             });
+            // Its name for the list at once, not only once it is opened.
+            if let Ok(name) = xmpp.room_name(&room).await {
+                tell(Msg::RoomName {
+                    account: account.clone(),
+                    room: room.clone(),
+                    name,
+                });
+            }
             // Kept page by page; the room shows its newest, the rest comes on scrolling up.
             // A long absence says how far it has got.
             let name = room
