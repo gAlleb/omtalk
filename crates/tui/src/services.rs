@@ -69,11 +69,21 @@ pub struct FormState {
     pub fields: Vec<FieldState>,
     /// Which field has the cursor, among the editable ones' indexes.
     pub focus: usize,
+    /// A button has the cursor instead (Tab past the last field): its place among the
+    /// step's actions, then Cancel.
+    pub button: Option<usize>,
     /// How far a result (a long table, say) is scrolled down, in rows.
     pub scroll: usize,
 }
 
 impl FormState {
+    /// The buttons of a running step, in their order: its actions, then Cancel.
+    pub fn buttons(&self) -> Vec<CommandAction> {
+        let mut buttons = self.step.actions.clone();
+        buttons.push(CommandAction::Cancel);
+        buttons
+    }
+
     pub fn finished(&self) -> bool {
         self.step.status != CommandStatus::Executing
     }
@@ -161,6 +171,7 @@ impl Services {
                     title,
                     fields,
                     focus,
+                    button: None,
                     scroll: 0,
                 });
                 self.problem = None;
@@ -301,19 +312,52 @@ impl Services {
             .map(|(i, _)| i)
             .collect();
         let position = editable.iter().position(|&i| i == form.focus).unwrap_or(0);
-        match key.code {
-            KeyCode::Esc => return self.act(CommandAction::Cancel),
-            KeyCode::Enter => {
+        let buttons = form.buttons();
+        // Tab goes through the fields, then the buttons, then round again.
+        match (key.code, form.button) {
+            (KeyCode::Esc, _) => return self.act(CommandAction::Cancel),
+            (KeyCode::Enter, Some(button)) => {
+                let action = buttons.get(button).copied().unwrap_or(CommandAction::Cancel);
+                return self.act(action);
+            }
+            (KeyCode::Enter, None) => {
                 let action = form.step.default_action.unwrap_or(CommandAction::Complete);
                 return self.act(action);
             }
-            KeyCode::Tab | KeyCode::Down if !editable.is_empty() => {
+            (KeyCode::Left, Some(button)) => form.button = Some(button.saturating_sub(1)),
+            (KeyCode::Right, Some(button)) => form.button = Some((button + 1).min(buttons.len() - 1)),
+            (KeyCode::Tab, Some(button)) if button + 1 < buttons.len() => form.button = Some(button + 1),
+            (KeyCode::Tab, Some(_)) => {
+                form.button = None;
+                if let Some(&first) = editable.first() {
+                    form.focus = first;
+                } else {
+                    form.button = Some(0);
+                }
+            }
+            (KeyCode::BackTab, Some(0)) | (KeyCode::Up, Some(_)) => {
+                form.button = None;
+                if let Some(&last) = editable.last() {
+                    form.focus = last;
+                }
+            }
+            (KeyCode::BackTab, Some(button)) => form.button = Some(button - 1),
+            (KeyCode::Tab, None) if editable.is_empty() || position + 1 == editable.len() => {
+                // The default one first, as Enter would press it.
+                let default = form.step.default_action.unwrap_or(CommandAction::Complete);
+                form.button = Some(buttons.iter().position(|&b| b == default).unwrap_or(0));
+            }
+            (KeyCode::BackTab, None) if editable.is_empty() || position == 0 => {
+                form.button = Some(buttons.len() - 1);
+            }
+            (KeyCode::Tab | KeyCode::Down, None) if !editable.is_empty() => {
                 form.focus = editable[(position + 1) % editable.len()];
             }
-            KeyCode::BackTab | KeyCode::Up if !editable.is_empty() => {
+            (KeyCode::BackTab | KeyCode::Up, None) if !editable.is_empty() => {
                 form.focus = editable[(position + editable.len() - 1) % editable.len()];
             }
-            code => {
+            (_, Some(_)) => {}
+            (code, None) => {
                 if let Some(field) = form.fields.get_mut(form.focus) {
                     edit(field, code);
                 }
@@ -547,6 +591,44 @@ mod tests {
             }),
         );
         services
+    }
+
+    #[test]
+    fn tab_goes_past_the_fields_to_the_buttons_and_enter_presses_the_one_reached() {
+        use omtalk_xmpp::services::{CommandAction, CommandStatus, CommandStep};
+        let mut services = Services::open(
+            "me@example.org".parse().unwrap(),
+            "irc.example.org".parse().unwrap(),
+        )
+        .0;
+        let step = CommandStep {
+            node: "configure".into(),
+            session: Some("s1".into()),
+            status: CommandStatus::Executing,
+            actions: vec![CommandAction::Complete],
+            default_action: Some(CommandAction::Complete),
+            form: None,
+            notes: Vec::new(),
+            table: None,
+        };
+        services.form = Some(FormState {
+            jid: "irc.example.org".parse().unwrap(),
+            step,
+            title: "Configure".into(),
+            fields: Vec::new(),
+            focus: 0,
+            button: None,
+            scroll: 0,
+        });
+        // No field: Tab goes to the buttons, Done first; → Cancel; Enter presses it.
+        services.on_key(key(KeyCode::Tab));
+        assert_eq!(services.form.as_ref().unwrap().button, Some(0));
+        services.on_key(key(KeyCode::Right));
+        assert_eq!(services.form.as_ref().unwrap().button, Some(1));
+        match services.on_key(key(KeyCode::Enter)) {
+            Outcome::Request(Request::Execute { action, .. }, _) => assert_eq!(action, CommandAction::Cancel),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

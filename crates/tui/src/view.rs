@@ -1238,13 +1238,7 @@ pub fn message_rows(
             }
             let text = counts
                 .iter()
-                .map(|(r, n)| {
-                    if *n > 1 {
-                        format!("{r} {n}")
-                    } else {
-                        (*r).to_owned()
-                    }
-                })
+                .map(|(r, n)| format!("{r} {n}"))
                 .collect::<Vec<_>>()
                 .join("  ");
             for part in wrap(&text, body_width.max(1)) {
@@ -2476,7 +2470,8 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         Constraint::Min(1),
         Constraint::Length(status_lines.len().max(1) as u16),
         Constraint::Length(1),
-        Constraint::Length(desc_lines.len().max(1) as u16),
+        // The focused field's description, then what the keys do.
+        Constraint::Length(desc_lines.len() as u16 + 1),
     ])
     .areas(inner);
     let body = Rect {
@@ -2762,7 +2757,11 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 frame.render_widget(Paragraph::new(line), place);
             }
             if running {
-                let default = form.step.default_action;
+                // The button Tab reached is stressed, else the one Enter presses.
+                let stressed = match form.button {
+                    Some(button) => form.buttons().get(button).copied(),
+                    None => form.step.default_action,
+                };
                 labels = form
                     .step
                     .actions
@@ -2771,14 +2770,18 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                         (
                             step_label(a).to_owned(),
                             ServiceButton::Step(a),
-                            Some(a) == default,
+                            Some(a) == stressed,
                         )
                     })
-                    .chain([(tr!("Cancel", "Отмена").to_owned(), ServiceButton::Close, false)])
+                    .chain([(
+                        tr!("Cancel", "Отмена").to_owned(),
+                        ServiceButton::Close,
+                        stressed == Some(CommandAction::Cancel),
+                    )])
                     .collect();
                 hint_text = tr!(
-                    "Tab field · Space/←→ choose · Enter next · Esc cancel",
-                    "Tab поле · Пробел/←→ выбрать · Enter дальше · Esc отменить"
+                    "Tab field, then buttons · Space/←→ choose · Enter press · Esc cancel",
+                    "Tab поле, потом кнопки · Пробел/←→ выбрать · Enter нажать · Esc отменить"
                 )
                 .into();
             } else {
@@ -2824,15 +2827,12 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         button_areas.push((place, button));
         x += w + 1;
     }
-    // The focused field's description, where it has one; else what the keys do.
-    let hint_lines: Vec<TextLine> = if desc_lines.is_empty() {
-        vec![TextLine::raw(format!(" {hint_text}"))]
-    } else {
-        desc_lines
-            .iter()
-            .map(|l| TextLine::raw(format!(" {l}")))
-            .collect()
-    };
+    // The focused field's description, where it has one, and what the keys do.
+    let hint_lines: Vec<TextLine> = desc_lines
+        .iter()
+        .map(|l| TextLine::raw(format!(" {l}")))
+        .chain([TextLine::raw(format!(" {hint_text}"))])
+        .collect();
     frame.render_widget(
         Paragraph::new(hint_lines).style(Style::default().fg(theme::dim())),
         hint,
@@ -5449,7 +5449,7 @@ mod tests {
         line.reactions.insert("me@example.org".into(), vec!["👍".into()]);
         app.chats[bob].lines.push(line);
         let text = screen(&mut app, 100, 20);
-        assert!(text.contains("👍 2  ❤"), "{text}");
+        assert!(text.contains("👍 2  ❤ 1"), "one gets its count too: {text}");
     }
 
     #[test]

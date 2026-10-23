@@ -8,6 +8,8 @@
 - **Contacts with no name in your roster go by the one they gave themselves** (XEP-0172), as Conversations and Dino show it.
 - **`/search words`** finds them in the open chat's history, whatever the case, encrypted messages too; Enter or a click shows the chat from that message.
 - **An IRC channel through biboumi shows its participants**: biboumi names them by an address without a resource, which omtalk refused, dropping all but yourself; it reads a room's word about its occupants leniently now, as Gajim does.
+- A reaction shows its count even when one person sent it ("👍 1").
+- **The buttons of a service's form are reached with Tab** after the last field; ←/→ go between them, Enter presses the one picked; the keys are told under the field's description, not instead of it.
 
 ## 0.1.4 — 2026-10-23
 
