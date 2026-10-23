@@ -1190,6 +1190,7 @@ fn delivery_mark(delivery: &Delivery) -> (String, Style) {
     match delivery {
         Delivery::Uploading(percent) => (format!("⇡ {percent}%"), dim),
         Delivery::Sending => ("⋯".into(), dim),
+        Delivery::Queued => (tr!("⋯ waiting for the connection", "⋯ ждёт связи").into(), dim),
         Delivery::Sent => ("✓".into(), dim),
         Delivery::Delivered => ("✓✓".into(), dim),
         Delivery::Read => (

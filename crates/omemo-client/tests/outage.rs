@@ -53,7 +53,12 @@ async fn conversation_survives_network_loss_and_server_restart() {
     let queued = send_later(&alice, &bob, "написано пока сервер лежал");
     alice.reconnected_within(Duration::from_secs(90)).await;
     bob.reconnected_within(Duration::from_secs(90)).await;
-    queued.await.unwrap().unwrap();
+    // Sent while the server was down, it is said to be queued, not hung on: and it goes
+    // once the server is back.
+    match queued.await.unwrap() {
+        Ok(()) => {}
+        Err(e) => assert!(e.starts_with("not sent yet"), "{e}"),
+    }
     assert_eq!(text(&bob.next_text().await), "написано пока сервер лежал");
     bob.omemo.send(&alice.jid, "сервер вернулся").await.unwrap();
     assert_eq!(text(&alice.next_text().await), "сервер вернулся");

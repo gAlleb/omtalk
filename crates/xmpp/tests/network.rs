@@ -128,3 +128,48 @@ async fn a_frozen_network_is_noticed_and_left_behind() {
     assert!(online, "the laptop did not come back online");
     assert!(got, "the message sent meanwhile did not arrive");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_into_a_frozen_network_counts_only_once_the_server_has_it() {
+    let open = Arc::new(AtomicBool::new(true));
+    let addr = proxy(open.clone()).await;
+    let (mut laptop_accounts, mut laptop) = Accounts::new();
+    let (mut peer_accounts, mut peer_events) = Accounts::new();
+    let alice = laptop_accounts.add(config("u47", &addr)).await;
+    let bob = peer_accounts.add(config("u48", SERVER)).await;
+    for events in [&mut laptop, &mut peer_events] {
+        while !matches!(
+            next(events, Duration::from_secs(10)).await,
+            Some(Event::Online { .. })
+        ) {}
+    }
+
+    open.store(false, Ordering::SeqCst);
+    let message =
+        Message::chat(Some(bob.jid().clone().into())).with_body(Lang::default(), "сквозь заморозку".into());
+    let sending = {
+        let alice = alice.clone();
+        tokio::spawn(async move { alice.send(message).await })
+    };
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(
+        !sending.is_finished(),
+        "out into the socket is not received: no success yet"
+    );
+
+    // Back: the stream goes on, the server acknowledges, the message is there.
+    open.store(true, Ordering::SeqCst);
+    let sent = tokio::time::timeout(Duration::from_secs(40), sending)
+        .await
+        .expect("an answer once the network is back")
+        .unwrap();
+    assert!(sent.is_ok(), "{sent:?}");
+    let arrived = Instant::now();
+    let mut got = false;
+    while arrived.elapsed() < Duration::from_secs(20) && !got {
+        if let Some(Event::Message(m)) = next(&mut peer_events, Duration::from_secs(1)).await {
+            got = m.bodies.values().any(|b| b == "сквозь заморозку");
+        }
+    }
+    assert!(got, "it arrived");
+}

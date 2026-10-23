@@ -368,6 +368,8 @@ impl Omemo {
         if decrypted.received.used_pre_key.is_some() {
             let _ = self.publish_bundle(&state).await;
         }
+        let untrusted = !state.trust_of(&envelope.sender, device).receives();
+        drop(state);
         if let Some(empty) = answer {
             // To the sender's account, also for group messages: it concerns one session.
             let _ = self
@@ -375,7 +377,6 @@ impl Omemo {
                 .send(stanza(MessageType::Chat, envelope.sender.clone(), empty, None))
                 .await;
         }
-        let untrusted = !state.trust_of(&envelope.sender, device).receives();
 
         Ok(Incoming {
             peer: envelope.peer,
@@ -600,6 +601,9 @@ impl Omemo {
             return Err(Error::NoDevices(to.clone()));
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
+        // Encrypted and kept: the state is free for incoming messages while this one
+        // waits for the server's word.
+        drop(state);
         self.account
             .send(with(
                 stanza(MessageType::Chat, to.clone(), encrypted, Some(id)),
@@ -653,6 +657,9 @@ impl Omemo {
             return Err(Error::NoDevices(room.clone()));
         }
         let encrypted = self.encrypt_for(&mut state, &targets, text)?;
+        // Encrypted and kept: the state is free for incoming messages while this one
+        // waits for the server's word.
+        drop(state);
         self.account
             .send(with(
                 stanza(MessageType::Groupchat, room.clone(), encrypted, Some(id)),
@@ -953,7 +960,10 @@ mod tests {
         assert_eq!(own_device_list(&[list]).unwrap(), BTreeSet::from([1, 2]));
         let other = item(r#"<something xmlns="urn:example"/>"#);
         assert!(
-            matches!(own_device_list(&[other.clone()]), Err(Error::UnreadableOwnList)),
+            matches!(
+                own_device_list(std::slice::from_ref(&other)),
+                Err(Error::UnreadableOwnList)
+            ),
             "not a list: nothing to publish over"
         );
         assert!(

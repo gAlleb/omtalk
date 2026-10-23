@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::connect::DnsConfig;
+use tokio_xmpp::stanzastream::{StanzaStage, StanzaState};
 use tokio_xmpp::{Client, Event as ClientEvent, IqRequest, IqResponse, Stanza};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jid::{BareJid, Jid};
@@ -247,6 +248,14 @@ async fn supervise(
     }
 }
 
+/// How long a stanza may wait to go out on the stream before the sender is told it is
+/// queued: no connection.
+const SEND_WAIT: Duration = Duration::from_secs(3);
+/// How long the server has to acknowledge a stanza sent (XEP-0198). Long: on a network
+/// gone quiet the bytes leave into the socket all the same, and the word comes once the
+/// stream is resumed; till then the message shows as going, which is true.
+const ACK_WAIT: Duration = Duration::from_secs(600);
+
 /// How often the password is tried again while the server does not answer.
 const LOGIN_RECHECK: Duration = Duration::from_secs(60);
 
@@ -442,12 +451,34 @@ async fn stop(client: Client, done: Option<oneshot::Sender<()>>) -> Ended {
 async fn execute(client: &mut Client, command: Command) -> Option<Option<oneshot::Sender<()>>> {
     match command {
         Command::Send(stanza, reply) => {
-            let result = client
-                .send_stanza(*stanza)
-                .await
-                .map(drop)
-                .map_err(|e| Error::Send(e.to_string()));
-            let _ = reply.send(result);
+            // tokio-xmpp waits until the stanza is out on the stream, which without a
+            // connection is not until it is back: here only a moment, so this loop goes
+            // on (pings, other commands, stopping). The stanza stays queued meanwhile.
+            let managed = client
+                .get_stream_features()
+                .is_some_and(|f| f.stream_management.is_some());
+            match tokio::time::timeout(SEND_WAIT, client.send_stanza(*stanza)).await {
+                Err(_) => drop(reply.send(Err(Error::Queued))),
+                Ok(Err(e)) => drop(reply.send(Err(Error::Send(e.to_string())))),
+                // Without stream management, out on the stream is all there is to know.
+                Ok(Ok(_)) if !managed => drop(reply.send(Ok(()))),
+                // With it, sent is not yet received: the server acknowledges (XEP-0198),
+                // or, a resumption refused, the stanza is dropped and said lost.
+                Ok(Ok(mut token)) => drop(tokio::spawn(async move {
+                    let acked = tokio::time::timeout(ACK_WAIT, token.wait_for(StanzaStage::Acked)).await;
+                    let result = match acked {
+                        Ok(Some(StanzaState::Acked { .. })) => Ok(()),
+                        Ok(Some(StanzaState::Failed { error })) => {
+                            Err(Error::Send(error.into_io_error().to_string()))
+                        }
+                        Ok(Some(StanzaState::Dropped) | None) => {
+                            Err(Error::Send("lost with the connection; send it again".into()))
+                        }
+                        Ok(Some(_)) | Err(_) => Err(Error::NotConfirmed),
+                    };
+                    let _ = reply.send(result);
+                })),
+            }
         }
         Command::Iq { to, request, reply } => {
             let token = client.send_iq(to, request).await;

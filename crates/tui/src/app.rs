@@ -36,6 +36,8 @@ pub enum Delivery {
     /// A file going up to the server, this far (percent).
     Uploading(u8),
     Sending,
+    /// No connection now: it waits in the queue and goes when the connection is back.
+    Queued,
     /// The server has it (for a room: the room sent it back).
     Sent,
     /// A client of the recipient has it (XEP-0184).

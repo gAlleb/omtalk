@@ -667,7 +667,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 Delivery::Delivered => Some(omtalk_store::Delivery::Delivered),
                 Delivery::Read => Some(omtalk_store::Delivery::Read),
                 Delivery::Failed(why) => Some(omtalk_store::Delivery::Failed(why.clone())),
-                Delivery::Uploading(_) | Delivery::Sending => None,
+                Delivery::Uploading(_) | Delivery::Sending | Delivery::Queued => None,
             };
             if let Some(kept) = kept {
                 let _ = shared.store.set_delivery(&account, &id, &kept);
@@ -1433,6 +1433,23 @@ fn bounce_words(condition: &omtalk_xmpp::stanza_error::DefinedCondition, server:
     }
 }
 
+/// Why a stanza did not go, in the interface's words where omtalk knows them.
+fn xmpp_error(error: &omtalk_xmpp::Error) -> String {
+    match error {
+        omtalk_xmpp::Error::NotConfirmed => tr!(
+            "the server did not confirm it; it may be lost",
+            "сервер не подтвердил получение; возможно, потеряно"
+        )
+        .into(),
+        omtalk_xmpp::Error::Send(why) if why.starts_with("lost with the connection") => tr!(
+            "lost with the connection; send it again",
+            "потеряно вместе со связью; отправьте снова"
+        )
+        .into(),
+        other => other.to_string(),
+    }
+}
+
 /// Old messages encrypted before this device existed, counted in words.
 fn unreadable_words(count: usize) -> String {
     if !crate::lang::russian() {
@@ -1465,6 +1482,7 @@ fn omemo_error(error: &omtalk_omemo::Error) -> String {
         omtalk_omemo::Error::NoDevices(jid) => {
             trf!("{jid} has no OMEMO devices", "у {jid} нет устройств OMEMO")
         }
+        omtalk_omemo::Error::Xmpp(error) => xmpp_error(error),
         other => other.to_string(),
     }
 }
@@ -1539,7 +1557,15 @@ async fn perform(action: Action, shared: Shared) {
                 };
                 match sent {
                     Ok(report) => {
-                        save_own(&shared, &account, &to, &text, true, &id);
+                        save_own(
+                            &shared,
+                            &account,
+                            &to,
+                            &text,
+                            true,
+                            &id,
+                            Some(omtalk_store::Delivery::Sent),
+                        );
                         delivery(Delivery::Sent);
                         for (jid, device, e) in report.failed {
                             tell(Msg::Notice {
@@ -1569,6 +1595,11 @@ async fn perform(action: Action, shared: Shared) {
                             });
                         }
                     }
+                    // Encrypted and queued: it goes when the connection is back.
+                    Err(omtalk_omemo::Error::Xmpp(omtalk_xmpp::Error::Queued)) => {
+                        save_own(&shared, &account, &to, &text, true, &id, None);
+                        delivery(Delivery::Queued);
+                    }
                     Err(e) => {
                         delivery(Delivery::Failed(omemo_error(&e)));
                     }
@@ -1586,11 +1617,25 @@ async fn perform(action: Action, shared: Shared) {
                     Ok(()) => {
                         // A room's copy back goes into the history when it comes.
                         if !room {
-                            save_own(&shared, &account, &to, &text, false, &id);
+                            save_own(
+                                &shared,
+                                &account,
+                                &to,
+                                &text,
+                                false,
+                                &id,
+                                Some(omtalk_store::Delivery::Sent),
+                            );
                         }
                         delivery(Delivery::Sent);
                     }
-                    Err(e) => delivery(Delivery::Failed(e.to_string())),
+                    Err(omtalk_xmpp::Error::Queued) => {
+                        if !room {
+                            save_own(&shared, &account, &to, &text, false, &id, None);
+                        }
+                        delivery(Delivery::Queued);
+                    }
+                    Err(e) => delivery(Delivery::Failed(xmpp_error(&e))),
                 }
             }
         }
@@ -1740,7 +1785,15 @@ async fn perform(action: Action, shared: Shared) {
                 Ok(()) => {
                     // A room's copy back goes into the history when it comes.
                     if !(room && !encrypted) {
-                        save_own(&shared, &account, &to, &link, encrypted, &id);
+                        save_own(
+                            &shared,
+                            &account,
+                            &to,
+                            &link,
+                            encrypted,
+                            &id,
+                            Some(omtalk_store::Delivery::Sent),
+                        );
                     }
                     tell(Msg::Delivery {
                         account: account.clone(),
@@ -2151,7 +2204,15 @@ async fn perform(action: Action, shared: Shared) {
 }
 
 /// Keeps a message sent from here, as on the server: its ✓ is kept with it.
-fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encrypted: bool, id: &str) {
+fn save_own(
+    shared: &Shared,
+    account: &BareJid,
+    chat: &BareJid,
+    text: &str,
+    encrypted: bool,
+    id: &str,
+    delivery: Option<omtalk_store::Delivery>,
+) {
     let _ = shared.store.save_message(
         account,
         &StoredMessage {
@@ -2163,7 +2224,7 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, encr
             body: text.to_owned(),
             at: now(),
             id: Some(id.to_owned()),
-            delivery: Some(omtalk_store::Delivery::Sent),
+            delivery,
         },
     );
 }
