@@ -2895,12 +2895,13 @@ mod tests {
         app.select(bob);
         app.push(
             bob,
-            Line::message(
+            Line::message_sharing(
                 1_700_000_000,
                 "bob".into(),
                 "https://example.org/cat.png".into(),
                 false,
                 false,
+                true,
             ),
         );
 
@@ -3583,6 +3584,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         app.on_incoming(&me, &missed, 1);
         app.on_incoming(&me, &missed, 2);
@@ -3696,6 +3698,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         app.on_incoming(&me, &echo, 5);
         let lines = &app.chats[room].lines;
@@ -3718,6 +3721,7 @@ mod tests {
             archive_id: Some("a1".into()),
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         assert!(
             app.on_incoming(&me, &from_bob, 6).is_empty(),
@@ -4187,6 +4191,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         app.on_incoming(&me, &from_bob, 1);
         assert!(!screen(&mut app, 100, 20).contains("печатает"));
@@ -4243,6 +4248,7 @@ mod tests {
             archive_id: Some(format!("a-{id}")),
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         assert_eq!(
             app.alert_for(&me, &from_bob("1")),
@@ -4329,7 +4335,7 @@ mod tests {
         let link = "https://up.home.org/x/отчёт.pdf";
         app.push(
             bob,
-            Line::message(1_700_000_000, "bob".into(), link.into(), true, false),
+            Line::message_sharing(1_700_000_000, "bob".into(), link.into(), true, false, true),
         );
         app.media_done(link, crate::app::MediaState::Offered);
         let text = screen(&mut app, 100, 20);
@@ -4995,6 +5001,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         assert_eq!(app.notice_avatars(&me, &said), (None, Some("room".into())));
         assert_eq!(
@@ -5562,5 +5569,39 @@ mod tests {
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn a_link_written_is_a_link_and_a_file_shared_is_a_file() {
+        let page = "https://bin.omfm.ru/dsfdsfsd.md";
+        let written = Line::message(1, "bob".into(), page.into(), false, false);
+        assert!(
+            written.media.is_none(),
+            "a page linked, not a file: shown, never fetched"
+        );
+        let text = Line::message(
+            1,
+            "bob".into(),
+            "https://example.org/notes.txt".into(),
+            false,
+            false,
+        );
+        assert!(text.media.is_none());
+        let shared = Line::message_sharing(
+            1,
+            "bob".into(),
+            "https://up.example.org/a/notes.txt".into(),
+            false,
+            false,
+            true,
+        );
+        assert!(shared.media.is_some(), "the sender said it is a file: it is one");
+        let encrypted = format!("aesgcm://up.example.org/a/cat.png#{}", "ab".repeat(44));
+        assert!(
+            Line::message(1, "bob".into(), encrypted, true, false)
+                .media
+                .is_some(),
+            "an encrypted file is always one"
+        );
     }
 }

@@ -35,6 +35,11 @@ pub(crate) const MIGRATION_DELIVERY: &str = "
     CREATE INDEX messages_by_id ON messages (account, id);
 ";
 
+/// Schema 10: the body is a file its sender shared (XEP-0066), not a link written.
+pub(crate) const MIGRATION_SHARED: &str = "
+    ALTER TABLE messages ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
+";
+
 /// How far one's own message got, as kept: each step only moves forward, and a failure
 /// is final.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +86,8 @@ pub struct StoredMessage {
     pub id: Option<String>,
     /// For one's own, sent from here: how far it got.
     pub delivery: Option<Delivery>,
+    /// The body is a file shared, not a link written (XEP-0066).
+    pub shared_file: bool,
 }
 
 /// A chat with history, newest activity first.
@@ -97,8 +104,8 @@ impl Store {
         // A message that has an id is kept once: the archive read again, a carbon and
         // its original, bring it more than once.
         self.db.lock().unwrap().execute(
-            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              WHERE ?9 IS NULL OR NOT EXISTS (
                  SELECT 1 FROM messages WHERE account = ?1 AND chat = ?2 AND sender = ?3 AND id = ?9
              )",
@@ -117,6 +124,7 @@ impl Store {
                     Some(Delivery::Failed(why)) => Some(why.as_str()),
                     _ => None,
                 },
+                message.shared_file,
             ],
         )?;
         Ok(())
@@ -146,7 +154,7 @@ impl Store {
     ) -> Result<Vec<StoredMessage>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
-            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure FROM messages
+            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared FROM messages
              WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3",
         )?;
         let rows = query.query_map(params![account.as_str(), chat.as_str(), limit as i64], |r| {
@@ -160,11 +168,12 @@ impl Store {
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, Option<i64>>(7)?,
                 r.get::<_, Option<String>>(8)?,
+                r.get::<_, bool>(9)?,
             ))
         })?;
         let mut messages = Vec::new();
         for row in rows {
-            let (sender, nick, outgoing, encrypted, body, at, id, delivery, failure) = row?;
+            let (sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared_file) = row?;
             messages.push(StoredMessage {
                 chat: chat.clone(),
                 sender: parse_jid(&sender)?,
@@ -175,6 +184,7 @@ impl Store {
                 at,
                 id,
                 delivery: Delivery::from_code(delivery, failure),
+                shared_file,
             });
         }
         messages.reverse();
@@ -251,6 +261,7 @@ mod tests {
             at,
             id: None,
             delivery: None,
+            shared_file: false,
         }
     }
 

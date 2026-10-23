@@ -42,6 +42,9 @@ pub struct Meta {
     pub markable: bool,
     /// The id of the message this one answers (XEP-0461).
     pub reply_to: Option<String>,
+    /// The body is the link out of band data names (XEP-0066): a file shared, as
+    /// Conversations, Gajim and Monal mark their uploads.
+    pub shared_file: bool,
 }
 
 pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
@@ -196,7 +199,17 @@ fn content_of(mut message: Message) -> Option<(Content, Meta)> {
             .iter()
             .any(|p| p.is("markable", xmpp_parsers::ns::DISPLAYED_MARKERS)),
         reply_to: omtalk_xmpp::replies::reply_of(&message).map(|r| r.id),
+        shared_file: false,
     };
+    let body = message.get_best_body_cloned(vec![]).map(|(_, b)| b);
+    let mut meta = meta;
+    meta.shared_file = body.as_deref().is_some_and(|body| {
+        message.payloads.iter().any(|p| {
+            p.is("x", "jabber:x:oob")
+                && p.get_child("url", "jabber:x:oob")
+                    .is_some_and(|url| url.text().trim() == body.trim())
+        })
+    });
     if let Ok(Some(encrypted)) = message.extract_payload::<xml::Encrypted>() {
         return Some((Content::Omemo(encrypted), meta));
     }
@@ -230,6 +243,30 @@ pub(crate) fn archive_id(archive: &BareJid, message: &Message) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_is_a_shared_file_only_where_out_of_band_data_names_it() {
+        let message = |payload: &str| -> Message {
+            format!(
+                r#"<message xmlns="jabber:client" type="chat" from="bob@example.org/pc" to="me@example.org"><body>https://up.example.org/a/notes.txt</body>{payload}</message>"#
+            )
+            .parse::<xmpp_parsers::minidom::Element>()
+            .unwrap()
+            .try_into()
+            .unwrap()
+        };
+        let shared = |m: Message| open(&own(), m).unwrap().meta.shared_file;
+        assert!(shared(message(
+            r#"<x xmlns="jabber:x:oob"><url>https://up.example.org/a/notes.txt</url></x>"#
+        )));
+        assert!(!shared(message("")), "a link written by hand");
+        assert!(
+            !shared(message(
+                r#"<x xmlns="jabber:x:oob"><url>https://elsewhere.example/x.txt</url></x>"#
+            )),
+            "out of band data about another link"
+        );
+    }
     use omemo::{OwnKeys, Session};
     use omtalk_xmpp::Element;
     use xmpp_parsers::message::Lang;

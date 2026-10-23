@@ -80,6 +80,7 @@ const MIGRATIONS: &[&str] = &[
     ",
     seen::MIGRATION,
     history::MIGRATION_DELIVERY,
+    history::MIGRATION_SHARED,
 ];
 
 #[derive(Clone)]

@@ -94,9 +94,27 @@ pub enum MediaState {
 }
 
 impl Line {
-    /// A message line, with its media slot filled in if the text is a shared file.
+    /// A message line, with its media slot filled in if the text is an encrypted file.
     pub fn message(at: i64, who: String, text: String, encrypted: bool, outgoing: bool) -> Self {
-        let media = omtalk_media::Media::from_text(&text).map(|media| MediaSlot {
+        Self::message_sharing(at, who, text, encrypted, outgoing, false)
+    }
+
+    /// [`Line::message`] for a message that may share a file (`shared_file`, as its
+    /// sender said: XEP-0066); a link written by hand is shown as a link.
+    pub fn message_sharing(
+        at: i64,
+        who: String,
+        text: String,
+        encrypted: bool,
+        outgoing: bool,
+        shared_file: bool,
+    ) -> Self {
+        let media = if shared_file {
+            omtalk_media::Media::shared(&text)
+        } else {
+            omtalk_media::Media::from_text(&text)
+        };
+        let media = media.map(|media| MediaSlot {
             url: media.url().to_owned(),
             link: text.trim().to_owned(),
             name: media.name(),
@@ -1351,12 +1369,13 @@ impl App {
             (None, Direction::Outgoing) => tr!("me", "я").to_owned(),
             (None, Direction::Incoming) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
         };
-        let mut line = Line::message(
+        let mut line = Line::message_sharing(
             at,
             who,
             text.clone(),
             message.encrypted,
             message.direction == Direction::Outgoing,
+            message.shared_file,
         );
         line.untrusted = message.untrusted;
         line.reply_to = message.reply_to.clone();
@@ -1931,8 +1950,15 @@ impl App {
                 .iter_mut()
                 .filter(|l| l.outgoing && l.id.as_deref() == Some(id))
             {
-                let mut fresh =
-                    Line::message(line.at, line.who.clone(), link.to_owned(), line.encrypted, true);
+                // One's own upload: a file shared, whatever its link looks like.
+                let mut fresh = Line::message_sharing(
+                    line.at,
+                    line.who.clone(),
+                    link.to_owned(),
+                    line.encrypted,
+                    true,
+                    true,
+                );
                 fresh.id = line.id.take();
                 fresh.delivery = line.delivery.take();
                 *line = fresh;
@@ -3507,6 +3533,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            shared_file: false,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);
         app.on_incoming(&me, &incoming("carol@example.org"), 0);

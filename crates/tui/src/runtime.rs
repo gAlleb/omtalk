@@ -588,7 +588,14 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
                 (None, true) => tr!("me", "я").to_owned(),
                 (None, false) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
             };
-            let mut line = Line::message(message.at, who, message.body, message.encrypted, message.outgoing);
+            let mut line = Line::message_sharing(
+                message.at,
+                who,
+                message.body,
+                message.encrypted,
+                message.outgoing,
+                message.shared_file,
+            );
             line.id = message.id;
             line.delivery = message.delivery.map(|d| match d {
                 omtalk_store::Delivery::Sent => Delivery::Sent,
@@ -650,7 +657,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 tokio::spawn(perform(action, shared.clone()));
             }
             if let Some(text) = &message.text {
-                fetch_if_media(text, shared);
+                fetch_if_media(text, message.shared_file, shared);
             }
         }
         Msg::Media { url, state } => {
@@ -1094,6 +1101,7 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
                 body: text.clone(),
                 at,
                 id: message.id.clone(),
+                shared_file: message.shared_file,
                 // One's own, come back from the room: it got there.
                 delivery: (message.direction == Direction::Outgoing && message.nick.is_some())
                     .then_some(omtalk_store::Delivery::Sent),
@@ -1558,7 +1566,7 @@ async fn perform(action: Action, shared: Shared) {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
-            fetch_if_media(&text, &shared);
+            fetch_if_media(&text, false, &shared);
             // A reply names what it answers, beside the body (outside the encryption).
             let extra = reply
                 .map(|(to, length)| omtalk_xmpp::replies::elements(&to, length))
@@ -1586,6 +1594,7 @@ async fn perform(action: Action, shared: Shared) {
                             true,
                             &id,
                             Some(omtalk_store::Delivery::Sent),
+                            false,
                         );
                         delivery(Delivery::Sent);
                         for (jid, device, e) in report.failed {
@@ -1618,7 +1627,7 @@ async fn perform(action: Action, shared: Shared) {
                     }
                     // Encrypted and queued: it goes when the connection is back.
                     Err(omtalk_omemo::Error::Xmpp(omtalk_xmpp::Error::Queued)) => {
-                        save_own(&shared, &account, &to, &text, true, &id, None);
+                        save_own(&shared, &account, &to, &text, true, &id, None, false);
                         delivery(Delivery::Queued);
                     }
                     Err(e) => {
@@ -1646,13 +1655,14 @@ async fn perform(action: Action, shared: Shared) {
                                 false,
                                 &id,
                                 Some(omtalk_store::Delivery::Sent),
+                                false,
                             );
                         }
                         delivery(Delivery::Sent);
                     }
                     Err(omtalk_xmpp::Error::Queued) => {
                         if !room {
-                            save_own(&shared, &account, &to, &text, false, &id, None);
+                            save_own(&shared, &account, &to, &text, false, &id, None, false);
                         }
                         delivery(Delivery::Queued);
                     }
@@ -1769,12 +1779,12 @@ async fn perform(action: Action, shared: Shared) {
             });
             // The file is here already: put it where the fetched one would go, so the
             // picture shows without coming down again.
-            if let Some(media) = omtalk_media::Media::from_text(&link) {
+            if let Some(media) = omtalk_media::Media::shared(&link) {
                 let cached = media.cache_path(&shared.cache);
                 let _ = tokio::fs::create_dir_all(&shared.cache).await;
                 let _ = tokio::fs::copy(&path, &cached).await;
             }
-            fetch_if_media(&link, &shared);
+            fetch_if_media(&link, true, &shared);
             let sent = if encrypted {
                 let report = if room {
                     omemo.send_group_with_id(&to, &link, &id).await
@@ -1814,6 +1824,7 @@ async fn perform(action: Action, shared: Shared) {
                             encrypted,
                             &id,
                             Some(omtalk_store::Delivery::Sent),
+                            true,
                         );
                     }
                     tell(Msg::Delivery {
@@ -2210,7 +2221,7 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::Fetch(link) => {
-            if let Some(media) = omtalk_media::Media::from_text(&link) {
+            if let Some(media) = omtalk_media::Media::shared(&link) {
                 tell(Msg::Media {
                     url: media.url().to_owned(),
                     state: MediaState::Loading,
@@ -2247,6 +2258,7 @@ fn save_own(
     encrypted: bool,
     id: &str,
     delivery: Option<omtalk_store::Delivery>,
+    shared_file: bool,
 ) {
     let _ = shared.store.save_message(
         account,
@@ -2260,12 +2272,18 @@ fn save_own(
             at: now(),
             id: Some(id.to_owned()),
             delivery,
+            shared_file,
         },
     );
 }
 
-fn fetch_if_media(text: &str, shared: &Shared) {
-    let Some(media) = omtalk_media::Media::from_text(text) else {
+fn fetch_if_media(text: &str, shared_file: bool, shared: &Shared) {
+    let media = if shared_file {
+        omtalk_media::Media::shared(text)
+    } else {
+        omtalk_media::Media::from_text(text)
+    };
+    let Some(media) = media else {
         return;
     };
     // Not by itself: what is here already shows, the rest waits for a click.
@@ -2364,7 +2382,7 @@ fn save_avatar(dir: &std::path::Path, bytes: &[u8]) -> Result<String, String> {
 }
 
 async fn fetch_media(link: String, shared: Shared) {
-    let Some(media) = omtalk_media::Media::from_text(&link) else {
+    let Some(media) = omtalk_media::Media::shared(&link) else {
         return;
     };
     let (tx, url) = (shared.tx.clone(), media.url().to_owned());

@@ -45,8 +45,21 @@ pub enum Media {
 }
 
 impl Media {
-    /// The file a message is about, if its whole text is one link.
+    /// The file a message is about, if its whole text is a link that is always one: an
+    /// encrypted file (`aesgcm://`). A plain `https://` link is written by hand as often
+    /// as shared: see [`Media::shared`].
     pub fn from_text(text: &str) -> Option<Self> {
+        Self::parse(text).filter(|m| matches!(m, Media::Encrypted { .. }))
+    }
+
+    /// The file a message shares, its sender having said so (XEP-0066 out of band data,
+    /// as Conversations, Gajim and Monal mark their uploads): `aesgcm://`, or `https://`
+    /// ending in a file's name of a known kind.
+    pub fn shared(text: &str) -> Option<Self> {
+        Self::parse(text)
+    }
+
+    fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         if text.contains(char::is_whitespace) {
             return None;

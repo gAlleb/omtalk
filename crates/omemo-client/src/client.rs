@@ -71,6 +71,9 @@ pub struct Incoming {
     pub untrusted: bool,
     /// The id of the message this one answers (XEP-0461), if it is a reply.
     pub reply_to: Option<String>,
+    /// The text is a link to a file the sender shared (XEP-0066 out of band data names
+    /// it), not a link written: a page is shown as a link, never fetched.
+    pub shared_file: bool,
 }
 
 /// One published device of an account, as [`Omemo::devices`] reports it.
@@ -286,6 +289,7 @@ impl Omemo {
                     archive_id: None,
                     untrusted: false,
                     reply_to: envelope.meta.reply_to,
+                    shared_file: envelope.meta.shared_file,
                 }));
             }
             Content::Omemo(_) if self.has_no_key(&envelope) => {
@@ -304,6 +308,7 @@ impl Omemo {
                     archive_id: None,
                     untrusted: false,
                     reply_to: envelope.meta.reply_to,
+                    shared_file: false,
                 }));
             }
             Content::Omemo(encrypted) => encrypted,
@@ -395,6 +400,7 @@ impl Omemo {
             archive_id: None,
             untrusted,
             reply_to: envelope.meta.reply_to,
+            shared_file: false,
         })
     }
 
