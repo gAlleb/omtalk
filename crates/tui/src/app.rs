@@ -3345,17 +3345,7 @@ impl App {
                 } else if let Some((_, link)) = self.areas.fetches.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Fetch(link.clone())];
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
-                    // A known kind opens; another (a program, a .desktop the viewer would
-                    // run) is only said where it lies.
-                    if omtalk_media::Media::opens_by_viewer(path) {
-                        return vec![Action::Open(path.clone())];
-                    }
-                    self.status = trf!(
-                        "not opened by a click, kept here: {}",
-                        "не открывается кликом, лежит здесь: {}",
-                        path.display()
-                    );
-                    return Vec::new();
+                    return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
                     self.toggle_omemo();
                 } else if inside(self.areas.attach_button) {

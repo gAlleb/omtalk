@@ -1001,11 +1001,6 @@ pub fn message_rows(
                 MediaState::Ready(_) if slot.image => {
                     (icons.picture, tr!("open", "открыть").to_owned(), theme::accent())
                 }
-                MediaState::Ready(path) if !omtalk_media::Media::opens_by_viewer(path) => (
-                    icons.file,
-                    tr!("saved, click: where", "сохранено, клик: где лежит").to_owned(),
-                    theme::accent(),
-                ),
                 MediaState::Ready(_) => (icons.file, tr!("open", "открыть").to_owned(), theme::accent()),
                 MediaState::Failed(e) => (
                     icons.file,

@@ -37,6 +37,10 @@ target/release/omtalk you@example.org      # one account
 target/release/omtalk                      # accounts from ~/.config/omtalk/config.toml
 ```
 
+One omtalk runs per database (`~/.local/share/omtalk/omtalk.db`): it is one OMEMO device,
+and two copies of it would knock each other offline. A second client on the same machine
+is a device of its own: `omtalk --db ~/.local/share/omtalk/second.db`.
+
 ```toml
 # ~/.config/omtalk/config.toml
 [[account]]                               # as many accounts as you like

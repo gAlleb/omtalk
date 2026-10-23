@@ -9,16 +9,6 @@ use aes_gcm::aead::consts::{U12, U16};
 use aes_gcm::{AesGcm, KeyInit, aes::Aes256};
 use sha2::{Digest, Sha256};
 
-/// The extensions of files shared in chats, as opposed to pages.
-const FILE_KINDS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "avif", "svg", //
-    "mp4", "webm", "mov", "mkv", "3gp", //
-    "ogg", "opus", "oga", "mp3", "m4a", "aac", "wav", "flac", //
-    "pdf", "txt", "md", "doc", "docx", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "rtf",
-    "csv", //
-    "zip", "tar", "gz", "xz", "zst", "7z", "rar", "apk", "deb", "iso",
-];
-
 /// Files larger than this are not fetched: a chat is no place for them, and a link from a
 /// stranger should not fill the disk.
 pub const MAX_SIZE: u64 = 50 * 1024 * 1024;
@@ -75,7 +65,6 @@ impl Media {
             };
             let (iv, key) = secret.split_at(iv_len);
             // A file whatever its name: one without an extension (a program, say) too.
-            // Which may be opened with a click is another matter: see `opens_by_viewer`.
             return Some(Media::Encrypted {
                 url: format!("https://{location}"),
                 iv: iv.to_vec(),
@@ -113,15 +102,6 @@ impl Media {
             .filter(|n| !n.is_empty())
             .unwrap_or("file")
             .to_owned()
-    }
-
-    /// Whether a click may hand the file to the viewer (xdg-open): a known kind only, as
-    /// pictures, documents, archives. Another (a .desktop the viewer would run, an .html
-    /// it would show as a page, a program) is kept and shown where, not opened.
-    pub fn opens_by_viewer(path: &Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| FILE_KINDS.contains(&e.to_ascii_lowercase().as_str()))
     }
 
     /// Whether the name looks like a picture worth showing inline.
@@ -338,7 +318,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn any_shared_file_is_one_and_only_known_kinds_open_with_a_click() {
+    fn any_encrypted_file_is_a_file_and_a_plain_link_only_when_shared() {
         let secret = "ab".repeat(44);
         for name in ["cat.png", "run.desktop", "omtalk-aarch64"] {
             assert!(
@@ -351,16 +331,6 @@ mod tests {
             "plain: only when shared"
         );
         assert!(Media::shared("https://up.example.org/a/cat.png").is_some());
-        assert!(Media::opens_by_viewer(Path::new("/c/x.PNG")));
-        assert!(
-            !Media::opens_by_viewer(Path::new("/c/run.desktop")),
-            "a launcher is not run by a click"
-        );
-        assert!(
-            !Media::opens_by_viewer(Path::new("/c/omtalk-aarch64")),
-            "nor a program"
-        );
-        assert!(!Media::opens_by_viewer(Path::new("/c/page.html")));
     }
 
     fn encrypt(plain: &[u8], iv: &[u8; 12], key: &[u8; 32]) -> Vec<u8> {

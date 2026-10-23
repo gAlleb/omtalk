@@ -37,6 +37,14 @@ fn main() {
         }
     };
     crate::lang::set(options.config.ui.language);
+    // One omtalk per database: said before anything else, the screen still the shell's.
+    let _database = match runtime::lock_database(&options) {
+        Ok(lock) => lock,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
     // A mistake in the colours is said before the screen is taken over, as one in the
     // accounts is.
     match options.config.theme.palette() {

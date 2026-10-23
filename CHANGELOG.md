@@ -5,7 +5,9 @@
 - **A link is a link**: a page such as `https://…/notes.md` is shown, never fetched. Files are `aesgcm://` links and links their sender marked as files (XEP-0066), as Conversations, Gajim and Monal send uploads.
 - **Nobody can pass for someone else in a room**: only rooms you are in may say who their occupants are; a message in a room's archive carrying a writer of its own has no known writer; a device seen for the first time must be listed by its account.
 - **Only the recipient marks your message delivered, read or refused**, and carbons count only from your own server.
-- Files: avatar ids are only hashes (never paths), nothing is fetched on start with `auto_download = false`, the cache is yours alone (0700), downloads time out, a click opens only files of known kinds (any other is shown where it lies, not run).
+- Files: avatar ids are only hashes (never paths), nothing is fetched on start with `auto_download = false`, the cache is yours alone (0700), downloads time out.
+- **One omtalk per database**: a second one started on the same machine and account used to knock the first offline (both are the same device); it now says so and how to start it with a database of its own (`--db`).
+- The keys of a chat show at once from what is known, then refresh from the server.
 - Message styling no longer slows down on long lines.
 - Typing anywhere types into the input line.
 - A temporary login failure is retried; the file viewer leaves no zombies; notification text is escaped; a panic quits instead of leaving a broken terminal.

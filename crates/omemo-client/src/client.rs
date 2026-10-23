@@ -342,22 +342,22 @@ impl Omemo {
 
     async fn receive(&self, envelope: Received, encrypted: xml::Encrypted) -> Result<Incoming, Error> {
         let device = encrypted.header.sid;
-        let mut state = self.state.lock().await;
         let key = (envelope.sender.clone(), device);
-        let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &encrypted)?;
-
-        let identity = *decrypted.received.session.their_identity();
         // A device seen for the first time must be one its account lists: else anyone
         // who passes for the account (a made-up room, a forged archive) could slip in
-        // a key of their own as one of its devices.
-        if !state.identities.contains_key(&(envelope.sender.clone(), device))
-            && !self.listed(&mut state, &envelope.sender, device).await?
-        {
+        // a key of their own as one of its devices. The list is read with the state
+        // free: other chats go on meanwhile.
+        let known = self.state.lock().await.identities.contains_key(&key);
+        if !known && !self.listed(&envelope.sender, device).await? {
             return Err(Error::UnlistedDevice {
                 jid: envelope.sender.clone(),
                 device,
             });
         }
+        let mut state = self.state.lock().await;
+        let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &encrypted)?;
+
+        let identity = *decrypted.received.session.their_identity();
         self.record_identity(&mut state, &envelope.sender, device, &identity)?;
 
         // A device missing from the cached list means the cache is stale: drop it, so
@@ -770,6 +770,34 @@ impl Omemo {
 
     /// The devices `jid` publishes now, each with its identity key and what this device
     /// knows about it: the material for comparing fingerprints with another client.
+    /// The devices of `jid` as known here, without asking the server: shown at once,
+    /// before [`Omemo::devices`] brings the list as it is now.
+    pub async fn known_devices(&self, jid: &BareJid) -> Vec<DeviceInfo> {
+        let state = self.state.lock().await;
+        let list: BTreeSet<DeviceId> = match state.device_lists.get(jid) {
+            Some(list) => list.clone(),
+            None => state
+                .identities
+                .keys()
+                .filter(|(owner, _)| owner == jid)
+                .map(|(_, d)| *d)
+                .collect(),
+        };
+        list.into_iter()
+            .map(|device| {
+                let key = (jid.clone(), device);
+                DeviceInfo {
+                    device,
+                    identity_key: state.identities.get(&key).copied(),
+                    known_identity_key: state.identities.get(&key).copied(),
+                    has_session: state.sessions.contains_key(&key),
+                    trust: state.trust_of(jid, device),
+                    this_device: jid == self.account.jid() && device == self.device_id,
+                }
+            })
+            .collect()
+    }
+
     pub async fn devices(&self, jid: &BareJid) -> Result<Vec<DeviceInfo>, Error> {
         let list = match self.account.items(jid, DEVICE_LIST_NODE).await {
             Ok(items) => parse_device_list(&items),
@@ -807,8 +835,11 @@ impl Omemo {
     /// Records a device's first identity key, with the trust it starts with (BTBV), and
     /// refuses a changed one.
     /// Whether `jid` lists `device`: the cached list, else the list read afresh.
-    async fn listed(&self, state: &mut State, jid: &BareJid, device: DeviceId) -> Result<bool, Error> {
-        if state
+    async fn listed(&self, jid: &BareJid, device: DeviceId) -> Result<bool, Error> {
+        if self
+            .state
+            .lock()
+            .await
             .device_lists
             .get(jid)
             .is_some_and(|list| list.contains(&device))
@@ -826,7 +857,7 @@ impl Omemo {
             Err(e) => return Err(e.into()),
         };
         let listed = list.contains(&device);
-        state.device_lists.insert(jid.clone(), list);
+        self.state.lock().await.device_lists.insert(jid.clone(), list);
         Ok(listed)
     }
 

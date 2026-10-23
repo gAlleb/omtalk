@@ -109,6 +109,33 @@ impl Options {
     }
 }
 
+/// Holds the database for this process alone, as long as the returned file lives. The
+/// database is one OMEMO device: two omtalks on it would be one device twice, sharing
+/// a resource the server gives to the last one in, each pushing the other out, and
+/// both writing the same keys. A second client on this machine takes a database of its
+/// own (`--db`), and is a device of its own.
+pub fn lock_database(options: &Options) -> Result<std::fs::File, String> {
+    let path = options.db.with_extension("lock");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(trf!(
+            "omtalk is running already with {}: a second client here needs a database of its own, as: omtalk --db ~/.local/share/omtalk/second.db",
+            "omtalk уже запущен с {}: второму клиенту на этой машине нужна своя база, например: omtalk --db ~/.local/share/omtalk/second.db",
+            options.db.display()
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 /// Account settings with passwords, read before the screen is taken over.
 pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String> {
     options
@@ -1928,20 +1955,32 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::Devices { account, jid } => {
             let Some((_, omemo)) = get(&account) else { return };
+            let seen = shared.store.devices_seen(&account, &jid).unwrap_or_default();
+            let rows = |devices: Vec<omtalk_omemo::DeviceInfo>| -> Vec<DeviceRow> {
+                devices
+                    .into_iter()
+                    .map(|d| DeviceRow {
+                        seen: seen.get(&d.device).copied(),
+                        device: d.device,
+                        fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
+                        has_session: d.has_session,
+                        this_device: d.this_device,
+                        trust: d.trust,
+                    })
+                    .collect()
+            };
+            // What is known shows at once; the server's list follows.
+            let known = omemo.known_devices(&jid).await;
+            if !known.is_empty() {
+                tell(Msg::Devices {
+                    account: account.clone(),
+                    jid: jid.clone(),
+                    rows: rows(known),
+                });
+            }
             match omemo.devices(&jid).await {
                 Ok(devices) => {
-                    let seen = shared.store.devices_seen(&account, &jid).unwrap_or_default();
-                    let rows = devices
-                        .into_iter()
-                        .map(|d| DeviceRow {
-                            seen: seen.get(&d.device).copied(),
-                            device: d.device,
-                            fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
-                            has_session: d.has_session,
-                            this_device: d.this_device,
-                            trust: d.trust,
-                        })
-                        .collect();
+                    let rows = rows(devices);
                     tell(Msg::Devices { account, jid, rows });
                 }
                 Err(e) => tell(Msg::Notice {

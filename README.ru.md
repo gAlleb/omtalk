@@ -36,6 +36,10 @@ target/release/omtalk you@example.org      # один аккаунт
 target/release/omtalk                      # аккаунты из ~/.config/omtalk/config.toml
 ```
 
+На одну базу (`~/.local/share/omtalk/omtalk.db`) — один omtalk: это одно устройство OMEMO,
+и две его копии выбивали бы друг друга из сети. Второй клиент на той же машине — отдельное
+устройство: `omtalk --db ~/.local/share/omtalk/second.db`.
+
 ```toml
 # ~/.config/omtalk/config.toml
 [[account]]                               # аккаунтов может быть сколько угодно
