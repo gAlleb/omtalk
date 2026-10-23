@@ -720,8 +720,10 @@ pub struct Search {
     pub cursor: usize,
 }
 
-/// The reactions a right click on a message offers, as messengers do.
-pub const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// The reactions a right click on a message offers, as messengers do. Each one code
+/// point, two cells wide everywhere: ❤️ is ❤ and a selector, which tmux and terminals
+/// draw one or two cells wide, and the picker went askew; 💖 stands in for it.
+pub const QUICK_REACTIONS: [&str; 6] = ["👍", "💖", "😂", "😮", "😢", "🙏"];
 
 /// The reaction picker, open over message `line` of chat `chat`, where it was clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -163,7 +163,7 @@ once, kept after a restart. Contacts and the rooms you are in see it; omtalk ask
 now and then whether you are still in them and enters again if not; it is said again after a reconnect and on
 entering a room, and shows by the account at the bottom. A room's participants show theirs.
 
-Reactions (XEP-0444): a right click on a message offers 👍 ❤️ 😂 😮 😢 🙏; a click puts one
+Reactions (XEP-0444): a right click on a message offers 👍 💖 😂 😮 😢 🙏; a click puts one
 on, again takes it off. `/react 👍` does the same for the message selected with the mouse,
 or the last one from someone, and knows names too (`/react :+1:`, `heart`, `joy`, `fire`…). Reactions show under the message,
 each with how many sent it. As in Conversations and Gajim they go unencrypted, also in an
