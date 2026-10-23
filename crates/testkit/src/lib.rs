@@ -10,6 +10,7 @@ use std::time::Duration;
 use omemo::{DeviceId, OwnKeys};
 use omtalk_omemo::{Ephemeral, Incoming, Omemo, Persist, State};
 use omtalk_store::Store;
+use omtalk_xmpp::receipts::Mark;
 use omtalk_xmpp::{Account, AccountConfig, Accounts, BareJid, Event, Server};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -21,6 +22,8 @@ pub struct Device {
     pub account: Account,
     pub omemo: Arc<Omemo>,
     pub jid: BareJid,
+    /// The receipts and read markers on own messages that the catch-up on start found.
+    pub marks: Vec<(Mark, BareJid)>,
     inbox: mpsc::UnboundedReceiver<Result<Incoming, String>>,
     /// Connection events after the first login: `Online` and `Disconnected`.
     connection: mpsc::UnboundedReceiver<Event>,
@@ -65,7 +68,9 @@ impl Device {
 
         let (tx, inbox) = mpsc::unbounded_channel();
         // What the account got while this device was off, as a client shows it on start.
-        deliver(&tx, omemo.catch_up().await);
+        let caught = omemo.catch_up().await;
+        let marks = caught.as_ref().map(|c| c.marks.clone()).unwrap_or_default();
+        deliver(&tx, caught);
         let (connection_tx, connection) = mpsc::unbounded_channel();
         let driver = omemo.clone();
         tokio::spawn(async move {
@@ -99,6 +104,7 @@ impl Device {
             account,
             omemo,
             jid,
+            marks,
             inbox,
             connection,
         }

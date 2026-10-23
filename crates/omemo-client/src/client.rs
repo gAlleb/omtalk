@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use omemo::{DeviceId, Session};
 use omemo_xml::{DEVICE_LIST_NODE, bundle, bundle_node, device_list, message, xml};
-use omtalk_xmpp::{Access, Account, Affiliation, BareJid, Element, Event, PepItem, muc};
+use omtalk_xmpp::receipts::Mark;
+use omtalk_xmpp::{Access, Account, Affiliation, BareJid, Element, Event, PepItem, muc, receipts};
 use tokio::sync::Mutex;
 use xmpp_parsers::carbons;
 use xmpp_parsers::eme::ExplicitMessageEncryption;
@@ -134,6 +135,9 @@ pub struct CatchUp {
     /// Whom the messages read were with, the unreadable ones too: on a new device, the
     /// chats there were before it.
     pub peers: BTreeSet<BareJid>,
+    /// Receipts and read markers on one's own messages that came while this client was
+    /// closed, each with whose chat it is: the server keeps them in the archive too.
+    pub marks: Vec<(Mark, BareJid)>,
 }
 
 /// Which devices a message reached.
@@ -499,16 +503,24 @@ impl Omemo {
     /// is not read, only marked, so an old history is not replayed.
     pub async fn catch_up(&self) -> Result<CatchUp, Error> {
         let mut messages = Vec::new();
-        let mut caught = self.catch_up_archive(None, |m| messages.push(m)).await?;
+        let mut marks = Vec::new();
+        let mut caught = self
+            .catch_up_archive(None, |m| messages.push(m), |m, chat| marks.push((m, chat)))
+            .await?;
         caught.messages = messages;
+        caught.marks = marks;
         Ok(caught)
     }
 
-    /// [`Omemo::catch_up`], each message handed to `each` as soon as its page is read: a
-    /// long archive shows as it comes, and what was read stays read if a later page
-    /// fails (the position has moved past it).
-    pub async fn catch_up_each(&self, each: impl FnMut(Incoming) + Send) -> Result<CatchUp, Error> {
-        self.catch_up_archive(None, each).await
+    /// [`Omemo::catch_up`], each message handed to `each` and each receipt or read marker
+    /// to `marked` as soon as its page is read: a long archive shows as it comes, and
+    /// what was read stays read if a later page fails (the position has moved past it).
+    pub async fn catch_up_each(
+        &self,
+        each: impl FnMut(Incoming) + Send,
+        marked: impl FnMut(Mark, BareJid) + Send,
+    ) -> Result<CatchUp, Error> {
+        self.catch_up_archive(None, each, marked).await
     }
 
     /// The same for a group chat's archive: what the room got while this device was not
@@ -517,7 +529,9 @@ impl Omemo {
     /// last [`ROOM_HISTORY`] messages are read instead.
     pub async fn catch_up_room(&self, room: &BareJid) -> Result<CatchUp, Error> {
         let mut messages = Vec::new();
-        let mut caught = self.catch_up_archive(Some(room), |m| messages.push(m)).await?;
+        let mut caught = self
+            .catch_up_archive(Some(room), |m| messages.push(m), |_, _| {})
+            .await?;
         caught.messages = messages;
         Ok(caught)
     }
@@ -528,7 +542,7 @@ impl Omemo {
         room: &BareJid,
         each: impl FnMut(Incoming) + Send,
     ) -> Result<CatchUp, Error> {
-        self.catch_up_archive(Some(room), each).await
+        self.catch_up_archive(Some(room), each, |_, _| {}).await
     }
 
     /// Reads an archive from where this device stopped. Each page's messages go to `each`
@@ -537,7 +551,12 @@ impl Omemo {
         &self,
         room: Option<&BareJid>,
         mut each: impl FnMut(Incoming) + Send,
+        mut marked: impl FnMut(Mark, BareJid) + Send,
     ) -> Result<CatchUp, Error> {
+        let mut hand_out = |caught: &mut CatchUp| {
+            caught.messages.drain(..).for_each(&mut each);
+            caught.marks.drain(..).for_each(|(mark, chat)| marked(mark, chat));
+        };
         let own = self.account.jid().clone();
         let archive = room.cloned().unwrap_or_else(|| own.clone());
         let mut after = self.state.lock().await.archive_positions.get(&archive).cloned();
@@ -563,13 +582,13 @@ impl Omemo {
                     for archived in page.messages {
                         self.open_archived(None, archived, &mut caught).await;
                     }
-                    caught.messages.drain(..).for_each(&mut each);
+                    hand_out(&mut caught);
                     let newest = self.account.archive_newest(room).await?;
                     self.set_archive_position(&archive, newest.as_deref().unwrap_or_default())
                         .await?;
                 }
             }
-            caught.messages.drain(..).for_each(&mut each);
+            hand_out(&mut caught);
             self.caught_up.lock().await.insert(archive);
             return Ok(caught);
         }
@@ -604,11 +623,11 @@ impl Omemo {
                 // A message whose position was kept but which did not get out would be
                 // lost for good: what was read goes out before anything can fail.
                 if let Err(e) = self.take_archived(room, archived, &mut caught).await {
-                    caught.messages.drain(..).for_each(&mut each);
+                    hand_out(&mut caught);
                     return Err(e);
                 }
             }
-            caught.messages.drain(..).for_each(&mut each);
+            hand_out(&mut caught);
             if page.complete || page.last.is_none() {
                 break;
             }
@@ -678,6 +697,15 @@ impl Omemo {
     ) {
         let own = self.account.jid().clone();
         let at = archived.stamp.as_ref().map(|s| s.0.timestamp());
+        // A receipt or a read marker from someone else on one's own message; one's own
+        // other clients' reading is in the server's read marks (XEP-0490).
+        if room.is_none() {
+            caught.marks.extend(
+                receipts::marks(&own, &archived.message)
+                    .into_iter()
+                    .filter(|(_, chat)| *chat != own),
+            );
+        }
         let envelope = match room {
             None => Ok(envelope::open_archived(&own, archived.message)),
             Some(room) => envelope::open_room_archived(&own, room, archived.message),

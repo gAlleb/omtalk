@@ -1618,10 +1618,25 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
     // Shown and kept page by page, as they are read.
     let mut got = 0;
     let caught = omemo
-        .catch_up_each(|message| {
-            got += usize::from(message.text.is_some());
-            deliver(&shared, &account, message);
-        })
+        .catch_up_each(
+            |message| {
+                got += usize::from(message.text.is_some());
+                deliver(&shared, &account, message);
+            },
+            // Read or received while this client was closed: as if it had been open.
+            |mark, from| {
+                let (id, state) = match mark {
+                    receipts::Mark::Received(id) => (id, Delivery::Delivered),
+                    receipts::Mark::Displayed(id) => (id, Delivery::Read),
+                };
+                tell(Msg::Marked {
+                    account: account.clone(),
+                    from,
+                    id,
+                    state,
+                });
+            },
+        )
         .await;
     match caught {
         Ok(caught) => {

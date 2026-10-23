@@ -174,3 +174,43 @@ async fn a_position_the_archive_no_longer_has_is_reported_and_replaced() {
     assert!(!again.position_lost, "the position works again afterwards");
     stop_all([laptop]).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_read_while_the_sender_was_closed_shows_when_it_starts() {
+    use omtalk_xmpp::receipts::{self, Mark};
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sender.db");
+    let (sender, reader) = tokio::join!(Device::start_stored("u53", &db), Device::start("u54"));
+    // The sender wrote and closed; then the reader's client got it and it was read.
+    sender.stop().await;
+    let to = omtalk_xmpp::Jid::from(sender_jid());
+    reader
+        .account
+        .send(receipts::receipt(to.clone(), "m-away"))
+        .await
+        .unwrap();
+    reader
+        .account
+        .send(receipts::displayed(to, "m-away"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Started again: both come from the archive, about the reader's chat.
+    let sender = Device::start_stored("u53", &db).await;
+    assert!(
+        sender
+            .marks
+            .contains(&(Mark::Received("m-away".into()), reader.jid.clone()))
+            && sender
+                .marks
+                .contains(&(Mark::Displayed("m-away".into()), reader.jid.clone())),
+        "{:?}",
+        sender.marks
+    );
+    stop_all([sender, reader]).await;
+}
+
+fn sender_jid() -> BareJid {
+    "u53@localhost".parse().unwrap()
+}
