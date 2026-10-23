@@ -59,6 +59,11 @@ pub(crate) const MIGRATION_KNOWN: &str = "
     );
 ";
 
+/// Schema 14: the message was corrected (XEP-0308): its body is the corrected text.
+pub(crate) const MIGRATION_EDITED: &str = "
+    ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;
+";
+
 /// How far one's own message got, as kept: each step only moves forward, and a failure
 /// is final.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +118,8 @@ pub struct StoredMessage {
     pub archive_id: Option<String>,
     /// Written on a device refused or not decided on.
     pub untrusted: bool,
+    /// Corrected since (XEP-0308).
+    pub edited: bool,
 }
 
 /// A chat with history, newest activity first.
@@ -129,8 +136,8 @@ impl Store {
         // A message that has an id is kept once: the archive read again, a carbon and
         // its original, bring it more than once.
         self.db.lock().unwrap().execute(
-            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+            "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
              WHERE ?9 IS NULL OR NOT EXISTS (
                  SELECT 1 FROM messages WHERE account = ?1 AND chat = ?2 AND sender = ?3 AND id = ?9
              )",
@@ -153,9 +160,28 @@ impl Store {
                 message.reply_to,
                 message.archive_id,
                 message.untrusted,
+                message.edited,
             ],
         )?;
         Ok(())
+    }
+
+    /// Puts the corrected text into the message `id` of `chat`, one's own (`outgoing`)
+    /// or the peer's; whether there was such a message.
+    pub fn correct_message(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        id: &str,
+        outgoing: bool,
+        body: &str,
+    ) -> Result<bool, Error> {
+        let changed = self.db.lock().unwrap().execute(
+            "UPDATE messages SET body = ?5, edited = 1
+             WHERE account = ?1 AND chat = ?2 AND id = ?3 AND outgoing = ?4",
+            params![account.as_str(), chat.as_str(), id, outgoing, body],
+        )?;
+        Ok(changed > 0)
     }
 
     /// [`Store::set_delivery`] for the message `id` in `chat` only.
@@ -202,7 +228,7 @@ impl Store {
     ) -> Result<Vec<StoredMessage>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
-            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted FROM messages
+            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited FROM messages
              WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3",
         )?;
         let rows = query.query_map(params![account.as_str(), chat.as_str(), limit as i64], |r| {
@@ -220,6 +246,7 @@ impl Store {
                 r.get::<_, Option<String>>(10)?,
                 r.get::<_, Option<String>>(11)?,
                 r.get::<_, bool>(12)?,
+                r.get::<_, bool>(13)?,
             ))
         })?;
         let mut messages = Vec::new();
@@ -238,6 +265,7 @@ impl Store {
                 reply_to,
                 archive_id,
                 untrusted,
+                edited,
             ) = row?;
             messages.push(StoredMessage {
                 chat: chat.clone(),
@@ -253,6 +281,7 @@ impl Store {
                 reply_to,
                 archive_id,
                 untrusted,
+                edited,
             });
         }
         messages.reverse();
@@ -347,6 +376,7 @@ mod tests {
             reply_to: None,
             archive_id: None,
             untrusted: false,
+            edited: false,
         }
     }
 
@@ -394,6 +424,27 @@ mod tests {
             .recent_messages(&me, &jid("bob@example.org"), 10)
             .unwrap();
         assert_eq!(read, [reply]);
+    }
+
+    #[test]
+    fn a_correction_replaces_the_text_of_the_message_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let me = jid("me@example.org");
+        let bob = jid("bob@example.org");
+        let theirs = StoredMessage {
+            id: Some("b1".into()),
+            ..message("bob@example.org", "опечтака", 1)
+        };
+        store.save_message(&me, &theirs).unwrap();
+        assert!(
+            !store.correct_message(&me, &bob, "b1", true, "x").unwrap(),
+            "not one's own"
+        );
+        assert!(!store.correct_message(&me, &bob, "zz", false, "x").unwrap());
+        assert!(store.correct_message(&me, &bob, "b1", false, "опечатка").unwrap());
+        let kept = &store.recent_messages(&me, &bob, 10).unwrap()[0];
+        assert_eq!((kept.body.as_str(), kept.edited), ("опечатка", true));
     }
 
     #[test]

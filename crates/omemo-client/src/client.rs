@@ -79,6 +79,8 @@ pub struct Incoming {
     pub untrusted: bool,
     /// The id of the message this one answers (XEP-0461), if it is a reply.
     pub reply_to: Option<String>,
+    /// The id of the message this one corrects (XEP-0308): its text replaces that one's.
+    pub replaces: Option<String>,
     /// The text is a link to a file the sender shared (XEP-0066 out of band data names
     /// it), not a link written: a page is shown as a link, never fetched.
     pub shared_file: bool,
@@ -313,6 +315,7 @@ impl Omemo {
                     archive_id: None,
                     untrusted: false,
                     reply_to: envelope.meta.reply_to,
+                    replaces: envelope.meta.replaces,
                     shared_file: envelope.meta.shared_file,
                 }));
             }
@@ -332,6 +335,7 @@ impl Omemo {
                     archive_id: None,
                     untrusted: false,
                     reply_to: envelope.meta.reply_to,
+                    replaces: envelope.meta.replaces,
                     shared_file: false,
                 }));
             }
@@ -475,6 +479,7 @@ impl Omemo {
             archive_id: None,
             untrusted,
             reply_to: envelope.meta.reply_to,
+            replaces: envelope.meta.replaces,
             shared_file: false,
         })
     }

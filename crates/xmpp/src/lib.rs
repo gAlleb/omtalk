@@ -10,6 +10,7 @@ pub mod avatar;
 pub mod bookmarks;
 pub mod chatstates;
 mod config;
+pub mod corrections;
 mod disco;
 mod error;
 mod event;

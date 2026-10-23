@@ -668,6 +668,7 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
             line.reply_to = message.reply_to;
             line.archive_id = message.archive_id;
             line.untrusted = message.untrusted;
+            line.edited = message.edited;
             line.delivery = message.delivery.map(|d| match d {
                 omtalk_store::Delivery::Sent => Delivery::Sent,
                 omtalk_store::Delivery::Delivered => Delivery::Delivered,
@@ -682,6 +683,10 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
         Msg::Incoming { account, message, at } => {
+            // A correction changes the message it names, where it is: no alert.
+            if app.correct(&account, &message) {
+                return;
+            }
             // Before the chat shows it, while it is still "not looked at".
             let alert = app.alert_for(&account, &message);
             if alert.bell {
@@ -1187,7 +1192,22 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
     {
         let _ = shared.store.device_seen(account, &message.sender, device, at);
     }
-    if let Some(text) = &message.text {
+    // A correction goes into the message it corrects; only one whose original is not
+    // here is kept as a message of its own.
+    let corrected = match (&message.replaces, &message.text) {
+        (Some(id), Some(text)) => shared
+            .store
+            .correct_message(
+                account,
+                &message.peer,
+                id,
+                message.direction == Direction::Outgoing,
+                text,
+            )
+            .unwrap_or(false),
+        _ => false,
+    };
+    if let Some(text) = message.text.as_ref().filter(|_| !corrected) {
         let _ = shared.store.save_message(
             account,
             &StoredMessage {
@@ -1203,6 +1223,7 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
                 reply_to: message.reply_to.clone(),
                 archive_id: message.archive_id.clone(),
                 untrusted: message.untrusted,
+                edited: false,
                 // One's own, come back from the room: it got there.
                 delivery: (message.direction == Direction::Outgoing && message.nick.is_some())
                     .then_some(omtalk_store::Delivery::Sent),
@@ -1741,16 +1762,21 @@ async fn perform(action: Action, shared: Shared) {
             encrypted,
             id,
             reply,
+            replace,
         } => {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
             fetch_if_media(&text, false, &shared);
             let reply_to = reply.as_ref().map(|(to, _)| to.id.clone());
-            // A reply names what it answers, beside the body (outside the encryption).
-            let extra = reply
+            // A reply names what it answers, a correction what it corrects, beside the
+            // body (outside the encryption).
+            let mut extra = reply
                 .map(|(to, length)| omtalk_xmpp::replies::elements(&to, length))
                 .unwrap_or_default();
+            if let Some(original) = &replace {
+                extra.push(omtalk_xmpp::corrections::element(original));
+            }
             let delivery = |state| {
                 tell(Msg::Delivery {
                     account: account.clone(),
@@ -1777,6 +1803,7 @@ async fn perform(action: Action, shared: Shared) {
                                 delivery: Some(omtalk_store::Delivery::Sent),
                                 shared_file: false,
                                 reply_to: reply_to.clone(),
+                                replaces: replace.clone(),
                             },
                         );
                         delivery(Delivery::Sent);
@@ -1821,6 +1848,7 @@ async fn perform(action: Action, shared: Shared) {
                                 delivery: None,
                                 shared_file: false,
                                 reply_to: reply_to.clone(),
+                                replaces: replace.clone(),
                             },
                         );
                         delivery(Delivery::Queued);
@@ -1853,6 +1881,7 @@ async fn perform(action: Action, shared: Shared) {
                                     delivery: Some(omtalk_store::Delivery::Sent),
                                     shared_file: false,
                                     reply_to: reply_to.clone(),
+                                    replaces: replace.clone(),
                                 },
                             );
                         }
@@ -1871,6 +1900,7 @@ async fn perform(action: Action, shared: Shared) {
                                     delivery: None,
                                     shared_file: false,
                                     reply_to: reply_to.clone(),
+                                    replaces: replace.clone(),
                                 },
                             );
                         }
@@ -2051,6 +2081,7 @@ async fn perform(action: Action, shared: Shared) {
                                 delivery: Some(omtalk_store::Delivery::Sent),
                                 shared_file: true,
                                 reply_to: None,
+                                replaces: None,
                             },
                         );
                     }
@@ -2506,10 +2537,16 @@ struct Own {
     shared_file: bool,
     /// The id of the message it answers.
     reply_to: Option<String>,
+    /// The id of one's own message it corrects: that one takes its text instead.
+    replaces: Option<String>,
 }
 
 /// Keeps a message sent from here, as on the server: its ✓ is kept with it.
 fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, id: &str, own: Own) {
+    if let Some(original) = &own.replaces {
+        let _ = shared.store.correct_message(account, chat, original, true, text);
+        return;
+    }
     let _ = shared.store.save_message(
         account,
         &StoredMessage {
@@ -2526,6 +2563,7 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, id: 
             reply_to: own.reply_to,
             archive_id: None,
             untrusted: false,
+            edited: false,
         },
     );
 }

@@ -59,6 +59,8 @@ pub struct Line {
     pub notice: bool,
     /// Written on a device refused or not decided on.
     pub untrusted: bool,
+    /// Corrected since it came (XEP-0308): the text is the corrected one.
+    pub edited: bool,
     /// The id of the message this one answers (XEP-0461).
     pub reply_to: Option<String>,
     /// The id the archive gave it (a room's, in a room): replies in rooms name that.
@@ -129,6 +131,7 @@ impl Line {
             outgoing,
             notice: false,
             untrusted: false,
+            edited: false,
             reply_to: None,
             archive_id: None,
             media,
@@ -355,6 +358,8 @@ pub enum Action {
         id: String,
         /// A reply: what it answers, and how long the quote at the start of `text` is.
         reply: Option<(omtalk_xmpp::replies::ReplyTo, usize)>,
+        /// A correction (XEP-0308) of one's own message with this id.
+        replace: Option<String>,
     },
     Join {
         account: BareJid,
@@ -570,6 +575,17 @@ pub struct Replying {
     pub to: Option<omtalk_xmpp::replies::ReplyTo>,
 }
 
+/// One's own message being corrected (XEP-0308): the input line holds its new text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Editing {
+    pub account: BareJid,
+    pub chat: BareJid,
+    /// The id of the message as first sent: corrections always name that one.
+    pub id: String,
+    /// Its text before, shown above the input line.
+    pub was: String,
+}
+
 /// The key, what it does in English, in Russian.
 pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
     ("o", "OMEMO in this chat on/off", "OMEMO в этом чате вкл/выкл"),
@@ -637,6 +653,8 @@ pub struct App {
     pub completion: Option<Completion>,
     /// The message being answered by what is typed now.
     pub replying: Option<Replying>,
+    /// A correction being written, if any.
+    pub editing: Option<Editing>,
     /// The last click in the conversation, to tell a double one.
     pub last_click: Option<(std::time::Instant, u16, u16)>,
     /// What Ctrl+W/U/K cut last, for Ctrl+Y.
@@ -768,6 +786,7 @@ impl App {
             config_notify: Default::default(),
             completion: None,
             replying: None,
+            editing: None,
             last_click: None,
             killed: String::new(),
             read_markers: true,
@@ -1524,6 +1543,7 @@ impl App {
                     outgoing: false,
                     notice: true,
                     untrusted: false,
+                    edited: false,
                     reply_to: None,
                     archive_id: None,
                     media: None,
@@ -1793,6 +1813,65 @@ impl App {
         }
     }
 
+    /// Puts one's own last message of the open chat into the input line, to correct it
+    /// (`/edit`). Only a text written here or by one's other clients, with an id to name.
+    pub fn edit_last(&mut self) {
+        let Some(index) = self.selected else { return };
+        let chat = &self.chats[index];
+        let last = chat
+            .lines
+            .iter()
+            .rev()
+            .find(|l| l.outgoing && !l.notice && l.media.is_none() && l.id.is_some());
+        let Some(line) = last else {
+            self.status = tr!("nothing of yours to correct here", "здесь нечего исправить").into();
+            return;
+        };
+        self.editing = Some(Editing {
+            account: chat.account.clone(),
+            chat: chat.jid.clone(),
+            id: line.id.clone().unwrap_or_default(),
+            was: line.text.clone(),
+        });
+        self.replying = None;
+        self.input = line.text.clone();
+        self.cursor = self.input.chars().count();
+        self.focus = Focus::Input;
+    }
+
+    /// A correction come in (XEP-0308): the text of the message it names, by the same
+    /// writer, becomes its text. Whether there was one to correct; if not, the
+    /// correction shows as a message.
+    pub fn correct(&mut self, account: &BareJid, message: &Incoming) -> bool {
+        let (Some(id), Some(text)) = (&message.replaces, &message.text) else {
+            return false;
+        };
+        let outgoing = message.direction == omtalk_omemo::Direction::Outgoing;
+        let Some(chat) = self
+            .chats
+            .iter_mut()
+            .find(|c| &c.account == account && c.jid == message.peer)
+        else {
+            return false;
+        };
+        let room = chat.is_room();
+        let line = chat.lines.iter_mut().rev().find(|l| {
+            l.id.as_deref() == Some(id.as_str())
+                && l.outgoing == outgoing
+                && !l.notice
+                // In a room, by the same nick as the message corrected.
+                && (!room || outgoing || message.nick.as_deref() == Some(l.who.as_str()))
+        });
+        match line {
+            Some(line) => {
+                line.text = text.clone();
+                line.edited = true;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Starts a reply: to the message under the selection (quoting what is selected),
     /// else to the last message from someone in the open chat.
     pub fn reply_here(&mut self) -> Vec<Action> {
@@ -1893,6 +1972,12 @@ impl App {
             KeyCode::End => self.cursor = len,
             // Esc drops the reply first, then the line.
             KeyCode::Esc if self.replying.is_some() => self.replying = None,
+            // A correction dropped takes its text along: it was the old one.
+            KeyCode::Esc if self.editing.is_some() => {
+                self.editing = None;
+                self.input.clear();
+                self.cursor = 0;
+            }
             KeyCode::Esc => {
                 self.input.clear();
                 self.cursor = 0;
@@ -2064,6 +2149,32 @@ impl App {
         let id = omtalk_xmpp::receipts::new_id();
         // The message itself says "active" now.
         self.typing_out = None;
+        if let Some(editing) = self
+            .editing
+            .take()
+            .filter(|e| e.account == chat.account && e.chat == chat.jid)
+        {
+            // The line changes where it is; the correction goes as a message of its own.
+            if let Some(line) = chat
+                .lines
+                .iter_mut()
+                .rev()
+                .find(|l| l.outgoing && l.id.as_deref() == Some(editing.id.as_str()))
+            {
+                line.text = text.clone();
+                line.edited = true;
+            }
+            return vec![Action::Send {
+                account: chat.account.clone(),
+                to: chat.jid.clone(),
+                room: chat.is_room(),
+                text,
+                encrypted: chat.omemo,
+                id,
+                reply: None,
+                replace: Some(editing.id),
+            }];
+        }
         // A reply to a message of this chat: the quote goes first.
         let replying = self
             .replying
@@ -2085,6 +2196,7 @@ impl App {
             encrypted: chat.omemo,
             id: id.clone(),
             reply: reply.clone(),
+            replace: None,
         };
         let encrypted = chat.omemo;
         self.sending(index, &text, encrypted, &id, chrono::Utc::now().timestamp());
@@ -2208,6 +2320,10 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/edit", _) => {
+                self.edit_last();
+                return Vec::new();
+            }
             ("/me", _) => {
                 return self.say(tr!(
                     "/me TEXT says what you do, as in IRC",
@@ -3533,6 +3649,7 @@ mod tests {
                 encrypted: true,
                 id: id.clone(),
                 reply: None,
+                replace: None,
             }]
         );
         // Shown at once, as being sent, under the same id.
@@ -3611,6 +3728,83 @@ mod tests {
     }
 
     #[test]
+    fn edit_corrects_ones_last_message_in_place() {
+        let mut app = app();
+        type_text(&mut app, "/msg bob@example.org");
+        let sent = type_text(&mut app, "встреча в пятт");
+        let [Action::Send { id: first, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
+        let first = first.clone();
+
+        type_text(&mut app, "/edit");
+        assert_eq!(app.input, "встреча в пятт", "the old text, to change");
+        assert!(app.editing.is_some());
+        // The line as it should have been.
+        app.input = "встреча в пять".into();
+        app.cursor = app.input.chars().count();
+        let sent = app.on_key(key(KeyCode::Enter));
+        let sent: Vec<_> = sent
+            .into_iter()
+            .filter(|a| !matches!(a, Action::ChatState { .. }))
+            .collect();
+        let [Action::Send { text, replace, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(
+            (text.as_str(), replace.as_ref()),
+            ("встреча в пять", Some(&first))
+        );
+        let lines = &app.current().unwrap().lines;
+        let line = lines.last().unwrap();
+        assert_eq!((line.text.as_str(), line.edited), ("встреча в пять", true));
+        assert_eq!(
+            lines.iter().filter(|l| l.outgoing).count(),
+            1,
+            "no second message"
+        );
+        assert!(app.editing.is_none());
+
+        // Esc drops a correction, and its text with it.
+        type_text(&mut app, "/edit");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.editing.is_none() && app.input.is_empty());
+    }
+
+    #[test]
+    fn a_correction_changes_only_what_its_writer_wrote() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        let message = |text: &str, id: &str, replaces: Option<&str>, direction| Incoming {
+            peer: jid("bob@example.org"),
+            sender: jid("bob@example.org"),
+            nick: None,
+            device: Some(1),
+            direction,
+            encrypted: true,
+            text: Some(text.into()),
+            at: None,
+            not_for_this_device: false,
+            id: Some(id.into()),
+            markable: false,
+            archive_id: None,
+            untrusted: false,
+            reply_to: None,
+            replaces: replaces.map(str::to_owned),
+            shared_file: false,
+        };
+        app.on_incoming(&me, &message("опечтака", "b1", None, Direction::Incoming), 0);
+        assert!(app.correct(&me, &message("опечатка", "b2", Some("b1"), Direction::Incoming)));
+        let line = app.chats[bob].lines.last().unwrap();
+        assert_eq!((line.text.as_str(), line.edited), ("опечатка", true));
+        // Not one's own message from bob's side, nor a message that is not there.
+        assert!(!app.correct(&me, &message("x", "b3", Some("b1"), Direction::Outgoing)));
+        assert!(!app.correct(&me, &message("x", "b4", Some("nope"), Direction::Incoming)));
+        assert_eq!(app.chats[bob].lines.last().unwrap().text, "опечатка");
+    }
+
+    #[test]
     fn unread_counts_only_other_chats_and_clears_on_opening() {
         let mut app = app();
         let me = jid("me@example.org");
@@ -3632,6 +3826,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         app.on_incoming(&me, &incoming("bob@example.org"), 0);

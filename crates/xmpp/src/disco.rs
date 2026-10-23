@@ -29,6 +29,7 @@ const FEATURES: &[&str] = &[
     // Direct invitations to rooms (XEP-0249) and replies (XEP-0461) are understood.
     "jabber:x:conference",
     "urn:xmpp:reply:0",
+    "urn:xmpp:message-correct:0",
     // Message styling: *strong*, _emphasis_ and the like are shown (XEP-0393).
     "urn:xmpp:styling:0",
     // Avatars: a change is pushed (XEP-0084).

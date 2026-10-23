@@ -556,6 +556,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     highlight_selection(frame, app);
     input_box(frame, app, input);
     replying(frame, app, input);
+    editing(frame, app, input);
     suggestions(frame, app, input, messages);
     leader_keys(frame, app, input);
 }
@@ -631,6 +632,33 @@ fn clear(frame: &mut Frame, area: Rect) {
 }
 
 /// Just above the input, the message a reply answers, while it is written.
+/// Above the input line while a correction is written: what it corrects.
+fn editing(frame: &mut Frame, app: &App, input: Rect) {
+    let Some(editing) = &app.editing else { return };
+    if input.y == 0 {
+        return;
+    }
+    let place = Rect::new(input.x + 1, input.y - 1, input.width.saturating_sub(2), 1);
+    let label = tr!("✎ correcting: ", "✎ правка: ");
+    let was = editing.was.lines().next().unwrap_or_default();
+    let line = TextLine::from(vec![
+        Span::styled(
+            label,
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate(was, (place.width as usize).saturating_sub(label.width() + 16)),
+            Style::default().fg(theme::dim()),
+        ),
+        Span::styled(
+            tr!("  Esc cancels", "  Esc — отменить"),
+            Style::default().fg(theme::dim()),
+        ),
+    ]);
+    clear(frame, place);
+    frame.render_widget(Paragraph::new(line), place);
+}
+
 fn replying(frame: &mut Frame, app: &App, input: Rect) {
     let Some(reply) = &app.replying else { return };
     if input.y == 0 {
@@ -1155,6 +1183,13 @@ pub fn message_rows(
                     spans.push(Span::styled(
                         tr!("⚠ unverified device · ", "⚠ непроверенное устройство · "),
                         Style::default().fg(theme::warn()),
+                    ));
+                }
+                // Corrected since (XEP-0308).
+                if line.edited && first {
+                    spans.push(Span::styled(
+                        tr!("edited · ", "изм. · "),
+                        Style::default().fg(theme::dim()),
                     ));
                 }
                 spans.extend(lead.iter().cloned());
@@ -3584,6 +3619,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         app.on_incoming(&me, &missed, 1);
@@ -3698,6 +3734,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         app.on_incoming(&me, &echo, 5);
@@ -3721,6 +3758,7 @@ mod tests {
             archive_id: Some("a1".into()),
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         assert!(
@@ -4191,6 +4229,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         app.on_incoming(&me, &from_bob, 1);
@@ -4248,6 +4287,7 @@ mod tests {
             archive_id: Some(format!("a-{id}")),
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         assert_eq!(
@@ -5001,6 +5041,7 @@ mod tests {
             archive_id: None,
             untrusted: false,
             reply_to: None,
+            replaces: None,
             shared_file: false,
         };
         assert_eq!(app.notice_avatars(&me, &said), (None, Some("room".into())));

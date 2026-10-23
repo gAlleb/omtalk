@@ -106,6 +106,14 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/edit",
+        args: ["", ""],
+        about: [
+            "correct your last message here",
+            "исправить своё последнее сообщение здесь",
+        ],
+    },
+    Command {
         name: "/commands",
         args: ["", ""],
         about: [

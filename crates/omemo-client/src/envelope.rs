@@ -42,6 +42,8 @@ pub struct Meta {
     pub markable: bool,
     /// The id of the message this one answers (XEP-0461).
     pub reply_to: Option<String>,
+    /// The id of the message this one corrects (XEP-0308).
+    pub replaces: Option<String>,
     /// The body is the link out of band data names (XEP-0066): a file shared, as
     /// Conversations, Gajim and Monal mark their uploads.
     pub shared_file: bool,
@@ -212,6 +214,7 @@ fn content_of(mut message: Message) -> Option<(Content, Meta)> {
             .iter()
             .any(|p| p.is("markable", xmpp_parsers::ns::DISPLAYED_MARKERS)),
         reply_to: omtalk_xmpp::replies::reply_of(&message).map(|r| r.id),
+        replaces: omtalk_xmpp::corrections::replaces(&message),
         shared_file: false,
     };
     let body = message.get_best_body_cloned(vec![]).map(|(_, b)| b);

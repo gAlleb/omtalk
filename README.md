@@ -139,7 +139,11 @@ switches focus.
 
 Commands: `/msg`, `/join`, `/leave`, `/add`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/reply`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+`/name`, `/nick`, `/reply`, `/edit`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+
+Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last message of
+the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
+message, yours or someone else's, changes in place and is marked "edited".
 
 A chat is closed with `/close`, prefix+`w` or a middle click on it in the list: it leaves
 the list, its history stays, and it comes back by itself when someone writes in it.

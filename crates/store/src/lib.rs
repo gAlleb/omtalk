@@ -94,6 +94,7 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (account, jid, device)
     );
     ",
+    history::MIGRATION_EDITED,
 ];
 
 #[derive(Clone)]

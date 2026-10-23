@@ -78,6 +78,7 @@ mod tests {
             reply_to: None,
             archive_id: None,
             untrusted: false,
+            edited: false,
         };
         store.save_message(&me, &message).unwrap();
         assert!(
