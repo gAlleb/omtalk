@@ -484,11 +484,11 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| chat.account.to_string()),
             };
-            // Where OMEMO is off (an IRC channel, an open room) all is plain: nothing
-            // is marked so. Where it is on, a plain message is worth the mark.
+            // Where OMEMO is off (an IRC channel, an open room) every message is plain:
+            // the short mark. Where it is on, a plain message gets the full one.
             let mut icons = app.icons;
             if !chat.omemo {
-                icons.plain_mark = "";
+                icons.plain_mark = icons.plain_mark_open_chat;
             }
             let mut rows = message_rows(&chat.lines, width, icons, &ready, &own);
             // Above the oldest message, while older ones may be had: a click (or
@@ -3073,10 +3073,11 @@ mod tests {
         assert!(text.contains("привет"));
         let mark = format!("{}это без шифрования", theme::nerd().plain_mark);
         assert!(text.contains(&mark), "plain text is marked\n{text}");
-        // In a chat with OMEMO off, all is plain and nothing is marked.
+        // In a chat with OMEMO off, every message is plain: the lock-open icon alone.
         app.chats[app.selected.unwrap()].omemo = false;
         let text = screen(&mut app, 120, 20);
-        assert!(!text.contains(&mark) && text.contains("это без шифрования"), "{text}");
+        let short = format!("{}это без шифрования", theme::nerd().plain_mark_open_chat);
+        assert!(!text.contains(&mark) && text.contains(&short), "{text}");
         app.chats[app.selected.unwrap()].omemo = true;
         let text = screen(&mut app, 120, 20);
         assert!(text.contains(theme::nerd().locked), "the lock on the input");

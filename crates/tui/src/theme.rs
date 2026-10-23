@@ -137,9 +137,10 @@ pub struct Icons {
     pub locked: &'static str,
     /// On the input box while it is off.
     pub unlocked: &'static str,
-    /// Before a message that came without encryption, in a chat where OMEMO is on (in
-    /// one where it is off, all are so, and none is marked).
+    /// Before a message that came without encryption.
     pub plain_mark: &'static str,
+    /// The same in a chat with OMEMO off, where every message is so: shorter.
+    pub plain_mark_open_chat: &'static str,
     /// After a chat's name in the list when its OMEMO is off.
     pub chat_unlocked: &'static str,
     /// Before a shared picture's or file's name.
@@ -160,7 +161,8 @@ pub fn nerd() -> Icons {
     Icons {
         locked: "\u{f023} OMEMO",
         unlocked: tr!("\u{f09c} unencrypted", "\u{f09c} без шифрования"),
-        plain_mark: "\u{f09c} ",
+        plain_mark: tr!("\u{f09c} unencrypted · ", "\u{f09c} без шифрования · "),
+        plain_mark_open_chat: "\u{f09c} ",
         chat_unlocked: " \u{f09c}",
         picture: "\u{f03e}",
         file: "\u{f15b}",
@@ -175,7 +177,8 @@ pub fn text_icons() -> Icons {
     Icons {
         locked: "[OMEMO]",
         unlocked: tr!("[unencrypted]", "[без шифрования]"),
-        plain_mark: tr!("[open] ", "[откр.] "),
+        plain_mark: tr!("[unencrypted] · ", "[без шифрования] · "),
+        plain_mark_open_chat: tr!("[unencrypted] · ", "[без шифрования] · "),
         chat_unlocked: tr!(" [open]", " [откр.]"),
         picture: tr!("[picture]", "[картинка]"),
         file: tr!("[file]", "[файл]"),

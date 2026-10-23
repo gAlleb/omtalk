@@ -14,7 +14,7 @@
 - **A room closed stays closed** after a restart: `/close` hides it here only (other clients still enter it), `/leave` leaves for good, turning off "enter by itself" in its bookmark for all your clients. `/join` opens it again.
 - **Folded folders and accounts stay folded** after a restart.
 - **The buttons of a service's form are reached with Tab** after the last field; ←/→ go between them, Enter presses the one picked; the keys are told under the field's description, not instead of it.
-- **The unencrypted mark is short and only where it says something**: a lock-open icon ("[open]" in text mode) before a plain message in a chat with OMEMO on; none in a chat with it off, as an IRC channel, where all is plain.
+- **In a chat with OMEMO off the unencrypted mark is the lock-open icon alone** (an IRC channel had "unencrypted ·" on every line); in a chat with OMEMO on a plain message keeps the icon and the words.
 - **The buttons below a service listing too** (Back, Reload, Close): Tab reaches them, ←/→ and Enter; each shows its key.
 - **Folders change places**: drag a folder's heading on to another, or `/folder-up`, `/folder-down` for the open chat's folder. The server channel stands right under its account, before the folders.
 - **A chat closed once and opened again with `/msg` or a click stays in the list** after a restart; it used to need a message in it first.
