@@ -866,7 +866,8 @@ impl App {
         };
         let key = (chat.account.clone(), chat.jid.clone());
         let room = chat.is_room();
-        let typing = !self.input.trim().is_empty() && !self.input.trim_start().starts_with('/');
+        let typing = !self.input.trim().is_empty()
+            && (!self.input.trim_start().starts_with('/') || is_action(self.input.trim_start()));
         let state = if typing {
             ChatState::Composing
         } else {
@@ -1785,7 +1786,8 @@ impl App {
         if input.trim().is_empty() {
             return Vec::new();
         }
-        if input.trim_start().starts_with('/') {
+        // "/me waves" is a message, sent as it is (XEP-0245); other "/…" are commands.
+        if input.trim_start().starts_with('/') && !is_action(input.trim_start()) {
             return self.command(input.trim());
         }
         // A pasted block keeps its indentation; only empty lines around it go.
@@ -2008,6 +2010,12 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/me", _) => {
+                return self.say(tr!(
+                    "/me TEXT says what you do, as in IRC",
+                    "/me ТЕКСТ — о себе в третьем лице, как в IRC"
+                ));
+            }
             ("/settings", _) => return self.open_settings(),
             ("/commands", _) => return self.open_chat_commands(),
             ("/nick", _) => match self.current().filter(|c| c.is_room()) {
@@ -3238,6 +3246,17 @@ impl App {
             _ => Vec::new(),
         }
     }
+}
+
+/// Whether `text` is an action, "/me waves" (XEP-0245), shown as "* nick waves".
+pub fn is_action(text: &str) -> bool {
+    text.strip_prefix("/me")
+        .is_some_and(|rest| rest.starts_with([' ', '\n']) && !rest.trim().is_empty())
+}
+
+/// What an action says, after "/me "; `None` for a plain message.
+pub fn action_of(text: &str) -> Option<&str> {
+    is_action(text).then(|| text["/me".len()..].trim_start_matches([' ', '\n']))
 }
 
 #[cfg(test)]

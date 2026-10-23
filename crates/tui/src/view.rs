@@ -1002,6 +1002,45 @@ pub fn message_rows(
         } else {
             body_width.saturating_sub(marker.width()).max(1)
         };
+        // An action, "/me waves": "* bob waves", as IRC and Gajim show it (XEP-0245).
+        if let Some(action) = crate::app::action_of(&line.text) {
+            let who_style = if line.outgoing {
+                Style::default()
+                    .fg(theme::outgoing())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme::nick(&line.who)
+            };
+            let text_style = Style::default().fg(theme::text()).add_modifier(Modifier::ITALIC);
+            let lead = format!("* {} ", line.who);
+            let mut first = true;
+            for part in wrap(&format!("{lead}{action}"), text_width) {
+                let mut spans = vec![Span::raw("  ")];
+                if !line.encrypted {
+                    let mark = if first {
+                        marker.to_owned()
+                    } else {
+                        " ".repeat(marker.width())
+                    };
+                    spans.push(Span::styled(mark, Style::default().fg(theme::warn())));
+                }
+                match part.strip_prefix(&lead).filter(|_| first) {
+                    Some(rest) => {
+                        spans.push(Span::styled("* ", text_style));
+                        spans.push(Span::styled(
+                            line.who.clone(),
+                            who_style.add_modifier(Modifier::ITALIC),
+                        ));
+                        spans.push(Span::styled(format!(" {rest}"), text_style));
+                    }
+                    None => spans.push(Span::styled(part, text_style)),
+                }
+                rows.push(TextLine::from(spans).into());
+                first = false;
+            }
+            push_delivery(&mut rows, line, body_width, false);
+            continue;
+        }
         // A reply: whom it answers, if that message is here, then its quote as a block.
         if let Some(answered) = &line.reply_to
             && let Some(original) = lines
@@ -5366,5 +5405,36 @@ mod tests {
             ),
             "home.org"
         );
+    }
+
+    #[test]
+    fn me_is_sent_as_written_and_shown_as_an_action() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        assert!(crate::app::is_action("/me waves"));
+        assert!(!crate::app::is_action("/me"), "nothing to say");
+        assert!(!crate::app::is_action("/meet"), "another word");
+        assert_eq!(crate::app::action_of("/me машет рукой"), Some("машет рукой"));
+
+        let mut app = app_with_chat();
+        app.focus = Focus::Input;
+        for c in "/me машет рукой".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let actions = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Send { text, .. } if text == "/me машет рукой")),
+            "sent as written, for every client to show its way: {actions:?}"
+        );
+        let index = app.selected.unwrap();
+        app.push(
+            index,
+            Line::message(1_700_000_100, "bob".into(), "/me смеётся".into(), true, false),
+        );
+        let text = screen(&mut app, 120, 24);
+        assert!(text.contains("* bob смеётся"), "{text}");
+        assert!(text.contains("* я машет рукой"), "one's own too: {text}");
+        assert!(!text.contains("/me"), "{text}");
     }
 }

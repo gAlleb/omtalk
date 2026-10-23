@@ -606,7 +606,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             {
                 let (who, room) = app.notice_names(&account, &message);
                 let (person, room_avatar) = app.notice_avatars(&account, &message);
-                let (chat, text) = (message.peer.to_string(), text.clone());
+                // An action reads as one: "* bob waves".
+                let text = match crate::app::action_of(text) {
+                    Some(action) => format!("* {who} {action}"),
+                    None => text.clone(),
+                };
+                let chat = message.peer.to_string();
                 // The icon is made aside (once per pair of avatars), then the notification goes.
                 tokio::task::spawn_blocking(move || {
                     let avatars = config::cache_dir().join("avatars");

@@ -90,6 +90,14 @@ pub const COMMANDS: &[Command] = &[
         about: ["send a file or a picture", "отправить файл или картинку"],
     },
     Command {
+        name: "/me",
+        args: ["TEXT", "ТЕКСТ"],
+        about: [
+            "say what you do: * nick text, as in IRC",
+            "о себе в третьем лице: * ник текст, как в IRC",
+        ],
+    },
+    Command {
         name: "/reply",
         args: ["", ""],
         about: [

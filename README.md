@@ -131,7 +131,7 @@ switches focus.
 
 Commands: `/msg`, `/join`, `/leave`, `/add`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/reply`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+`/name`, `/nick`, `/reply`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
 
 A chat is closed with `/close`, prefix+`w` or a middle click on it in the list: it leaves
 the list, its history stays, and it comes back by itself when someone writes in it.
@@ -147,6 +147,9 @@ Messages are styled as in Conversations, Gajim, Monal and Dino (XEP-0393): `*str
 `_emphasis_`, `~strike~`, `` `code` ``, a block of preformatted text between ```` ``` ````
 lines, and `>` quotes anywhere in a message. The directives stay visible, dimmed, so
 copied text is what was written; nothing is styled inside code.
+
+`/me waves` goes as written and is shown as `* nick waves`, as in IRC and Gajim
+(XEP-0245).
 
 ## Files and pictures
 

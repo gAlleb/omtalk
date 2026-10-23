@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`/me`**, as in IRC (XEP-0245): sent as written, shown as `* nick text`, in notifications too.
+
 ## 0.1.2 — 2026-10-23
 
 - **A chat's own commands**, as Gajim's "Execute command": `/commands` or prefix+`c`; in a biboumi channel `←` goes on to the IRC server's commands.
