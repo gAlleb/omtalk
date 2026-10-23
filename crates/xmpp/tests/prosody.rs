@@ -899,3 +899,39 @@ async fn a_password_changed_elsewhere_stops_the_account_with_why() {
     .await;
     refused.expect("the refused password is said, not retried forever in silence");
 }
+
+/// A node made by omtalk keeps every bookmark, not the last one only (a PEP node keeps one
+/// item unless told otherwise).
+#[tokio::test]
+async fn a_bookmark_node_made_here_keeps_all_of_them() {
+    use omtalk_xmpp::bookmarks::Bookmark;
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u74")).await;
+    online(&mut events, &[&owner]).await;
+    let rooms: Vec<BareJid> = (0..3)
+        .map(|i| {
+            format!("bm{i}-{}@muc.localhost", std::process::id())
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    for room in &rooms {
+        let bookmark = Bookmark {
+            room: room.clone(),
+            name: None,
+            nick: None,
+            autojoin: true,
+        };
+        owner.bookmark(&bookmark).await.unwrap();
+    }
+    let read: Vec<BareJid> = owner
+        .bookmarks()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.room)
+        .collect();
+    for room in &rooms {
+        assert!(read.contains(room), "{room} lost: {read:?}");
+    }
+}

@@ -34,8 +34,22 @@ impl Access {
     }
 }
 
+/// Nodes of one item per thing (a bookmark per room, a read mark per chat): a node
+/// keeps one item only unless told otherwise, and each new one would drop the others.
+const MANY_ITEMS: [&str; 2] = [crate::bookmarks::NODE, crate::receipts::MDS];
+
+/// How the node is to be: who reads it, and for one of many items, that all are kept
+/// (XEP-0402, 5; XEP-0490).
+fn node_options(node: &str, access: Access) -> Vec<Field> {
+    let mut fields = vec![Field::text_single("pubsub#access_model", access.model())];
+    if MANY_ITEMS.contains(&node) {
+        fields.push(Field::text_single("pubsub#persist_items", "true"));
+        fields.push(Field::text_single("pubsub#max_items", "max"));
+    }
+    fields
+}
+
 pub(crate) fn publish_request(node: &str, id: Option<&str>, payload: Element, access: Access) -> PubSub {
-    let access_model = access.model();
     PubSub::Publish {
         publish: Publish {
             node: NodeName(node.to_owned()),
@@ -49,7 +63,7 @@ pub(crate) fn publish_request(node: &str, id: Option<&str>, payload: Element, ac
             form: Some(DataForm::new(
                 DataFormType::Submit,
                 PUBLISH_OPTIONS_FORM,
-                vec![Field::text_single("pubsub#access_model", access_model)],
+                node_options(node, access),
             )),
         }),
     }
@@ -65,7 +79,8 @@ pub(crate) fn options_conflict(error: &StanzaError) -> bool {
             .is_some_and(|e| e.is("precondition-not-met", ns::PUBSUB_ERRORS))
 }
 
-/// Changes the node's access model, as its owner.
+/// Sets the node as it is to be, as its owner: one made with other settings (by another
+/// client, or by omtalk before it kept all bookmarks) is put right.
 pub(crate) fn configure_request(node: &str, access: Access) -> Owner {
     Owner {
         payload: OwnerPayload::Configure {
@@ -73,7 +88,7 @@ pub(crate) fn configure_request(node: &str, access: Access) -> Owner {
             form: Some(DataForm::new(
                 DataFormType::Submit,
                 ns::PUBSUB_CONFIGURE,
-                vec![Field::text_single("pubsub#access_model", access.model())],
+                node_options(node, access),
             )),
         },
     }
