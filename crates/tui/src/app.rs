@@ -709,6 +709,8 @@ pub struct App {
     pub folders: Vec<Folder>,
     /// The account commands act for: the last one picked, by its chat or its heading.
     pub active: Option<BareJid>,
+    /// Contacts' names in each account's roster: a chat with one opened later takes it.
+    pub names: BTreeMap<(BareJid, BareJid), String>,
     /// When Ctrl+C was pressed once: a second one within [`QUIT_AGAIN`] quits.
     pub quit_asked: Option<std::time::Instant>,
     pub quit: bool,
@@ -787,6 +789,7 @@ impl App {
             active: None,
             quit: false,
             quit_asked: None,
+            names: BTreeMap::new(),
         }
     }
 
@@ -796,6 +799,26 @@ impl App {
 
     fn current_mut(&mut self) -> Option<&mut Chat> {
         self.selected.and_then(|i| self.chats.get_mut(i))
+    }
+
+    /// Takes the names contacts have in `account`'s roster for the chats with them, now
+    /// and for those opened later. A name taken away leaves the address.
+    pub fn contact_names(&mut self, account: &BareJid, names: Vec<(BareJid, Option<String>)>) {
+        for (jid, name) in names {
+            let name = name.filter(|n| !n.trim().is_empty());
+            for chat in self
+                .chats
+                .iter_mut()
+                .filter(|c| &c.account == account && c.jid == jid && c.kind == ChatKind::Direct)
+            {
+                chat.name = name.clone();
+            }
+            let key = (account.clone(), jid);
+            match name {
+                Some(name) => drop(self.names.insert(key, name)),
+                None => drop(self.names.remove(&key)),
+            }
+        }
     }
 
     /// The chat with `jid` on `account`, made if needed.
@@ -820,7 +843,11 @@ impl App {
             }
             return index;
         }
-        self.chats.push(Chat::new(account.clone(), jid.clone(), kind));
+        let mut chat = Chat::new(account.clone(), jid.clone(), kind);
+        if chat.kind == ChatKind::Direct {
+            chat.name = self.names.get(&(account.clone(), jid.clone())).cloned();
+        }
+        self.chats.push(chat);
         if self.selected.is_none() {
             self.selected = Some(self.chats.len() - 1);
         }
@@ -3688,6 +3715,38 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert_eq!(app.on_mouse(click), [Action::Open("/cache/p.png".into())]);
+    }
+
+    #[test]
+    fn a_contact_is_called_by_its_name_in_the_roster() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.contact_names(
+            &me,
+            vec![
+                (jid("bob@example.org"), Some("Боб".into())),
+                (jid("team@muc.example.org"), Some("not a room's name".into())),
+                (jid("carol@example.org"), Some("Кэрол".into())),
+            ],
+        );
+        assert_eq!(app.chats[bob].title(), "Боб");
+        assert_eq!(app.chats[room].title(), "team", "a room keeps its own");
+        let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
+        assert_eq!(app.chats[carol].title(), "Кэрол", "a chat opened later takes it");
+        // Renamed to nothing: the address again; another account's roster changes nothing.
+        app.contact_names(&me, vec![(jid("bob@example.org"), None)]);
+        assert_eq!(app.chats[bob].title(), "bob");
+        app.contact_names(
+            &jid("work@example.org"),
+            vec![(jid("carol@example.org"), Some("x".into()))],
+        );
+        assert_eq!(app.chats[carol].title(), "Кэрол");
     }
 
     #[test]

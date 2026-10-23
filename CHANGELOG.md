@@ -9,6 +9,7 @@
 - A request whose answer never comes no longer keeps what was waiting for it.
 - **Every letter typed away from the input line goes into it**: the panes no longer keep `j`/`k`, `g`, `r`, `z`, `m` or Space; they move with the arrows, Home/End and the mouse (a reply: prefix+`a`, `/reply` or a double click; folding: `←`; only the current account: prefix+`z`).
 - **Ctrl+C quits only when pressed twice** within three seconds; the first says so.
+- **Contacts go by their names from the roster** in the chat list and the chat's title; a rename in another client shows at once.
 
 ## 0.1.3 — 2026-10-23
 

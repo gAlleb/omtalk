@@ -296,6 +296,11 @@ enum Msg {
         room: BareJid,
         name: Option<String>,
     },
+    /// Names the account's contacts have in its roster (none: the address shows).
+    Names {
+        account: BareJid,
+        names: Vec<(BareJid, Option<String>)>,
+    },
     /// A room's subject; `by` is who changed it, none when it is told on entering.
     Topic {
         account: BareJid,
@@ -777,6 +782,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             Some(hash) => drop(app.avatars.insert(jid, hash)),
             None => drop(app.avatars.remove(&jid)),
         },
+        Msg::Names { account, names } => app.contact_names(&account, names),
         Msg::RoomName { account, room, name } => {
             if let Some(chat) = app
                 .chats
@@ -1105,6 +1111,11 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     });
                 }
             }
+            // A contact renamed (or added) by one of the account's clients.
+            Event::Roster(contacts) => tell(Msg::Names {
+                account: account.clone(),
+                names: contacts.iter().map(|c| (c.jid.clone(), c.name.clone())).collect(),
+            }),
             Event::Pep {
                 from, node, items, ..
             } if node == avatar::METADATA => match avatar::metadata_of(items) {
@@ -1237,6 +1248,13 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             chat: None,
             text: format!("OMEMO: {e}"),
         }),
+    }
+    // The contacts' names, for the chats with them.
+    if let Ok(contacts) = xmpp.roster().await {
+        tell(Msg::Names {
+            account: account.clone(),
+            names: contacts.into_iter().map(|c| (c.jid, c.name)).collect(),
+        });
     }
     match omemo.catch_up().await {
         Ok(caught) => {
