@@ -21,6 +21,9 @@ pub enum Error {
     /// the account's other devices, so it is left as it is.
     #[error("the own OMEMO device list on the server cannot be read; it is left as it is")]
     UnreadableOwnList,
+    /// A device never seen before that its account does not list: someone making one up.
+    #[error("device {device} is not in the device list of {jid}")]
+    UnlistedDevice { jid: BareJid, device: DeviceId },
     #[error("device {device} of {jid} presents a different identity key than before")]
     IdentityChanged { jid: BareJid, device: DeviceId },
 }

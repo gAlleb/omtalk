@@ -224,7 +224,9 @@ impl Omemo {
                 Ok(None)
             }
             Event::Presence(presence) => {
-                if let Some(occupant) = muc::occupant(presence) {
+                // Only a room one is in says who is in it: anyone can send a presence
+                // that looks like a room's, naming whoever they like.
+                if let Some(occupant) = muc::occupant(presence).filter(|o| self.account.in_room(&o.room)) {
                     let mut rooms = self.occupants.lock().await;
                     let room = rooms.entry(occupant.room).or_default();
                     match occupant.real_jid {
@@ -232,6 +234,16 @@ impl Omemo {
                         _ => drop(room.remove(&occupant.nick)),
                     }
                 }
+                Ok(None)
+            }
+            // A groupchat message from a room one is not in is no room's: nobody's to show.
+            Event::Message(message)
+                if message.type_ == MessageType::Groupchat
+                    && !message
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| self.account.in_room(&from.to_bare())) =>
+            {
                 Ok(None)
             }
             Event::Message(message) if message.type_ == MessageType::Groupchat => {
@@ -335,6 +347,17 @@ impl Omemo {
         let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &encrypted)?;
 
         let identity = *decrypted.received.session.their_identity();
+        // A device seen for the first time must be one its account lists: else anyone
+        // who passes for the account (a made-up room, a forged archive) could slip in
+        // a key of their own as one of its devices.
+        if !state.identities.contains_key(&(envelope.sender.clone(), device))
+            && !self.listed(&mut state, &envelope.sender, device).await?
+        {
+            return Err(Error::UnlistedDevice {
+                jid: envelope.sender.clone(),
+                device,
+            });
+        }
         self.record_identity(&mut state, &envelope.sender, device, &identity)?;
 
         // A device missing from the cached list means the cache is stale: drop it, so
@@ -783,6 +806,30 @@ impl Omemo {
 
     /// Records a device's first identity key, with the trust it starts with (BTBV), and
     /// refuses a changed one.
+    /// Whether `jid` lists `device`: the cached list, else the list read afresh.
+    async fn listed(&self, state: &mut State, jid: &BareJid, device: DeviceId) -> Result<bool, Error> {
+        if state
+            .device_lists
+            .get(jid)
+            .is_some_and(|list| list.contains(&device))
+        {
+            return Ok(true);
+        }
+        let list = match self.account.items(jid, DEVICE_LIST_NODE).await {
+            Ok(items) => parse_device_list(&items),
+            // No list at all: no device is listed.
+            Err(omtalk_xmpp::Error::Stanza(e))
+                if e.defined_condition == omtalk_xmpp::stanza_error::DefinedCondition::ItemNotFound =>
+            {
+                BTreeSet::new()
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let listed = list.contains(&device);
+        state.device_lists.insert(jid.clone(), list);
+        Ok(listed)
+    }
+
     fn record_identity(
         &self,
         state: &mut State,

@@ -945,7 +945,9 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 ),
             }),
             Event::Message(message) => {
-                if let Some((room, by, topic)) = muc::subject_of(message) {
+                if let Some((room, by, topic)) =
+                    muc::subject_of(message).filter(|(room, ..)| xmpp.in_room(room))
+                {
                     tell(Msg::Topic {
                         account: account.clone(),
                         room,
@@ -966,7 +968,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         ),
                     });
                 }
-                if let Some(room) = muc::config_changed(message) {
+                if let Some(room) = muc::config_changed(message).filter(|room| xmpp.in_room(room)) {
                     tokio::spawn(perform(
                         Action::RoomName {
                             account: account.clone(),
@@ -1055,7 +1057,9 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         online,
                     });
                 }
-                if let Some(occupant) = muc::occupant(presence) {
+                // Only a room one is in says who is in it (anyone can send a presence
+                // that looks like a room's).
+                if let Some(occupant) = muc::occupant(presence).filter(|o| xmpp.in_room(&o.room)) {
                     tell(Msg::Occupant {
                         account: account.clone(),
                         room: occupant.room,

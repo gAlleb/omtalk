@@ -85,14 +85,23 @@ impl Account {
             .with_resource_str(nick)
             .map_err(|e| Error::Unexpected(e.to_string()))?;
         let muc = Muc::new().with_history(History::new().with_maxstanzas(0));
-        self.join_room(room.clone(), Presence::available().with_to(to).with_payload(muc))
-            .await
+        // Counted in already: the room tells who is there before it confirms the entry.
+        let was_in = self.in_room(room);
+        self.entered(room, true);
+        let joined = self
+            .join_room(room.clone(), Presence::available().with_to(to).with_payload(muc))
+            .await;
+        if joined.is_err() && !was_in {
+            self.entered(room, false);
+        }
+        joined
     }
 
     pub async fn leave(&self, room: &BareJid, nick: &str) -> Result<(), Error> {
         let to = room
             .with_resource_str(nick)
             .map_err(|e| Error::Unexpected(e.to_string()))?;
+        self.entered(room, false);
         self.send(Presence::unavailable().with_to(to)).await
     }
 

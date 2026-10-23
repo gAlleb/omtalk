@@ -131,15 +131,28 @@ pub(crate) fn open_room_archived(
         .unwrap_or_default();
     // Read by hand: xmpp-parsers wants a full JID here, as presences carry, but the
     // archive stores the bare one, and the whole element would fail to parse.
-    let real = message
+    // The room adds its item naming the writer, but keeps one the writer put in
+    // themselves: two items, and which is the room's cannot be told, so the writer
+    // is not known. Only one is the room's word.
+    let items: Vec<&xmpp_parsers::minidom::Element> = message
         .payloads
         .iter()
         .filter(|p| p.is("x", xmpp_parsers::ns::MUC_USER))
         .flat_map(|x| x.children())
-        .find(|item| item.is("item", xmpp_parsers::ns::MUC_USER))
-        .and_then(|item| item.attr(xmpp_parsers::minidom::rxml::xml_ncname!("jid")))
-        .and_then(|jid| jid.parse::<omtalk_xmpp::Jid>().ok())
-        .map(|jid| jid.to_bare());
+        .filter(|item| {
+            item.is("item", xmpp_parsers::ns::MUC_USER)
+                && item
+                    .attr(xmpp_parsers::minidom::rxml::xml_ncname!("jid"))
+                    .is_some()
+        })
+        .collect();
+    let real = match items[..] {
+        [item] => item
+            .attr(xmpp_parsers::minidom::rxml::xml_ncname!("jid"))
+            .and_then(|jid| jid.parse::<omtalk_xmpp::Jid>().ok())
+            .map(|jid| jid.to_bare()),
+        _ => None,
+    };
     room_envelope(own, room, nick, real, message)
 }
 

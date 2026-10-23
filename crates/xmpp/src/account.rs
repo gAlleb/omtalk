@@ -58,6 +58,10 @@ pub struct Account {
     jid: BareJid,
     commands: mpsc::Sender<Command>,
     iq_timeout: Duration,
+    /// The rooms this account entered (or is entering) and has not left: only they may
+    /// say who their occupants are and speak in groupchat. Anyone can send a presence
+    /// or a groupchat message that looks like a room's.
+    rooms: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<BareJid>>>,
 }
 
 impl Account {
@@ -73,6 +77,21 @@ impl Account {
             jid,
             commands,
             iq_timeout,
+            rooms: Default::default(),
+        }
+    }
+
+    /// Whether `room` is one this account entered and has not left.
+    pub fn in_room(&self, room: &BareJid) -> bool {
+        self.rooms.lock().unwrap().contains(room)
+    }
+
+    pub(crate) fn entered(&self, room: &BareJid, yes: bool) {
+        let mut rooms = self.rooms.lock().unwrap();
+        if yes {
+            rooms.insert(room.clone());
+        } else {
+            rooms.remove(room);
         }
     }
 
