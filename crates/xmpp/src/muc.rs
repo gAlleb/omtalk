@@ -7,7 +7,7 @@ use xmpp_parsers::minidom::Element;
 use xmpp_parsers::minidom::rxml::xml_ncname;
 use xmpp_parsers::muc::Muc;
 use xmpp_parsers::muc::muc::History;
-use xmpp_parsers::muc::user::{Affiliation, MucUser, Role, Status};
+use xmpp_parsers::muc::user::{Affiliation, Role};
 use xmpp_parsers::ns;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::DefinedCondition;
@@ -37,28 +37,54 @@ pub struct Occupant {
     pub status: crate::presence::OwnStatus,
 }
 
+/// A room's word about one of its occupants (`<x xmlns=muc#user>`), read leniently: a
+/// gateway such as biboumi gives the real address without a resource, which the strict
+/// parser refuses, dropping the occupant; Gajim takes it.
+struct UserItem {
+    affiliation: Affiliation,
+    role: Role,
+    jid: Option<BareJid>,
+    nick: Option<String>,
+    codes: Vec<u16>,
+}
+
+fn user_item(payloads: &[Element]) -> Option<UserItem> {
+    let x = payloads.iter().find(|p| p.is("x", ns::MUC_USER))?;
+    let item = x.children().find(|c| c.is("item", ns::MUC_USER))?;
+    let attr = |name| item.attr(name).map(str::to_owned);
+    Some(UserItem {
+        affiliation: attr(xml_ncname!("affiliation"))
+            .and_then(|a| a.parse().ok())
+            .unwrap_or(Affiliation::None),
+        role: attr(xml_ncname!("role"))
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(Role::None),
+        jid: attr(xml_ncname!("jid"))
+            .and_then(|j| j.parse::<Jid>().ok())
+            .map(|j| j.to_bare()),
+        nick: attr(xml_ncname!("nick")),
+        codes: x
+            .children()
+            .filter(|c| c.is("status", ns::MUC_USER))
+            .filter_map(|c| c.attr(xml_ncname!("code"))?.parse().ok())
+            .collect(),
+    })
+}
+
 /// Reads a presence from a room occupant; `None` for any other presence.
 pub fn occupant(presence: &Presence) -> Option<Occupant> {
     let from = presence.from.as_ref()?.try_as_full().ok()?;
-    let user = presence
-        .payloads
-        .iter()
-        .find(|p| p.is("x", ns::MUC_USER))
-        .and_then(|p| MucUser::try_from(p.clone()).ok())?;
-    let item = user.items.first()?;
+    let item = user_item(&presence.payloads)?;
     Some(Occupant {
         room: from.to_bare(),
         nick: from.resource().to_string(),
-        real_jid: item.jid.as_ref().map(|jid| jid.to_bare()),
+        real_jid: item.jid.clone(),
         affiliation: item.affiliation.clone(),
         role: item.role.clone(),
-        is_self: user.status.contains(&Status::SelfPresence),
+        // 110: this presence is about oneself; 303: leaving for another nick.
+        is_self: item.codes.contains(&110),
         present: presence.type_ != PresenceType::Unavailable,
-        new_nick: user
-            .status
-            .contains(&Status::NewNick)
-            .then(|| item.nick.clone())
-            .flatten(),
+        new_nick: item.codes.contains(&303).then(|| item.nick.clone()).flatten(),
         status: crate::presence::OwnStatus {
             show: presence.show.clone(),
             text: presence.statuses.values().next().cloned(),
@@ -301,11 +327,13 @@ pub fn subject_of(message: &xmpp_parsers::message::Message) -> Option<(BareJid, 
 
 /// Whether a room says its configuration changed (status 104): its name may be new.
 pub fn config_changed(message: &xmpp_parsers::message::Message) -> Option<BareJid> {
-    let changed = message
-        .payloads
-        .iter()
-        .filter_map(|p| MucUser::try_from(p.clone()).ok())
-        .any(|user| user.status.contains(&Status::ConfigNonPrivacyRelated));
+    // 104, as the room says it; read leniently, as occupants are.
+    let changed = message.payloads.iter().any(|p| {
+        p.is("x", ns::MUC_USER)
+            && p.children()
+                .filter(|c| c.is("status", ns::MUC_USER))
+                .any(|c| c.attr(xml_ncname!("code")) == Some("104"))
+    });
     changed
         .then(|| message.from.as_ref().map(|f| f.to_bare()))
         .flatten()
@@ -337,6 +365,38 @@ pub fn invitation_of(message: &xmpp_parsers::message::Message) -> Option<(BareJi
 #[cfg(test)]
 mod invitation_tests {
     use super::*;
+
+    /// As biboumi sends them (from a log of Stefan's): the others with an address of
+    /// no resource, oneself with one.
+    #[test]
+    fn a_gateways_occupants_are_read_though_their_address_has_no_resource() {
+        let other: Presence = Element::from_reader_with_prefixes(
+            &br##"<presence xmlns="jabber:client" from="#vsue%irc.386.su@irc.noooooooo.ru/mouse"><x xmlns="http://jabber.org/protocol/muc#user"><item affiliation="admin" jid="mouse%irc.386.su@irc.noooooooo.ru" role="moderator"/></x></presence>"##[..],
+            None,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let read = occupant(&other).expect("an occupant");
+        assert_eq!(read.nick, "mouse");
+        assert_eq!(
+            read.real_jid,
+            Some("mouse%irc.386.su@irc.noooooooo.ru".parse().unwrap())
+        );
+        assert_eq!(
+            (read.affiliation, read.role, read.is_self, read.present),
+            (Affiliation::Admin, Role::Moderator, false, true)
+        );
+
+        let own: Presence = Element::from_reader_with_prefixes(
+            &br##"<presence xmlns="jabber:client" from="#vsue%irc.386.su@irc.noooooooo.ru/s[x]"><x xmlns="http://jabber.org/protocol/muc#user"><status code="100"/><status code="210"/><status code="110"/><item affiliation="none" jid="s[x]%irc.386.su@irc.noooooooo.ru/xmpp_perso@noooooooo.ru" role="participant"/></x></presence>"##[..],
+            None,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert!(occupant(&own).expect("oneself").is_self);
+    }
 
     #[test]
     fn both_kinds_of_invitation_are_read() {
