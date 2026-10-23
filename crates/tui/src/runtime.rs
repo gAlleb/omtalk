@@ -1544,10 +1544,12 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
         .into_iter()
         .map(|(room, _)| room)
         .collect();
-    // Read once for all of them; unread, each room asks again.
+    // Read once for all of them; unread, each room asks again. One closed here (/close,
+    // /leave) stays closed here, though the account's other clients still enter it.
     let marks = xmpp.bookmarks().await.ok();
+    let closed = shared.store.closed_chats(&account).unwrap_or_default();
     for mark in marks.iter().flatten() {
-        if mark.autojoin && !rooms.contains(&mark.room) {
+        if mark.autojoin && !rooms.contains(&mark.room) && !closed.contains(&mark.room) {
             rooms.push(mark.room.clone());
         }
     }
@@ -1609,6 +1611,10 @@ async fn join(
         // one the room gave, which its messages come back under.
         Ok(given) => {
             let _ = shared.store.remember_room(account, &room, &nick);
+            // Entered by hand: a room closed here before is open again.
+            if open {
+                let _ = shared.store.reopen_chat(account, &room);
+            }
             tell(Msg::Log {
                 account: account.clone(),
                 text: trf!("joined {room} as {nick}", "вход в {room} как {nick}"),

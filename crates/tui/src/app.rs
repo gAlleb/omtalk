@@ -2576,17 +2576,25 @@ impl App {
                 let nick = args.get(1).map(|n| n.to_string());
                 Ok(vec![Action::Join { account, room, nick }])
             }
+            // Left, and closed here: not entered again on the next start, though its
+            // bookmark stays for the account's other clients.
             ("/leave", _) => match self.current() {
                 Some(Chat {
                     jid,
                     kind: ChatKind::Room { nick },
                     account,
                     ..
-                }) => Ok(vec![Action::Leave {
-                    account: account.clone(),
-                    room: jid.clone(),
-                    nick: nick.clone(),
-                }]),
+                }) => Ok(vec![
+                    Action::CloseChat {
+                        account: account.clone(),
+                        jid: jid.clone(),
+                    },
+                    Action::Leave {
+                        account: account.clone(),
+                        room: jid.clone(),
+                        nick: nick.clone(),
+                    },
+                ]),
                 _ => Err(tr!("this is not a room", "это не комната").to_owned()),
             },
             ("/add", Some(jid)) => {
@@ -4367,6 +4375,28 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn a_room_left_is_closed_here_too() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let room = app.chat(
+            &me,
+            &jid("saved@muc.example.org"),
+            ChatKind::Room { nick: "s".into() },
+        );
+        app.select(room);
+        let actions = type_text(&mut app, "/leave");
+        assert!(
+            matches!(&actions[..], [Action::CloseChat { .. }, Action::Leave { .. }]),
+            "{actions:?}"
+        );
+        let actions = app.close_chat(room);
+        assert!(matches!(
+            &actions[..],
+            [Action::CloseChat { .. }, Action::Leave { .. }]
+        ));
     }
 
     #[test]

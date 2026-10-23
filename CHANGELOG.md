@@ -11,6 +11,7 @@
 - A reaction shows its count even when one person sent it ("👍 1").
 - **Your own messages in an IRC channel through biboumi no longer show twice.** biboumi names you by an address of its own and gives you the nick set in it (status 210); omtalk now knows itself by the room's "this is you" and takes the nick the room gave, so your messages coming back are yours, and the room check asks after the right nick.
 - **OMEMO turned off in a chat stays off** after a restart (and on, if turned on).
+- **A room closed with `/close` or `/leave` stays closed** after a restart, though its bookmark says to enter it (other clients still do); `/join` opens it again.
 - **The buttons of a service's form are reached with Tab** after the last field; ←/→ go between them, Enter presses the one picked; the keys are told under the field's description, not instead of it.
 
 ## 0.1.4 — 2026-10-23
