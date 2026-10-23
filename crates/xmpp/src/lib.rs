@@ -19,6 +19,7 @@ pub mod mam;
 pub mod muc;
 pub mod pep;
 pub mod presence;
+pub mod reactions;
 pub mod receipts;
 pub mod replies;
 pub mod roster;

@@ -106,6 +106,14 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/react",
+        args: ["EMOJI", "ЭМОДЗИ"],
+        about: [
+            "react to the selected or the last message; again, and it is taken back",
+            "реакция на выделенное или последнее сообщение; повторно — снять",
+        ],
+    },
+    Command {
         name: "/edit",
         args: ["", ""],
         about: [
@@ -350,7 +358,7 @@ mod tests {
         assert_eq!(complete("/ser"), Some((0, vec!["/services ".into()])));
         assert_eq!(
             complete("/re").unwrap().1,
-            ["/refuse ", "/rename-folder ", "/reply "]
+            ["/refuse ", "/rename-folder ", "/reply ", "/react "]
         );
         assert_eq!(
             commands_for("/f").iter().map(|c| c.name).collect::<Vec<_>>(),

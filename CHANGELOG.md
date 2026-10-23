@@ -11,6 +11,7 @@
 - **Ctrl+C quits only when pressed twice** within three seconds; the first says so.
 - **Contacts go by their names from the roster** in the chat list and the chat's title; a rename in another client shows at once.
 - **Corrections (XEP-0308)**: `/edit` corrects your last message; a corrected message, yours or another's, changes in place, marked "edited", also in encrypted chats and after a restart.
+- **Reactions (XEP-0444)**: `/react 👍` on the selected or the last message, again to take it back; others' show under their message with counts, kept after a restart.
 
 ## 0.1.3 — 2026-10-23
 

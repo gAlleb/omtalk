@@ -6,10 +6,12 @@
 mod closed;
 mod folders;
 mod history;
+mod reactions;
 mod seen;
 
 pub use folders::Folder;
 pub use history::{ChatSummary, Delivery, StoredMessage};
+pub use reactions::StoredReactions;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -95,6 +97,7 @@ const MIGRATIONS: &[&str] = &[
     );
     ",
     history::MIGRATION_EDITED,
+    reactions::MIGRATION,
 ];
 
 #[derive(Clone)]

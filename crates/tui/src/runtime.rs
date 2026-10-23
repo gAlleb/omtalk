@@ -296,6 +296,11 @@ enum Msg {
         room: BareJid,
         name: Option<String>,
     },
+    /// Someone's reactions to a message (XEP-0444).
+    Reactions {
+        account: BareJid,
+        reactions: omtalk_xmpp::reactions::Reactions,
+    },
     /// Names the account's contacts have in its roster (none: the address shows).
     Names {
         account: BareJid,
@@ -641,7 +646,29 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
             let messages = store
                 .recent_messages(account, &summary.chat, HISTORY)
                 .unwrap_or_default();
-            app.chats[index].lines.extend(stored_lines(messages));
+            let mut lines = stored_lines(messages);
+            with_reactions(
+                store,
+                account,
+                &summary.chat,
+                rooms.contains_key(&summary.chat),
+                &mut lines,
+            );
+            app.chats[index].lines.extend(lines);
+        }
+    }
+}
+
+/// The reactions kept for `chat`, onto its messages: by the room's id in a room, the
+/// sender's in a chat.
+fn with_reactions(store: &Store, account: &BareJid, chat: &BareJid, room: bool, lines: &mut [Line]) {
+    for kept in store.reactions(account, chat).unwrap_or_default() {
+        let line = lines.iter_mut().find(|l| {
+            let id = if room { &l.archive_id } else { &l.id };
+            id.as_deref() == Some(kept.message.as_str())
+        });
+        if let Some(line) = line {
+            line.reactions.insert(kept.by, kept.reactions);
         }
     }
 }
@@ -788,6 +815,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             None => drop(app.avatars.remove(&jid)),
         },
         Msg::Names { account, names } => app.contact_names(&account, names),
+        Msg::Reactions { account, reactions } => drop(app.reacted(&account, &reactions)),
         Msg::RoomName { account, room, name } => {
             if let Some(chat) = app
                 .chats
@@ -1077,6 +1105,23 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         chat,
                         who,
                         state,
+                    });
+                }
+                // Reactions, kept whether or not their message is on screen; in a room
+                // only from a room one is in.
+                if let Some(reactions) = omtalk_xmpp::reactions::reactions(&account, message)
+                    && (!reactions.room || xmpp.in_room(&reactions.chat))
+                {
+                    let _ = shared.store.set_reactions(
+                        &account,
+                        &reactions.chat,
+                        &reactions.id,
+                        &reactions.by,
+                        &reactions.reactions,
+                    );
+                    tell(Msg::Reactions {
+                        account: account.clone(),
+                        reactions,
                     });
                 }
                 for (mark, from) in receipts::marks(&account, message) {
@@ -1941,6 +1986,26 @@ async fn perform(action: Action, shared: Shared) {
                 }
             }
         }
+        Action::React {
+            account,
+            chat,
+            room,
+            id,
+            by,
+            reactions,
+        } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let message = omtalk_xmpp::reactions::message(&chat, room, &id, &reactions);
+            match xmpp.send(message).await {
+                Ok(()) | Err(omtalk_xmpp::Error::Queued) => {
+                    let _ = shared.store.set_reactions(&account, &chat, &id, &by, &reactions);
+                }
+                Err(e) => tell(Msg::Status(trf!(
+                    "reaction not sent: {e}",
+                    "реакция не ушла: {e}"
+                ))),
+            }
+        }
         Action::Join { account, room, nick } => {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
@@ -2379,10 +2444,12 @@ async fn perform(action: Action, shared: Shared) {
                 .recent_messages(&account, &peer, HISTORY)
                 .unwrap_or_default();
             if !kept.is_empty() {
+                let mut lines = stored_lines(kept);
+                with_reactions(&shared.store, &account, &peer, false, &mut lines);
                 tell(Msg::Restored {
                     account,
                     chat: peer,
-                    lines: stored_lines(kept),
+                    lines,
                 });
                 return;
             }

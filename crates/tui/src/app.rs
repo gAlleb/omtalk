@@ -61,6 +61,9 @@ pub struct Line {
     pub untrusted: bool,
     /// Corrected since it came (XEP-0308): the text is the corrected one.
     pub edited: bool,
+    /// Reactions to it (XEP-0444): whose (a nick in a room, an address otherwise), and
+    /// all of theirs.
+    pub reactions: BTreeMap<String, Vec<String>>,
     /// The id of the message this one answers (XEP-0461).
     pub reply_to: Option<String>,
     /// The id the archive gave it (a room's, in a room): replies in rooms name that.
@@ -132,6 +135,7 @@ impl Line {
             notice: false,
             untrusted: false,
             edited: false,
+            reactions: BTreeMap::new(),
             reply_to: None,
             archive_id: None,
             media,
@@ -360,6 +364,16 @@ pub enum Action {
         reply: Option<(omtalk_xmpp::replies::ReplyTo, usize)>,
         /// A correction (XEP-0308) of one's own message with this id.
         replace: Option<String>,
+    },
+    /// One's reactions to the message `id` (XEP-0444), all of them now; as `by` they
+    /// are kept.
+    React {
+        account: BareJid,
+        chat: BareJid,
+        room: bool,
+        id: String,
+        by: String,
+        reactions: Vec<String>,
     },
     Join {
         account: BareJid,
@@ -1544,6 +1558,7 @@ impl App {
                     notice: true,
                     untrusted: false,
                     edited: false,
+                    reactions: BTreeMap::new(),
                     reply_to: None,
                     archive_id: None,
                     media: None,
@@ -1870,6 +1885,89 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// Reacts with `reaction` to the message under the selection, else to the last one
+    /// from someone (`/react 👍`); again, and it is taken back.
+    pub fn react_here(&mut self, reaction: &str) -> Vec<Action> {
+        if reaction.is_empty() || reaction.chars().count() > 8 {
+            return self.say(tr!("as: /react 👍", "так: /react 👍"));
+        }
+        let Some(index) = self.selected else {
+            return Vec::new();
+        };
+        let under = self.selection.and_then(|(a, _)| {
+            self.areas
+                .message_lines
+                .iter()
+                .find(|(r, _)| r.y == a.1)
+                .map(|&(_, line)| line)
+        });
+        let chat = &mut self.chats[index];
+        let line = under.or_else(|| chat.lines.iter().rposition(|l| !l.notice && !l.outgoing));
+        let room = chat.is_room();
+        let by = match &chat.kind {
+            ChatKind::Room { nick } => nick.clone(),
+            _ => chat.account.to_string(),
+        };
+        let Some(line) = line.and_then(|i| chat.lines.get_mut(i)) else {
+            return self.say(tr!("nothing to react to", "не на что реагировать"));
+        };
+        // A room names the message by its own id for it, a chat by the sender's.
+        let id = if room {
+            line.archive_id.clone()
+        } else {
+            line.id.clone()
+        };
+        let Some(id) = id else {
+            return self.say(tr!(
+                "this message cannot be named to react to",
+                "на это сообщение не отреагировать: у него нет номера"
+            ));
+        };
+        let mine = line.reactions.entry(by.clone()).or_default();
+        match mine.iter().position(|r| r == reaction) {
+            Some(at) => drop(mine.remove(at)),
+            None => mine.push(reaction.to_owned()),
+        }
+        let reactions = mine.clone();
+        if reactions.is_empty() {
+            line.reactions.remove(&by);
+        }
+        self.selection = None;
+        vec![Action::React {
+            account: chat.account.clone(),
+            chat: chat.jid.clone(),
+            room,
+            id,
+            by,
+            reactions,
+        }]
+    }
+
+    /// Reactions come in: `by`'s, to the message `id` of the chat with `jid`. Whether the
+    /// message is here.
+    pub fn reacted(&mut self, account: &BareJid, reactions: &omtalk_xmpp::reactions::Reactions) -> bool {
+        let Some(chat) = self
+            .chats
+            .iter_mut()
+            .find(|c| &c.account == account && c.jid == reactions.chat && c.is_room() == reactions.room)
+        else {
+            return false;
+        };
+        let room = chat.is_room();
+        let line = chat.lines.iter_mut().rev().find(|l| {
+            let id = if room { &l.archive_id } else { &l.id };
+            !l.notice && id.as_deref() == Some(reactions.id.as_str())
+        });
+        let Some(line) = line else { return false };
+        if reactions.reactions.is_empty() {
+            line.reactions.remove(&reactions.by);
+        } else {
+            line.reactions
+                .insert(reactions.by.clone(), reactions.reactions.clone());
+        }
+        true
     }
 
     /// Starts a reply: to the message under the selection (quoting what is selected),
@@ -2320,6 +2418,10 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/react", _) => {
+                let reaction = line["/react".len()..].trim();
+                return self.react_here(reaction);
+            }
             ("/edit", _) => {
                 self.edit_last();
                 return Vec::new();
@@ -3769,6 +3871,51 @@ mod tests {
         type_text(&mut app, "/edit");
         app.on_key(key(KeyCode::Esc));
         assert!(app.editing.is_none() && app.input.is_empty());
+    }
+
+    #[test]
+    fn reactions_go_on_the_message_they_name_and_back_off_again() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        let mut line = Line::message(0, "bob".into(), "обед?".into(), true, false);
+        line.id = Some("b1".into());
+        app.chats[bob].lines.push(line);
+
+        let sent = type_text(&mut app, "/react 👍");
+        assert_eq!(
+            sent,
+            [Action::React {
+                account: me.clone(),
+                chat: jid("bob@example.org"),
+                room: false,
+                id: "b1".into(),
+                by: "me@example.org".into(),
+                reactions: vec!["👍".into()],
+            }]
+        );
+        let reactions = omtalk_xmpp::reactions::Reactions {
+            chat: jid("bob@example.org"),
+            room: false,
+            id: "b1".into(),
+            by: "bob@example.org".into(),
+            reactions: vec!["👍".into(), "❤".into()],
+        };
+        assert!(app.reacted(&me, &reactions));
+        assert_eq!(app.chats[bob].lines.last().unwrap().reactions.len(), 2);
+
+        // Again: one's own taken back, all of them gone now.
+        let sent = type_text(&mut app, "/react 👍");
+        assert!(matches!(&sent[..], [Action::React { reactions, .. }] if reactions.is_empty()));
+        let line = app.chats[bob].lines.last().unwrap();
+        assert_eq!(line.reactions.len(), 1, "bob's stay");
+        // Not to another chat's message, nor a room's.
+        let elsewhere = omtalk_xmpp::reactions::Reactions {
+            room: true,
+            ..reactions
+        };
+        assert!(!app.reacted(&me, &elsewhere));
     }
 
     #[test]

@@ -1199,6 +1199,36 @@ pub fn message_rows(
             }
         }
         push_delivery(&mut rows, line, body_width, false);
+        // Reactions (XEP-0444), each with how many sent it, in the order they came.
+        if !line.reactions.is_empty() {
+            let mut counts: Vec<(&str, usize)> = Vec::new();
+            for reaction in line.reactions.values().flatten() {
+                match counts.iter_mut().find(|(r, _)| r == reaction) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((reaction, 1)),
+                }
+            }
+            let text = counts
+                .iter()
+                .map(|(r, n)| {
+                    if *n > 1 {
+                        format!("{r} {n}")
+                    } else {
+                        (*r).to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            for part in wrap(&text, body_width.max(1)) {
+                rows.push(
+                    TextLine::from(vec![
+                        Span::raw("  "),
+                        Span::styled(part, Style::default().fg(theme::dim())),
+                    ])
+                    .into(),
+                );
+            }
+        }
     }
     // Every row of a message knows which message it is.
     for (index, start) in starts.iter().enumerate() {
@@ -5200,6 +5230,21 @@ mod tests {
         assert!(text.contains("nick39"), "{text}");
         app.on_mouse(wheel(MouseEventKind::ScrollUp));
         assert_eq!(app.people_cursor, 36);
+    }
+
+    #[test]
+    fn reactions_show_under_their_message_with_how_many_sent_them() {
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        let mut line = crate::app::Line::message(0, "bob".into(), "обед?".into(), true, false);
+        line.reactions
+            .insert("bob@example.org".into(), vec!["👍".into(), "❤".into()]);
+        line.reactions.insert("me@example.org".into(), vec!["👍".into()]);
+        app.chats[bob].lines.push(line);
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("👍 2  ❤"), "{text}");
     }
 
     #[test]
