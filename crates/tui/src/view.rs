@@ -484,7 +484,13 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| chat.account.to_string()),
             };
-            let mut rows = message_rows(&chat.lines, width, app.icons, &ready, &own);
+            // Where OMEMO is off (an IRC channel, an open room) all is plain: nothing
+            // is marked so. Where it is on, a plain message is worth the mark.
+            let mut icons = app.icons;
+            if !chat.omemo {
+                icons.plain_mark = "";
+            }
+            let mut rows = message_rows(&chat.lines, width, icons, &ready, &own);
             // Above the oldest message, while older ones may be had: a click (or
             // scrolling up past it) brings them.
             let more = !chat.older_done && chat.kind != ChatKind::Server && !chat.lines.is_empty();
@@ -3067,6 +3073,12 @@ mod tests {
         assert!(text.contains("привет"));
         let mark = format!("{}это без шифрования", theme::nerd().plain_mark);
         assert!(text.contains(&mark), "plain text is marked\n{text}");
+        // In a chat with OMEMO off, all is plain and nothing is marked.
+        app.chats[app.selected.unwrap()].omemo = false;
+        let text = screen(&mut app, 120, 20);
+        assert!(!text.contains(&mark) && text.contains("это без шифрования"), "{text}");
+        app.chats[app.selected.unwrap()].omemo = true;
+        let text = screen(&mut app, 120, 20);
         assert!(text.contains(theme::nerd().locked), "the lock on the input");
         assert!(
             !text.chars().any(|c| ('\u{1F300}'..='\u{1FAFF}').contains(&c)),
