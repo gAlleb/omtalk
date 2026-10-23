@@ -3342,8 +3342,8 @@ mod tests {
         let actions = app.on_mouse(click(name));
         assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
         assert!(
-            matches!(&actions[..], [Action::History { peer, .. }, Action::Devices { .. }] if peer.as_str() == "bob@example.org"),
-            "a new chat asks the archive for its history: {actions:?}"
+            matches!(&actions[..], [Action::History { peer, .. }, Action::Devices { .. }, Action::ReopenChat { .. }] if peer.as_str() == "bob@example.org"),
+            "a new chat asks the archive for its history, and is open for good: {actions:?}"
         );
         // Asked once: opened again, nothing more is read.
         app.select(room);

@@ -402,6 +402,11 @@ pub enum Action {
     },
     /// One's own status, for every account (`/away`, `/dnd`, `/online`).
     SetStatus(omtalk_xmpp::presence::OwnStatus),
+    /// A chat closed before is open again.
+    ReopenChat {
+        account: BareJid,
+        jid: BareJid,
+    },
     /// `room`'s bookmark no longer says to enter it by itself, for all the account's
     /// clients.
     NoAutojoin {
@@ -2035,7 +2040,7 @@ impl App {
                         let account = self.chats[self.selected.expect("a room")].account.clone();
                         let index = self.chat(&account, &member, ChatKind::Direct);
                         self.focus = Focus::Input;
-                        self.select(index)
+                        self.open(index)
                     }
                 };
             }
@@ -2568,7 +2573,7 @@ impl App {
         let result = match (name, jid(0)) {
             ("/msg", Some(jid)) => {
                 let index = self.chat(&account, &jid, ChatKind::Direct);
-                let mut actions = self.select(index);
+                let mut actions = self.open(index);
                 // `/msg JID text` also sends the text, as in other clients.
                 let text = line[name.len()..]
                     .trim_start()
@@ -3123,7 +3128,7 @@ impl App {
                 let real = real.clone();
                 let index = self.chat(&account, &real, ChatKind::Direct);
                 self.focus = Focus::Input;
-                self.select(index)
+                self.open(index)
             }
             Some(None) => {
                 self.status = trf!(
@@ -3837,6 +3842,19 @@ impl App {
         self.focus = Focus::Messages;
     }
 
+    /// Opens chat `index` by hand (`/msg`, a click on someone): shown, and no longer
+    /// closed in the store, or it would be gone again after a restart.
+    pub fn open(&mut self, index: usize) -> Vec<Action> {
+        let mut actions = self.select(index);
+        if let Some(chat) = self.chats.get(index) {
+            actions.push(Action::ReopenChat {
+                account: chat.account.clone(),
+                jid: chat.jid.clone(),
+            });
+        }
+        actions
+    }
+
     /// Asks for the open chat's messages before those it shows, once at a time.
     pub fn ask_older(&mut self) -> Vec<Action> {
         let Some(chat) = self.current_mut() else {
@@ -4045,7 +4063,7 @@ impl App {
                     };
                     let index = self.chat(&account, &person, ChatKind::Direct);
                     self.focus = Focus::Input;
-                    return self.select(index);
+                    return self.open(index);
                 } else if inside_opt(self.areas.side_devices) {
                     return self.open_keys(None);
                 } else if inside_opt(self.areas.older) {
@@ -4388,6 +4406,18 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn a_chat_opened_by_hand_is_no_longer_closed_in_the_store() {
+        let mut app = app();
+        let actions = type_text(&mut app, "/msg xff@example.org");
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::ReopenChat { jid, .. } if jid.as_str() == "xff@example.org")),
+            "{actions:?}"
+        );
     }
 
     #[test]

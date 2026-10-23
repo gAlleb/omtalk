@@ -14,6 +14,7 @@
 - **A room closed stays closed** after a restart: `/close` hides it here only (other clients still enter it), `/leave` leaves for good, turning off "enter by itself" in its bookmark for all your clients. `/join` opens it again.
 - **Folded folders and accounts stay folded** after a restart.
 - **The buttons of a service's form are reached with Tab** after the last field; ←/→ go between them, Enter presses the one picked; the keys are told under the field's description, not instead of it.
+- **A chat closed once and opened again with `/msg` or a click stays in the list** after a restart; it used to need a message in it first.
 - The right-click reactions draw evenly: 💖 instead of ❤️, which is two code points that tmux and terminals draw one or two cells wide (`/react heart` still sends ❤️).
 
 ## 0.1.4 — 2026-10-23

@@ -2298,6 +2298,9 @@ async fn perform(action: Action, shared: Shared) {
                 at,
             });
         }
+        Action::ReopenChat { account, jid } => {
+            let _ = shared.store.reopen_chat(&account, &jid);
+        }
         Action::NoAutojoin { account, room } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let marks = match xmpp.bookmarks().await {
