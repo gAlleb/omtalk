@@ -335,6 +335,8 @@ enum Msg {
     Names {
         account: BareJid,
         names: Vec<(BareJid, Option<String>)>,
+        /// The whole roster (as read at login): whoever is not in it has no name there.
+        whole: bool,
     },
     /// A room's subject; `by` is who changed it, none when it is told on entering.
     Topic {
@@ -569,7 +571,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let last_open = store.kept(KEPT_OPEN).ok().flatten().and_then(|kept| {
         let (account, jid) = kept.split_once('\t')?;
         let (account, jid): (BareJid, BareJid) = (account.parse().ok()?, jid.parse().ok()?);
-        app.chats.iter().position(|c| c.account == account && c.jid == jid)
+        app.chats
+            .iter()
+            .position(|c| c.account == account && c.jid == jid)
     });
     let start = last_open.or_else(|| jids.first().map(|account| app.server_chat(account)));
     if let Some(index) = start {
@@ -921,11 +925,31 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             None => drop(app.avatars.remove(&jid)),
         },
         // Kept for the next start, which shows them before the roster comes.
-        Msg::Names { account, names } => {
+        Msg::Names {
+            account,
+            names,
+            whole,
+        } => {
             for (jid, name) in &names {
                 let _ = shared
                     .store
                     .keep(&format!("{KEPT_CONTACT_NAME}{account}/{jid}"), name.as_deref());
+            }
+            // The whole roster: those kept from before who are no longer in it go.
+            if whole {
+                let listed: std::collections::BTreeSet<&BareJid> = names.iter().map(|(jid, _)| jid).collect();
+                let gone: Vec<BareJid> = app
+                    .names
+                    .keys()
+                    .filter(|(a, jid)| *a == account && !listed.contains(jid))
+                    .map(|(_, jid)| jid.clone())
+                    .collect();
+                for jid in &gone {
+                    let _ = shared
+                        .store
+                        .keep(&format!("{KEPT_CONTACT_NAME}{account}/{jid}"), None);
+                }
+                app.contact_names(&account, gone.into_iter().map(|jid| (jid, None)).collect());
             }
             app.contact_names(&account, names)
         }
@@ -1340,9 +1364,14 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 }
             }
             // A contact renamed (or added) by one of the account's clients.
+            // One removed has no name there any more.
             Event::Roster(contacts) => tell(Msg::Names {
                 account: account.clone(),
-                names: contacts.iter().map(|c| (c.jid.clone(), c.name.clone())).collect(),
+                names: contacts
+                    .iter()
+                    .map(|c| (c.jid.clone(), c.name.clone().filter(|_| !c.removed)))
+                    .collect(),
+                whole: false,
             }),
             Event::Pep {
                 from, node, items, ..
@@ -1557,6 +1586,7 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
         tell(Msg::Names {
             account: account.clone(),
             names: contacts.into_iter().map(|c| (c.jid, c.name)).collect(),
+            whole: true,
         });
     }
     // Shown and kept page by page, as they are read.
