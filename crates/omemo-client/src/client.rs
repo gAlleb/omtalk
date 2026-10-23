@@ -176,10 +176,16 @@ impl Omemo {
         self.caught_up.lock().await.clear();
         self.account.set(None, carbons::Enable).await?;
         let own = self.account.jid().clone();
+        // Only a node that is not there (a fresh account) is an empty list. Any other
+        // refusal, or an answer that is not a list, is no list to publish over: that
+        // would drop the account's other devices (Gajim, Monal…) from OMEMO.
         let current = match self.account.items(&own, DEVICE_LIST_NODE).await {
-            Ok(items) => parse_device_list(&items),
-            // A fresh account has no node yet.
-            Err(omtalk_xmpp::Error::Stanza(_)) => BTreeSet::new(),
+            Ok(items) => own_device_list(&items)?,
+            Err(omtalk_xmpp::Error::Stanza(e))
+                if e.defined_condition == omtalk_xmpp::stanza_error::DefinedCondition::ItemNotFound =>
+            {
+                BTreeSet::new()
+            }
             Err(error) => return Err(error.into()),
         };
         let mut state = self.state.lock().await;
@@ -195,9 +201,10 @@ impl Omemo {
             Event::Pep {
                 from, node, items, ..
             } if node == DEVICE_LIST_NODE => {
-                let list = parse_device_list(items);
                 let mut state = self.state.lock().await;
                 if from == self.account.jid() {
+                    // One's own list is published back: read strictly, or not at all.
+                    let list = own_device_list(items).unwrap_or_default();
                     // Another of our clients published a list without us; it happens
                     // when two of them publish at once. The notification may be stale by
                     // now, and publishing it back would drop whoever came since: read the
@@ -205,11 +212,11 @@ impl Omemo {
                     let list = if list.contains(&self.device_id) {
                         list
                     } else {
-                        parse_device_list(&self.account.items(from, DEVICE_LIST_NODE).await?)
+                        own_device_list(&self.account.items(from, DEVICE_LIST_NODE).await?)?
                     };
                     self.ensure_listed(&mut state, list).await?;
                 } else {
-                    state.device_lists.insert(from.clone(), list);
+                    state.device_lists.insert(from.clone(), parse_device_list(items));
                 }
                 Ok(None)
             }
@@ -825,7 +832,7 @@ impl Omemo {
             return Err(Error::ThisDevice);
         }
         let own = self.account.jid().clone();
-        let mut list = parse_device_list(&self.account.items(&own, DEVICE_LIST_NODE).await?);
+        let mut list = own_device_list(&self.account.items(&own, DEVICE_LIST_NODE).await?)?;
         if list.remove(&device) {
             let payload: Element = device_list::to_xml(list.iter().copied()).into();
             self.account
@@ -867,6 +874,18 @@ fn ignorable(result: Result<Incoming, Error>) -> Result<Option<Incoming>, Error>
     }
 }
 
+/// The own device list, read strictly: no item is an empty list, an item that is not a
+/// list is an error. What is published back must keep every device that was there.
+fn own_device_list(items: &[PepItem]) -> Result<BTreeSet<DeviceId>, Error> {
+    match items.first() {
+        None => Ok(BTreeSet::new()),
+        Some(item) => xml::DeviceList::try_from(item.payload.clone())
+            .map(|list| device_list::from_xml(&list))
+            .map_err(|_| Error::UnreadableOwnList),
+    }
+}
+
+/// Someone else's device list; one that cannot be read is no devices to encrypt for.
 fn parse_device_list(items: &[PepItem]) -> BTreeSet<DeviceId> {
     items
         .first()
@@ -905,6 +924,31 @@ fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, content: O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_own_device_list_is_read_strictly_or_not_at_all() {
+        let item = |payload: &str| PepItem {
+            id: Some("current".into()),
+            payload: payload.parse().unwrap(),
+        };
+        assert_eq!(
+            own_device_list(&[]).unwrap(),
+            BTreeSet::new(),
+            "no item: no devices yet"
+        );
+        let list =
+            item(r#"<list xmlns="eu.siacs.conversations.axolotl"><device id="1"/><device id="2"/></list>"#);
+        assert_eq!(own_device_list(&[list]).unwrap(), BTreeSet::from([1, 2]));
+        let other = item(r#"<something xmlns="urn:example"/>"#);
+        assert!(
+            matches!(own_device_list(&[other.clone()]), Err(Error::UnreadableOwnList)),
+            "not a list: nothing to publish over"
+        );
+        assert!(
+            parse_device_list(&[other]).is_empty(),
+            "someone else's: just no devices"
+        );
+    }
 
     fn encrypted(payload: bool) -> xml::Encrypted {
         xml::Encrypted {

@@ -17,6 +17,10 @@ pub enum Error {
     ThisDevice,
     #[error("{nick} in {room} is not known to the room as a real account")]
     UnknownOccupant { room: BareJid, nick: String },
+    /// The own device list came back, but not as a list: publishing over it would drop
+    /// the account's other devices, so it is left as it is.
+    #[error("the own OMEMO device list on the server cannot be read; it is left as it is")]
+    UnreadableOwnList,
     #[error("device {device} of {jid} presents a different identity key than before")]
     IdentityChanged { jid: BareJid, device: DeviceId },
 }
