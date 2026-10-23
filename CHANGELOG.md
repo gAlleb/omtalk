@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Your own device list is never published over when it could not be read**: a server error at login made omtalk publish a list of itself alone, dropping your other clients from OMEMO.
+- **A new session is kept before its one-time key is spent**: a network error in between lost the first message.
+- **Sending without a connection no longer freezes the account** (and quitting); the message waits, shown as "waiting for the connection", and goes when the connection is back.
+- **✓ means the server has it** (XEP-0198 acknowledgement), not that the bytes left; a message dropped with a refused session resumption is shown as lost.
+- **The chat list scrolls**, keeping the chat picked in sight.
+- A chat closed and opened again shows its history, and messages are no longer stored twice.
+- A refused command leaves the line in the input, to be put right.
+- `/me` from you shows your nick (in a room) or your account's name, not "me".
 - **↑/↓ in the input line go through what was sent** since omtalk started, as in a shell.
 - **`/me`**, as in IRC (XEP-0245): sent as written, shown as `* nick text`, in notifications too.
 

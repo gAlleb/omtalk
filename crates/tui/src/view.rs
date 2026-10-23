@@ -471,7 +471,18 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         Some(index) => {
             let width = inner.width as usize;
             let ready = |url: &str| pictures.contains_key(url);
-            let rows = message_rows(&app.chats[index].lines, width, app.icons, &ready);
+            let chat = &app.chats[index];
+            // "/me waves" from here names one as others see one: the nick in a room,
+            // the account's name in a direct chat.
+            let own = match &chat.kind {
+                ChatKind::Room { nick } if !nick.is_empty() => nick.clone(),
+                _ => chat
+                    .account
+                    .node()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| chat.account.to_string()),
+            };
+            let rows = message_rows(&chat.lines, width, app.icons, &ready, &own);
             let height = inner.height as usize;
             let max_scroll = rows.len().saturating_sub(height);
             let chat = &mut app.chats[index];
@@ -874,6 +885,7 @@ pub fn message_rows(
     width: usize,
     icons: theme::Icons,
     ready: &dyn Fn(&str) -> bool,
+    own: &str,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut last_day = None;
@@ -1032,7 +1044,8 @@ pub fn message_rows(
                 theme::nick(&line.who)
             };
             let text_style = Style::default().fg(theme::text()).add_modifier(Modifier::ITALIC);
-            let lead = format!("* {} ", line.who);
+            let who = if line.outgoing { own } else { line.who.as_str() };
+            let lead = format!("* {who} ");
             let mut first = true;
             for part in wrap(&format!("{lead}{action}"), text_width) {
                 let mut spans = vec![Span::raw("  ")];
@@ -1048,7 +1061,7 @@ pub fn message_rows(
                     Some(rest) => {
                         spans.push(Span::styled("* ", text_style));
                         spans.push(Span::styled(
-                            line.who.clone(),
+                            who.to_owned(),
                             who_style.add_modifier(Modifier::ITALIC),
                         ));
                         spans.push(Span::styled(format!(" {rest}"), text_style));
@@ -5457,7 +5470,10 @@ mod tests {
         );
         let text = screen(&mut app, 120, 24);
         assert!(text.contains("* bob смеётся"), "{text}");
-        assert!(text.contains("* я машет рукой"), "one's own too: {text}");
+        assert!(
+            text.contains("* me машет рукой"),
+            "one's own, by the account's name: {text}"
+        );
         assert!(!text.contains("/me"), "{text}");
     }
 
