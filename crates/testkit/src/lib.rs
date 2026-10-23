@@ -177,6 +177,14 @@ impl Device {
         })
     }
 
+    /// The next result of handling a message, a failure too.
+    pub async fn next_result(&mut self) -> Result<Incoming, String> {
+        timeout(WAIT, self.inbox.recv())
+            .await
+            .unwrap_or_else(|_| panic!("device {} of {} got nothing", self.omemo.device_id(), self.jid))
+            .unwrap()
+    }
+
     /// The next message with text; empty handshake answers are skipped.
     pub async fn next_text(&mut self) -> Incoming {
         timeout(WAIT, async {

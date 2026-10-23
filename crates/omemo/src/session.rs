@@ -54,6 +54,9 @@ pub struct Received {
     /// The own pre key this message consumed. Remove it from [`OwnKeys`] (or hide it
     /// until history catch-up ends) and republish the bundle.
     pub used_pre_key: Option<u32>,
+    /// Which of the sessions given to [`receive_from`] the message went on in; `None`
+    /// for a session it started.
+    pub continued: Option<usize>,
 }
 
 impl Session {
@@ -153,14 +156,37 @@ pub fn receive(
     data: &[u8],
     prekey: bool,
 ) -> Result<Received, Error> {
+    receive_from(own, existing.as_slice(), data, prekey)
+}
+
+/// [`receive`] with several sessions with the sending device: the current one first,
+/// then those it replaced, newest first. Two devices that start a session with each
+/// other at once each take the other's key exchange, replacing their own; the peer
+/// may go on in the one replaced, so it is tried too, as libsignal does.
+pub fn receive_from(
+    own: &OwnKeys,
+    sessions: &[&Session],
+    data: &[u8],
+    prekey: bool,
+) -> Result<Received, Error> {
     if !prekey {
-        let mut session = existing.ok_or(Error::NoSession)?.clone();
-        let key_material = session.decrypt(data)?;
-        return Ok(Received {
-            session,
-            key_material,
-            used_pre_key: None,
-        });
+        let mut first_error = Error::NoSession;
+        for (index, existing) in sessions.iter().enumerate() {
+            let mut session = (*existing).clone();
+            match session.decrypt(data) {
+                Ok(key_material) => {
+                    return Ok(Received {
+                        session,
+                        key_material,
+                        used_pre_key: None,
+                        continued: Some(index),
+                    });
+                }
+                Err(error) if index == 0 => first_error = error,
+                Err(_) => {}
+            }
+        }
+        return Err(first_error);
     }
 
     let (&version, encoded) = data.split_first().ok_or(Error::Protobuf)?;
@@ -176,17 +202,18 @@ pub fn receive(
 
     // The peer repeats the key exchange until we answer. A repeat decrypts in the
     // session it built; anything else starts over, as python-omemo does.
-    if let Some(session) = existing.filter(|s| {
+    if let Some((index, session)) = sessions.iter().enumerate().find(|(_, s)| {
         s.initiation == Initiation::Passive
             && s.key_exchange == ids
             && s.their_identity == exchange.identity_key
     }) {
-        let mut session = session.clone();
+        let mut session = (*session).clone();
         let key_material = session.decrypt(&exchange.message)?;
         return Ok(Received {
             session,
             key_material,
             used_pre_key: None,
+            continued: Some(index),
         });
     }
 
@@ -213,6 +240,7 @@ pub fn receive(
         session,
         key_material,
         used_pre_key: Some(exchange.pre_key_id),
+        continued: None,
     })
 }
 

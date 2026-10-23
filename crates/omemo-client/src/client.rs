@@ -39,7 +39,13 @@ pub struct Omemo {
     /// Room occupants by nick, with their real JIDs: a group message names only the
     /// nick, but its keys belong to the real account.
     occupants: Mutex<HashMap<BareJid, HashMap<String, BareJid>>>,
+    /// When a broken session with each device was last started anew (see
+    /// [`Omemo::heal`]): at most once in [`HEAL_PAUSE`].
+    healed: Mutex<HashMap<(BareJid, DeviceId), std::time::Instant>>,
 }
+
+/// How long after starting a session anew with a device it is not done again.
+const HEAL_PAUSE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// A chat message to show: decrypted, or sent without encryption.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +160,7 @@ impl Omemo {
             state: Mutex::new(state),
             persist,
             caught_up: Mutex::new(HashSet::new()),
+            healed: Mutex::new(HashMap::new()),
             occupants: Mutex::new(HashMap::new()),
         }
     }
@@ -335,6 +342,7 @@ impl Omemo {
         if envelope.sender == *self.account.jid() && encrypted.header.sid == self.device_id {
             return Ok(None);
         }
+        let (sender, device) = (envelope.sender.clone(), encrypted.header.sid);
         let parts = Received {
             peer: envelope.peer,
             sender: envelope.sender,
@@ -342,14 +350,61 @@ impl Omemo {
             direction: envelope.direction,
             meta: envelope.meta,
         };
-        ignorable(self.receive(parts, encrypted).await)
+        let result = self.receive(parts, encrypted).await;
+        if let Err(Error::Omemo(omemo_xml::Error::Omemo(
+            omemo::Error::Mac
+            | omemo::Error::NoSession
+            | omemo::Error::UnknownPreKey(_)
+            | omemo::Error::UnknownSignedPreKey(_),
+        ))) = &result
+        {
+            let _ = self.heal(&sender, device).await;
+        }
+        ignorable(result)
+    }
+
+    /// Starts a new session with a device whose message no session here could read,
+    /// and sends it an empty message carrying the key exchange: its next messages come
+    /// in that session, as libsignal and python-omemo repair a broken one. The session it
+    /// replaces is kept among the previous ones. Not again for that device within
+    /// [`HEAL_PAUSE`], nor with a device whose identity key is not the one known.
+    async fn heal(&self, jid: &BareJid, device: DeviceId) -> Result<(), Error> {
+        let key = (jid.clone(), device);
+        {
+            let mut healed = self.healed.lock().await;
+            if healed.get(&key).is_some_and(|at| at.elapsed() < HEAL_PAUSE) {
+                return Ok(());
+            }
+            healed.insert(key.clone(), std::time::Instant::now());
+        }
+        let bundle = self.fetch_bundle(jid, device).await?;
+        let mut state = self.state.lock().await;
+        if state
+            .identities
+            .get(&key)
+            .is_some_and(|known| *known != bundle.identity_key)
+        {
+            return Ok(());
+        }
+        let mut session = omemo::Session::initiate(&state.keys, &bundle)?;
+        let empty = message::empty(state.keys.device_id, [(device, &mut session)])?;
+        self.persist.session(jid, device, &session)?;
+        if state.set_session(&key, session, None) {
+            let previous = state.previous_sessions.get(&key).cloned().unwrap_or_default();
+            self.persist.previous_sessions(jid, device, &previous)?;
+        }
+        drop(state);
+        self.account
+            .send(stanza(MessageType::Chat, jid.clone(), empty, None))
+            .await?;
+        Ok(())
     }
 
     async fn receive(&self, envelope: Received, encrypted: xml::Encrypted) -> Result<Incoming, Error> {
         let device = encrypted.header.sid;
         let key = (envelope.sender.clone(), device);
         let mut state = self.state.lock().await;
-        let decrypted = message::decrypt(&state.keys, state.sessions.get(&key), &encrypted)?;
+        let decrypted = message::decrypt_from(&state.keys, &state.sessions_with(&key), &encrypted)?;
 
         let identity = *decrypted.received.session.their_identity();
         self.record_identity(&mut state, &envelope.sender, device, &identity)?;
@@ -379,7 +434,10 @@ impl Omemo {
         // the network: lost now, a repeat of the key exchange would find neither, and the
         // first message would be gone. A repeat decrypts in the session kept.
         self.persist.session(&key.0, key.1, &session)?;
-        state.sessions.insert(key, session);
+        if state.set_session(&key, session, decrypted.received.continued) {
+            let previous = state.previous_sessions.get(&key).cloned().unwrap_or_default();
+            self.persist.previous_sessions(&key.0, key.1, &previous)?;
+        }
         if let Some(pre_key) = decrypted.received.used_pre_key {
             state.keys.remove_pre_key(pre_key);
             state.keys.refill_pre_keys()?;
@@ -925,7 +983,10 @@ impl Omemo {
         }
         let mut state = self.state.lock().await;
         state.device_lists.insert(own.clone(), list);
-        state.sessions.remove(&(own, device));
+        state.sessions.remove(&(own.clone(), device));
+        if state.previous_sessions.remove(&(own.clone(), device)).is_some() {
+            self.persist.previous_sessions(&own, device, &[])?;
+        }
         Ok(())
     }
 

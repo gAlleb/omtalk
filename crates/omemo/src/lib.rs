@@ -17,7 +17,7 @@ pub mod session;
 pub use error::Error;
 pub use keys::{Bundle, DeviceId, IdentityKeyPair, OwnKeys};
 pub use payload::{EncryptedPayload, decrypt_payload, encrypt_payload};
-pub use session::{EncryptedKey, Received, Session, receive};
+pub use session::{EncryptedKey, Received, Session, receive, receive_from};
 
 /// XML namespace of this OMEMO version.
 pub const NAMESPACE: &str = "eu.siacs.conversations.axolotl";

@@ -83,6 +83,17 @@ const MIGRATIONS: &[&str] = &[
     history::MIGRATION_SHARED,
     history::MIGRATION_REPLIES,
     history::MIGRATION_KNOWN,
+    // Schema 13: the sessions with a device a newer one replaced, newest first (a
+    // postcard list), tried when the current one does not decrypt.
+    "
+    CREATE TABLE omemo_previous_sessions (
+        account  TEXT NOT NULL,
+        jid      TEXT NOT NULL,
+        device   INTEGER NOT NULL,
+        sessions BLOB NOT NULL,
+        PRIMARY KEY (account, jid, device)
+    );
+    ",
 ];
 
 #[derive(Clone)]
@@ -130,6 +141,22 @@ impl Store {
             state
                 .sessions
                 .insert((parse_jid(&jid)?, device), postcard::from_bytes(&session)?);
+        }
+
+        let mut previous =
+            db.prepare("SELECT jid, device, sessions FROM omemo_previous_sessions WHERE account = ?1")?;
+        let rows = previous.query_map([account.as_str()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (jid, device, sessions) = row?;
+            state
+                .previous_sessions
+                .insert((parse_jid(&jid)?, device), postcard::from_bytes(&sessions)?);
         }
 
         let mut identities =
@@ -246,6 +273,25 @@ impl Persist for AccountOmemo {
         )
     }
 
+    fn previous_sessions(
+        &self,
+        jid: &BareJid,
+        device: DeviceId,
+        sessions: &[Session],
+    ) -> Result<(), PersistError> {
+        if sessions.is_empty() {
+            return self.write(
+                "DELETE FROM omemo_previous_sessions WHERE account = ?1 AND jid = ?2 AND device = ?3",
+                params![self.account.as_str(), jid.as_str(), device],
+            );
+        }
+        self.write(
+            "INSERT OR REPLACE INTO omemo_previous_sessions (account, jid, device, sessions)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![self.account.as_str(), jid.as_str(), device, encode(&sessions)?],
+        )
+    }
+
     fn session(&self, jid: &BareJid, device: DeviceId, session: &Session) -> Result<(), PersistError> {
         self.write(
             "INSERT OR REPLACE INTO omemo_sessions (account, jid, device, session) VALUES (?1, ?2, ?3, ?4)",
@@ -352,6 +398,53 @@ mod tests {
         assert_eq!(next.key_material, b"after restart");
 
         assert!(store.load_omemo(&jid("nobody@example.org")).unwrap().is_none());
+    }
+
+    #[test]
+    fn replaced_sessions_come_back_in_their_order_and_go_when_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omtalk.db");
+        let alice = jid("alice@example.org");
+        let bob = jid("bob@example.org");
+        let keys = OwnKeys::generate(0).unwrap();
+        let peer = OwnKeys::generate(0).unwrap();
+        let older = Session::initiate(&keys, &peer.bundle()).unwrap();
+        let newer = Session::initiate(&keys, &peer.bundle()).unwrap();
+        {
+            let store = Store::open(&path).unwrap();
+            let persist = store.omemo(&alice);
+            persist.keys(&keys).unwrap();
+            persist
+                .previous_sessions(&bob, peer.device_id, &[newer.clone(), older.clone()])
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let state = store.load_omemo(&alice).unwrap().unwrap();
+        let kept = &state.previous_sessions[&(bob.clone(), peer.device_id)];
+        assert_eq!(kept.len(), 2);
+        // Told apart by what the peer reads: the first is the newer one.
+        let mut first = kept[0].clone();
+        let mut expected = newer.clone();
+        let a = first.encrypt(b"x");
+        let b = expected.encrypt(b"x");
+        assert_eq!(
+            omemo::receive(&peer, None, &a.data, a.prekey)
+                .unwrap()
+                .session
+                .their_identity(),
+            omemo::receive(&peer, None, &b.data, b.prekey)
+                .unwrap()
+                .session
+                .their_identity(),
+        );
+        assert_eq!(a.data[..40], b.data[..40], "same key exchange: newest first");
+
+        store
+            .omemo(&alice)
+            .previous_sessions(&bob, peer.device_id, &[])
+            .unwrap();
+        let state = store.load_omemo(&alice).unwrap().unwrap();
+        assert!(state.previous_sessions.is_empty());
     }
 
     #[cfg(unix)]

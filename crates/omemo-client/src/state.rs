@@ -11,6 +11,9 @@ pub struct State {
     /// after a restart it is read from the server again.
     pub device_lists: HashMap<BareJid, BTreeSet<DeviceId>>,
     pub sessions: HashMap<(BareJid, DeviceId), Session>,
+    /// Sessions with a device that a newer one replaced, newest first: the peer may
+    /// still write in one (both sides started a session at once, a message was late).
+    pub previous_sessions: HashMap<(BareJid, DeviceId), Vec<Session>>,
     /// Identity key first seen for each device. Trusted blindly until the user decides
     /// otherwise (BTBV, as Gajim and Conversations do); a device whose key changes
     /// later is refused.
@@ -62,12 +65,58 @@ impl Trust {
     }
 }
 
+/// How many replaced sessions are kept per device.
+const PREVIOUS_SESSIONS: usize = 5;
+
 impl State {
+    /// The sessions with a device to try a message in: the current one, then those it
+    /// replaced.
+    pub(crate) fn sessions_with(&self, key: &(BareJid, DeviceId)) -> Vec<&Session> {
+        self.sessions
+            .get(key)
+            .into_iter()
+            .chain(self.previous_sessions.get(key).into_iter().flatten())
+            .collect()
+    }
+
+    /// Makes `session` the current one with a device. `continued` is which of
+    /// [`State::sessions_with`] it went on from (`None`: a new one); the current one it
+    /// replaces is kept among the previous. Whether those changed.
+    pub(crate) fn set_session(
+        &mut self,
+        key: &(BareJid, DeviceId),
+        session: Session,
+        continued: Option<usize>,
+    ) -> bool {
+        let replaced = match continued {
+            Some(0) => None,
+            Some(index) => {
+                // The previous one it went on from comes back as the current one.
+                if let Some(previous) = self.previous_sessions.get_mut(key) {
+                    previous.remove(index - 1);
+                }
+                self.sessions.remove(key)
+            }
+            None => self.sessions.remove(key),
+        };
+        self.sessions.insert(key.clone(), session);
+        match replaced {
+            Some(old) => {
+                let previous = self.previous_sessions.entry(key.clone()).or_default();
+                previous.insert(0, old);
+                previous.truncate(PREVIOUS_SESSIONS);
+                true
+            }
+            None => matches!(continued, Some(index) if index > 0),
+        }
+    }
+
     pub fn new(keys: OwnKeys) -> Self {
         Self {
             keys,
             device_lists: HashMap::new(),
             sessions: HashMap::new(),
+            previous_sessions: HashMap::new(),
             identities: HashMap::new(),
             archive_positions: HashMap::new(),
             trust: HashMap::new(),

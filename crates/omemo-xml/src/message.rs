@@ -1,6 +1,8 @@
 //! The `<encrypted>` element: one payload, one `<key>` per recipient device.
 
-use omemo::{DeviceId, EncryptedKey, OwnKeys, Received, Session, decrypt_payload, encrypt_payload, receive};
+use omemo::{
+    DeviceId, EncryptedKey, OwnKeys, Received, Session, decrypt_payload, encrypt_payload, receive_from,
+};
 
 use crate::{Error, xml};
 
@@ -69,6 +71,16 @@ pub fn decrypt(
     existing: Option<&Session>,
     encrypted: &xml::Encrypted,
 ) -> Result<Decrypted, Error> {
+    decrypt_from(own, existing.as_slice(), encrypted)
+}
+
+/// [`decrypt`] with several sessions with the sending device, the current one first
+/// (see [`omemo::receive_from`]); `received.continued` says which one went on.
+pub fn decrypt_from(
+    own: &OwnKeys,
+    sessions: &[&Session],
+    encrypted: &xml::Encrypted,
+) -> Result<Decrypted, Error> {
     let mut keys = encrypted
         .header
         .keys
@@ -83,7 +95,7 @@ pub fn decrypt(
     // keys for it. The one that decrypts is ours.
     let mut last_error = Error::NotForThisDevice;
     for key in keys {
-        let attempt = receive(own, existing, &key.data, key.prekey)
+        let attempt = receive_from(own, sessions, &key.data, key.prekey)
             .map_err(Error::from)
             .and_then(|received| {
                 let plaintext = match &encrypted.payload {
