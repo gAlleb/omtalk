@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.5 — 2026-10-23
 
 - **Your status is remembered**: after `/away` and a restart you are still away.
 - **A room that let you go is entered again** (XEP-0410): omtalk asks each room every five minutes, and after a connection comes back, whether you are still in it; a network that changed or a server restart could leave a room silent with nothing showing it. What was missed comes with entering again.
