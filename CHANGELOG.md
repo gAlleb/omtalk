@@ -14,7 +14,7 @@
 - **A room closed stays closed** after a restart: `/close` hides it here only (other clients still enter it), `/leave` leaves for good, turning off "enter by itself" in its bookmark for all your clients. `/join` opens it again.
 - **Folded folders and accounts stay folded** after a restart.
 - **The buttons of a service's form are reached with Tab** after the last field; ←/→ go between them, Enter presses the one picked; the keys are told under the field's description, not instead of it.
-- **Rooms show their names in the list from the start**, not only once opened.
+- **Rooms show their names in the list from the start**, not only once opened: kept from the last time, asked again on entering.
 - **omtalk opens the chat you were in when you left it**; with none to remember, the server channel. It used to open whichever room came first.
 - **In a chat with OMEMO off the unencrypted mark is the lock-open icon alone** (an IRC channel had "unencrypted ·" on every line); in a chat with OMEMO on a plain message keeps the icon and the words.
 - **The buttons below a service listing too** (Back, Reload, Close): Tab reaches them, ←/→ and Enter; each shows its key.

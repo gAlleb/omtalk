@@ -711,8 +711,15 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
     for account in accounts {
         let closed = store.closed_chats(account).unwrap_or_default();
         let rooms: HashMap<BareJid, String> = store.rooms(account).unwrap_or_default().into_iter().collect();
+        // Rooms' names as last told: shown at once, asked again on entering.
+        let names: HashMap<String, String> = store
+            .kept_under(&format!("{KEPT_ROOM_NAME}{account}/"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         for (room, nick) in &rooms {
-            app.chat(account, room, ChatKind::Room { nick: nick.clone() });
+            let index = app.chat(account, room, ChatKind::Room { nick: nick.clone() });
+            app.chats[index].name = names.get(room.as_str()).cloned();
         }
         for summary in store
             .chats(account)
@@ -919,6 +926,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             done,
         } => app.older(&account, &chat, lines, before, done),
         Msg::RoomName { account, room, name } => {
+            // Kept for the next start, which shows it before anything is asked.
+            let _ = shared
+                .store
+                .keep(&format!("{KEPT_ROOM_NAME}{account}/{room}"), name.as_deref());
             if let Some(chat) = app
                 .chats
                 .iter_mut()
@@ -1050,6 +1061,14 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 shared.clone(),
             ));
             let index = app.chat(&account, &room, ChatKind::Room { nick });
+            // Its name as last told, until the room tells it again.
+            if app.chats[index].name.is_none() {
+                app.chats[index].name = shared
+                    .store
+                    .kept(&format!("{KEPT_ROOM_NAME}{account}/{room}"))
+                    .ok()
+                    .flatten();
+            }
             if open || app.selected.is_none() {
                 for action in app.select(index) {
                     tokio::spawn(perform(action, shared.clone()));
@@ -2973,6 +2992,9 @@ async fn perform(action: Action, shared: Shared) {
 
 /// Where one's own status is kept between runs.
 const KEPT_STATUS: &str = "status";
+
+/// Where rooms' names are kept: this, then "account/room".
+const KEPT_ROOM_NAME: &str = "room-name/";
 
 /// Where the chat open when omtalk was left is kept: "account\tchat".
 const KEPT_OPEN: &str = "open";
