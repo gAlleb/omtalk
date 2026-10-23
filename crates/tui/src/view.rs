@@ -482,16 +482,33 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| chat.account.to_string()),
             };
-            let rows = message_rows(&chat.lines, width, app.icons, &ready, &own);
+            let mut rows = message_rows(&chat.lines, width, app.icons, &ready, &own);
+            // Above the oldest message, while older ones may be had: a click (or
+            // scrolling up past it) brings them.
+            let more = !chat.older_done && chat.kind != ChatKind::Server && !chat.lines.is_empty();
+            if more {
+                let label = if chat.older_loading {
+                    tr!("  ↑ loading…", "  ↑ загрузка…")
+                } else {
+                    tr!("  ↑ earlier", "  ↑ раньше")
+                };
+                rows.insert(
+                    0,
+                    TextLine::from(Span::styled(label, Style::default().fg(theme::accent()))).into(),
+                );
+            }
             let height = inner.height as usize;
             let max_scroll = rows.len().saturating_sub(height);
             let chat = &mut app.chats[index];
             chat.scroll = chat.scroll.min(max_scroll);
             let end = rows.len() - chat.scroll;
             let start = end.saturating_sub(height);
+            app.areas.top_shown = start == 0;
             // Newest at the bottom, like every chat; a short history sits low too.
             let shown = &rows[start..end];
             let top = inner.y + (height - shown.len()) as u16;
+            app.areas.older =
+                (more && start == 0 && !shown.is_empty()).then(|| Rect::new(inner.x, top, inner.width, 1));
             let mut texts = Vec::with_capacity(shown.len());
             for (offset, row) in shown.iter().enumerate() {
                 let y = top + offset as u16;
@@ -5251,6 +5268,85 @@ mod tests {
         app.chats[bob].lines.push(line);
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("👍 2  ❤"), "{text}");
+    }
+
+    #[test]
+    fn scrolling_up_past_the_oldest_shown_asks_for_older_ones_once() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        for i in 0..30 {
+            let mut line = crate::app::Line::message(i, "bob".into(), format!("сообщение {i}"), true, false);
+            line.id = Some(format!("m{i}"));
+            app.chats[bob].lines.push(line);
+        }
+        app.focus = Focus::Messages;
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        screen(&mut app, 100, 20);
+        assert!(app.on_key(up).is_empty(), "the oldest is not on screen yet");
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        screen(&mut app, 100, 20);
+        let asked = app.on_key(up);
+        assert!(
+            matches!(
+                &asked[..],
+                [Action::Older {
+                    have: 30,
+                    room: false,
+                    ..
+                }]
+            ),
+            "{asked:?}"
+        );
+        assert!(app.on_key(up).is_empty(), "not again while it comes");
+
+        // They come: before the others, each once; done, it asks no more.
+        let mut old = crate::app::Line::message(-1, "bob".into(), "самое старое".into(), true, false);
+        old.id = Some("m-1".into());
+        let mut again = crate::app::Line::message(0, "bob".into(), "сообщение 0".into(), true, false);
+        again.id = Some("m0".into());
+        app.older(&me, &jid("bob@example.org"), vec![old, again], None, true);
+        let lines = &app.chats[bob].lines;
+        assert_eq!((lines.len(), lines[0].text.as_str()), (31, "самое старое"));
+        screen(&mut app, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        screen(&mut app, 100, 20);
+        assert!(app.on_key(up).is_empty(), "nothing older to ask for");
+        let text = screen(&mut app, 100, 20);
+        assert!(!text.contains("раньше"), "and says nothing of it: {text}");
+    }
+
+    #[test]
+    fn earlier_above_the_oldest_message_brings_older_ones_with_a_click() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        app.chats[bob].lines.push(crate::app::Line::message(
+            0,
+            "bob".into(),
+            "привет".into(),
+            true,
+            false,
+        ));
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("↑ раньше"), "{text}");
+        let place = app.areas.older.expect("clickable");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: place.x + 3,
+            row: place.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(
+            &app.on_mouse(click)[..],
+            [Action::Older { have: 1, .. }]
+        ));
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("↑ загрузка…"), "{text}");
     }
 
     #[test]

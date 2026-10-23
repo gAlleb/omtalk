@@ -989,3 +989,38 @@ async fn away_seen(
     })
     .await
 }
+
+/// A chat's archive read backwards, page by page, the chat with one contact only.
+#[tokio::test]
+async fn a_chats_archive_is_read_backwards_page_by_page() {
+    use xmpp_parsers::message::{Lang, Message};
+    let (mut accounts, mut events) = Accounts::new();
+    let me = accounts.add(config("u51")).await;
+    let other = accounts.add(config("u52")).await;
+    online(&mut events, &[&me, &other]).await;
+    let tag = rand_suffix();
+    for i in 0..3 {
+        let message =
+            Message::chat(Some(other.jid().clone().into())).with_body(Lang::default(), format!("{tag}-{i}"));
+        me.send(message).await.unwrap();
+    }
+    // To someone else: not in this chat's pages.
+    me.send(
+        Message::chat(Some("u53@localhost".parse().unwrap())).with_body(Lang::default(), "elsewhere".into()),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let body = |m: &omtalk_xmpp::mam::Archived| m.message.bodies.values().next().cloned().unwrap_or_default();
+
+    let newest = me.archive_before(None, Some(other.jid()), "", 2).await.unwrap();
+    let bodies: Vec<String> = newest.messages.iter().map(body).collect();
+    assert_eq!(bodies, [format!("{tag}-1"), format!("{tag}-2")]);
+    let oldest = newest.messages[0].id.clone();
+    let before = me
+        .archive_before(None, Some(other.jid()), &oldest, 2)
+        .await
+        .unwrap();
+    let bodies: Vec<String> = before.messages.iter().map(body).collect();
+    assert_eq!(bodies.last(), Some(&format!("{tag}-0")), "{bodies:?}");
+}

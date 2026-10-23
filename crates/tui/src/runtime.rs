@@ -296,6 +296,14 @@ enum Msg {
         room: BareJid,
         name: Option<String>,
     },
+    /// A chat's messages before those shown (see [`Action::Older`]).
+    Older {
+        account: BareJid,
+        chat: BareJid,
+        lines: Vec<Line>,
+        before: Option<String>,
+        done: bool,
+    },
     /// Someone's reactions to a message (XEP-0444).
     Reactions {
         account: BareJid,
@@ -816,6 +824,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Names { account, names } => app.contact_names(&account, names),
         Msg::Reactions { account, reactions } => drop(app.reacted(&account, &reactions)),
+        Msg::Older {
+            account,
+            chat,
+            lines,
+            before,
+            done,
+        } => app.older(&account, &chat, lines, before, done),
         Msg::RoomName { account, room, name } => {
             if let Some(chat) = app
                 .chats
@@ -1230,6 +1245,16 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
 
 /// Saves a message to the history and shows it.
 fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
+    let at = keep(shared, account, &message);
+    let _ = shared.tx.send(Msg::Incoming {
+        account: account.clone(),
+        message,
+        at,
+    });
+}
+
+/// Keeps a message in the store (a correction in the message it corrects); when it was.
+fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
     let at = message.at.unwrap_or_else(now);
     // The device wrote: when, for the keys window ("писало вчера 14:05").
     if let Some(device) = message.device
@@ -1275,11 +1300,7 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
             },
         );
     }
-    let _ = shared.tx.send(Msg::Incoming {
-        account: account.clone(),
-        message,
-        at,
-    });
+    at
 }
 
 /// After every new login: announce the device, read what was missed, enter the rooms.
@@ -1986,6 +2007,67 @@ async fn perform(action: Action, shared: Shared) {
                 }
             }
         }
+        Action::Older {
+            account,
+            chat,
+            room,
+            have,
+            before,
+        } => {
+            // From the store first: what this device read, decrypted. Then the archive,
+            // what is kept going into the store and coming from there in order.
+            let page = |have| {
+                let mut lines = stored_lines(
+                    shared
+                        .store
+                        .older_messages(&account, &chat, have, OLDER_PAGE)
+                        .unwrap_or_default(),
+                );
+                with_reactions(&shared.store, &account, &chat, room, &mut lines);
+                lines
+            };
+            let lines = page(have);
+            if !lines.is_empty() {
+                tell(Msg::Older {
+                    account,
+                    chat,
+                    lines,
+                    before: None,
+                    done: false,
+                });
+                return;
+            }
+            let Some((_, omemo)) = get(&account) else { return };
+            let (before, done) = match omemo
+                .history_before(&chat, room, before.as_deref().unwrap_or_default(), OLDER_PAGE)
+                .await
+            {
+                Ok((caught, oldest, complete)) => {
+                    for message in caught.messages.iter().filter(|m| m.text.is_some()) {
+                        keep(&shared, &account, message);
+                    }
+                    // Said in the status line: a notice would go to the bottom, far from
+                    // the old messages it is about.
+                    if caught.unreadable > 0 {
+                        tell(Msg::Status(unreadable_words(caught.unreadable)));
+                    }
+                    (oldest, complete)
+                }
+                Err(e) => {
+                    tell(Msg::Status(trf!("older history: {e}", "старая история: {e}")));
+                    (None, false)
+                }
+            };
+            let lines = page(have);
+            let done = done && lines.is_empty();
+            tell(Msg::Older {
+                account,
+                chat,
+                lines,
+                before,
+                done,
+            });
+        }
         Action::SetStatus(status) => {
             for (xmpp, _) in shared.accounts.values() {
                 if let Err(e) = xmpp.set_status(status.clone()).await
@@ -2604,6 +2686,9 @@ async fn perform(action: Action, shared: Shared) {
         Action::Quit => {}
     }
 }
+
+/// How many older messages one scroll to the top brings.
+const OLDER_PAGE: usize = 50;
 
 /// How a message sent from here is kept.
 struct Own {

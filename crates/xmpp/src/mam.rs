@@ -48,6 +48,32 @@ impl Account {
         self.archive(room, set).await
     }
 
+    /// Up to `max` messages before the one with archive id `before` (the newest if
+    /// empty), oldest first: a room's archive, or the account's own with `with` only.
+    pub async fn archive_before(
+        &self,
+        room: Option<&BareJid>,
+        with: Option<&BareJid>,
+        before: &str,
+        max: usize,
+    ) -> Result<Page, Error> {
+        use xmpp_parsers::data_forms::{DataForm, DataFormType, Field};
+        let set = SetQuery {
+            max: Some(max),
+            after: None,
+            before: Some(before.to_owned()),
+            index: None,
+        };
+        let form = with.map(|with| {
+            DataForm::new(
+                DataFormType::Submit,
+                xmpp_parsers::ns::MAM,
+                vec![Field::text_single("with", with.as_str())],
+            )
+        });
+        self.archive_query_with(room, form, set).await
+    }
+
     /// The id of the newest archived message, if any: where to start reading from now on.
     pub async fn archive_newest(&self, room: Option<&BareJid>) -> Result<Option<String>, Error> {
         Ok(self.archive_last(room, 1).await?.last)

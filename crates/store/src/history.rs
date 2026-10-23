@@ -226,29 +226,44 @@ impl Store {
         chat: &BareJid,
         limit: usize,
     ) -> Result<Vec<StoredMessage>, Error> {
+        self.older_messages(account, chat, 0, limit)
+    }
+
+    /// [`Store::recent_messages`] past the newest `skip`: the page before what is shown,
+    /// oldest first.
+    pub fn older_messages(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
             "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited FROM messages
-             WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3",
+             WHERE account = ?1 AND chat = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3 OFFSET ?4",
         )?;
-        let rows = query.query_map(params![account.as_str(), chat.as_str(), limit as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, bool>(2)?,
-                r.get::<_, bool>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, Option<String>>(6)?,
-                r.get::<_, Option<i64>>(7)?,
-                r.get::<_, Option<String>>(8)?,
-                r.get::<_, bool>(9)?,
-                r.get::<_, Option<String>>(10)?,
-                r.get::<_, Option<String>>(11)?,
-                r.get::<_, bool>(12)?,
-                r.get::<_, bool>(13)?,
-            ))
-        })?;
+        let rows = query.query_map(
+            params![account.as_str(), chat.as_str(), limit as i64, skip as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, bool>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, bool>(12)?,
+                    r.get::<_, bool>(13)?,
+                ))
+            },
+        )?;
         let mut messages = Vec::new();
         for row in rows {
             let (

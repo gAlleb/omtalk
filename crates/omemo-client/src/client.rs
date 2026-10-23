@@ -580,6 +580,32 @@ impl Omemo {
         Ok(caught)
     }
 
+    /// The page of a chat's archive before the message with archive id `before`: a
+    /// room's (`room`), or the account's own with `peer`. What was read, the id of the
+    /// oldest message of the page (where the next page ends), and whether there is no
+    /// more. What was encrypted before this device existed is only counted.
+    pub async fn history_before(
+        &self,
+        peer: &BareJid,
+        room: bool,
+        before: &str,
+        max: usize,
+    ) -> Result<(CatchUp, Option<String>, bool), Error> {
+        let page = if room {
+            self.account.archive_before(Some(peer), None, before, max).await?
+        } else {
+            self.account.archive_before(None, Some(peer), before, max).await?
+        };
+        let oldest = page.messages.first().map(|m| m.id.clone());
+        let complete = page.complete || page.messages.is_empty();
+        let mut caught = CatchUp::default();
+        for archived in page.messages {
+            self.open_archived(room.then_some(peer), archived, &mut caught)
+                .await;
+        }
+        Ok((caught, oldest, complete))
+    }
+
     /// One archived message: opened, counted, and the archive's position moved past it.
     async fn take_archived(
         &self,

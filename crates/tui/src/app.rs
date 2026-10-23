@@ -167,6 +167,12 @@ pub struct Chat {
     pub omemo: bool,
     /// Rows scrolled up from the newest.
     pub scroll: usize,
+    /// Older messages asked for (scrolled to the top), not here yet.
+    pub older_loading: bool,
+    /// Nothing older to be had: the store and the archive have given all.
+    pub older_done: bool,
+    /// Where the archive's next older page ends: the oldest of the last page read.
+    pub older_before: Option<String>,
     /// Room occupants by nick, with the real account when the room shows it.
     pub occupants: BTreeMap<String, Option<BareJid>>,
     /// A room's members (owners, admins, members), present or not; read when it opens.
@@ -195,6 +201,9 @@ impl Chat {
             unread: 0,
             omemo: true,
             scroll: 0,
+            older_loading: false,
+            older_done: false,
+            older_before: None,
             occupants: BTreeMap::new(),
             members: Vec::new(),
             name: None,
@@ -307,6 +316,10 @@ pub enum ServiceButton {
 #[derive(Debug, Clone, Default)]
 pub struct Areas {
     pub screen: Rect,
+    /// The open chat's oldest row is on screen: scrolling up asks for older messages.
+    pub top_shown: bool,
+    /// The "↑ earlier" row above the oldest message: a click asks for older ones.
+    pub older: Option<Rect>,
     pub left: Option<Rect>,
     pub right: Option<Rect>,
     pub messages: Rect,
@@ -364,6 +377,15 @@ pub enum Action {
         reply: Option<(omtalk_xmpp::replies::ReplyTo, usize)>,
         /// A correction (XEP-0308) of one's own message with this id.
         replace: Option<String>,
+    },
+    /// The messages of `chat` before what it shows: `have` of them are shown (and kept),
+    /// `before` is where the archive's page ends, if known.
+    Older {
+        account: BareJid,
+        chat: BareJid,
+        room: bool,
+        have: usize,
+        before: Option<String>,
     },
     /// One's own status, for every account (`/away`, `/dnd`, `/online`).
     SetStatus(omtalk_xmpp::presence::OwnStatus),
@@ -3482,10 +3504,66 @@ impl App {
     }
 
     fn scroll(&mut self, by: isize) -> Vec<Action> {
-        if let Some(chat) = self.current_mut() {
-            chat.scroll = chat.scroll.saturating_add_signed(by);
+        let top_shown = self.areas.top_shown;
+        let Some(chat) = self.current_mut() else {
+            return Vec::new();
+        };
+        chat.scroll = chat.scroll.saturating_add_signed(by);
+        // Up past the oldest shown: the ones before it.
+        if by > 0 && top_shown {
+            return self.ask_older();
         }
         Vec::new()
+    }
+
+    /// Asks for the open chat's messages before those it shows, once at a time.
+    pub fn ask_older(&mut self) -> Vec<Action> {
+        let Some(chat) = self.current_mut() else {
+            return Vec::new();
+        };
+        if !chat.older_loading && !chat.older_done && chat.kind != ChatKind::Server {
+            chat.older_loading = true;
+            let oldest_archived = chat.lines.iter().find_map(|l| l.archive_id.clone());
+            return vec![Action::Older {
+                account: chat.account.clone(),
+                chat: chat.jid.clone(),
+                room: chat.is_room(),
+                have: chat.lines.iter().filter(|l| !l.notice).count(),
+                before: chat.older_before.clone().or(oldest_archived),
+            }];
+        }
+        Vec::new()
+    }
+
+    /// Older messages of a chat, come from the store or the archive: before the ones
+    /// shown, each once. `before` is where the archive's next page ends.
+    pub fn older(
+        &mut self,
+        account: &BareJid,
+        jid: &BareJid,
+        lines: Vec<Line>,
+        before: Option<String>,
+        done: bool,
+    ) {
+        let Some(chat) = self
+            .chats
+            .iter_mut()
+            .find(|c| &c.account == account && &c.jid == jid)
+        else {
+            return;
+        };
+        chat.older_loading = false;
+        chat.older_done = done;
+        if before.is_some() {
+            chat.older_before = before;
+        }
+        let known: BTreeSet<String> = chat.lines.iter().filter_map(|l| l.id.clone()).collect();
+        let mut older: Vec<Line> = lines
+            .into_iter()
+            .filter(|l| l.id.as_ref().is_none_or(|id| !known.contains(id)))
+            .collect();
+        older.append(&mut chat.lines);
+        chat.lines = older;
     }
 
     fn max_pane(&self) -> u16 {
@@ -3508,7 +3586,8 @@ impl App {
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
             || self.areas.files.iter().any(|(r, _)| inside(*r))
-            || self.areas.fetches.iter().any(|(r, _)| inside(*r));
+            || self.areas.fetches.iter().any(|(r, _)| inside(*r))
+            || inside_opt(self.areas.older);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if inside(self.areas.messages) && !on_link => {
                 // A double click on a message answers it.
@@ -3602,6 +3681,8 @@ impl App {
                     return self.select(index);
                 } else if inside_opt(self.areas.side_devices) {
                     return self.open_keys(None);
+                } else if inside_opt(self.areas.older) {
+                    return self.ask_older();
                 } else if let Some((_, link)) = self.areas.fetches.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Fetch(link.clone())];
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {

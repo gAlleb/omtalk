@@ -145,6 +145,11 @@ Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last me
 the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
 message, yours or someone else's, changes in place and is marked "edited".
 
+Older history: scroll up past the oldest message shown (or click "↑ earlier" above it)
+and the 50 before it come: first from what this device keeps, then from the server's
+archive (MAM). What was encrypted before this device existed cannot be read there and is
+only counted, as in every OMEMO client.
+
 Your status: `/away [words]`, `/dnd [words]`, `/online [words]`, for all accounts at
 once. Contacts and the rooms you are in see it; it is said again after a reconnect and on
 entering a room, and shows by the account at the bottom. omtalk starts online.
