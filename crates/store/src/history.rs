@@ -204,6 +204,22 @@ impl Store {
         Ok(())
     }
 
+    /// The peer in `chat` read one's message `id`, and so all one's messages there
+    /// before it (XEP-0333): those sent or delivered become read.
+    pub fn set_read_up_to(&self, account: &BareJid, chat: &BareJid, id: &str) -> Result<(), Error> {
+        self.db.lock().unwrap().execute(
+            "UPDATE messages SET delivery = 3
+             WHERE account = ?1 AND chat = ?2 AND outgoing = 1 AND delivery IN (1, 2)
+               AND rowid IN (
+                 SELECT m.rowid FROM messages m, messages read
+                 WHERE read.account = ?1 AND read.chat = ?2 AND read.id = ?3 AND read.outgoing = 1
+                   AND m.account = ?1 AND m.chat = ?2
+                   AND (m.at < read.at OR (m.at = read.at AND m.rowid <= read.rowid)))",
+            params![account.as_str(), chat.as_str(), id],
+        )?;
+        Ok(())
+    }
+
     /// One's own message `id` got further; an older step (a receipt after the read
     /// marker) changes nothing, and a failure stays.
     pub fn set_delivery(&self, account: &BareJid, id: &str, delivery: &Delivery) -> Result<(), Error> {
@@ -585,6 +601,47 @@ mod tests {
             state("m2"),
             Some(Delivery::Failed("отказано".into())),
             "a failure stays"
+        );
+    }
+
+    #[test]
+    fn read_up_to_a_message_reads_the_ones_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let (me, bob) = (jid("me@example.org"), jid("bob@example.org"));
+        for (id, at, delivery) in [
+            ("m1", 1, Delivery::Sent),
+            ("m2", 2, Delivery::Delivered),
+            ("m3", 3, Delivery::Failed("отказано".into())),
+            ("m4", 4, Delivery::Sent),
+            ("m5", 5, Delivery::Sent),
+        ] {
+            let own = StoredMessage {
+                sender: me.clone(),
+                outgoing: true,
+                id: Some(id.into()),
+                delivery: Some(delivery),
+                ..message("bob@example.org", "привет", at)
+            };
+            store.save_message(&me, &own).unwrap();
+        }
+        store.set_delivery_in(&me, &bob, "m4", &Delivery::Read).unwrap();
+        store.set_read_up_to(&me, &bob, "m4").unwrap();
+        let states: Vec<_> = store
+            .recent_messages(&me, &bob, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.delivery)
+            .collect();
+        assert_eq!(
+            states,
+            [
+                Some(Delivery::Read),
+                Some(Delivery::Read),
+                Some(Delivery::Failed("отказано".into())),
+                Some(Delivery::Read),
+                Some(Delivery::Sent),
+            ]
         );
     }
 

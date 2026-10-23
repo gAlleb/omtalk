@@ -6181,6 +6181,38 @@ mod tests {
     }
 
     #[test]
+    fn read_up_to_a_message_reads_the_ones_before_it() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        for (i, delivery) in [
+            Delivery::Sent,
+            Delivery::Delivered,
+            Delivery::Sent,
+            Delivery::Sent,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut line = Line::message(i as i64, "я".into(), "привет".into(), true, true);
+            line.id = Some(format!("m{i}"));
+            line.delivery = Some(delivery);
+            app.chats[bob].lines.push(line);
+        }
+        app.delivery_from(&me, &jid("bob@home.org"), "m2", Delivery::Read);
+        let states: Vec<_> = app.chats[bob].lines.iter().map(|l| l.delivery.clone()).collect();
+        assert_eq!(
+            states,
+            [
+                Some(Delivery::Read),
+                Some(Delivery::Read),
+                Some(Delivery::Read),
+                Some(Delivery::Sent),
+            ]
+        );
+    }
+
+    #[test]
     fn only_the_recipient_says_a_message_was_read() {
         let me = jid("me@home.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);

@@ -1513,6 +1513,21 @@ impl App {
                     line.delivery = Some(state.clone());
                 }
             }
+            // Read means read up to there (XEP-0333): the messages before it too, though
+            // the marker names only the newest.
+            if state == Delivery::Read
+                && from.is_some()
+                && let Some(upto) = chat
+                    .lines
+                    .iter()
+                    .rposition(|l| l.outgoing && l.id.as_deref() == Some(id))
+            {
+                for line in chat.lines[..upto].iter_mut().filter(|l| l.outgoing) {
+                    if matches!(line.delivery, Some(Delivery::Sent | Delivery::Delivered)) {
+                        line.delivery = Some(Delivery::Read);
+                    }
+                }
+            }
         }
         found
     }

@@ -908,10 +908,14 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             state,
         } => {
             let kept = kept_delivery(&state);
+            let read = state == Delivery::Read;
             if let Some(chat) = app.delivery_from(&account, &from, &id, state)
                 && let Some(kept) = kept
             {
                 let _ = shared.store.set_delivery_in(&account, &chat, &id, &kept);
+                if read {
+                    let _ = shared.store.set_read_up_to(&account, &chat, &id);
+                }
             }
         }
         Msg::ReadMarks { account, marks } => {
