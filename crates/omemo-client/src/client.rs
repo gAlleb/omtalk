@@ -243,7 +243,15 @@ impl Omemo {
                 if let Some(occupant) = muc::occupant(presence).filter(|o| self.account.in_room(&o.room)) {
                     let mut rooms = self.occupants.lock().await;
                     let room = rooms.entry(occupant.room).or_default();
-                    match occupant.real_jid {
+                    // Oneself is oneself, whatever address the room gives (a gateway as
+                    // biboumi gives its own, an anonymous room none): one's messages
+                    // coming back are one's own, not a second line from someone else.
+                    let real = if occupant.is_self {
+                        Some(self.account.jid().clone())
+                    } else {
+                        occupant.real_jid
+                    };
+                    match real {
                         Some(jid) if occupant.present => drop(room.insert(occupant.nick, jid)),
                         _ => drop(room.remove(&occupant.nick)),
                     }

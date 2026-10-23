@@ -23,6 +23,19 @@ impl Store {
             .optional()?)
     }
 
+    /// Everything kept under a key that starts with `prefix`, the keys without it.
+    pub fn kept_under(&self, prefix: &str) -> Result<Vec<(String, String)>, Error> {
+        let db = self.db.lock().unwrap();
+        let mut query = db.prepare("SELECT key, value FROM kept WHERE substr(key, 1, length(?1)) = ?1")?;
+        let rows = query.query_map([prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (key, value) = row?;
+            found.push((key[prefix.len()..].to_owned(), value));
+        }
+        Ok(found)
+    }
+
     /// Keeps `value` under `key`; none, and nothing is kept there.
     pub fn keep(&self, key: &str, value: Option<&str>) -> Result<(), Error> {
         let db = self.db.lock().unwrap();
@@ -53,5 +66,17 @@ mod tests {
         assert_eq!(store.kept("status").unwrap().as_deref(), Some("away\nобед"));
         store.keep("status", None).unwrap();
         assert_eq!(store.kept("status").unwrap(), None);
+        store.keep("omemo/a/b", Some("0")).unwrap();
+        store.keep("omemo/a/c", Some("1")).unwrap();
+        store.keep("other", Some("x")).unwrap();
+        let mut under = store.kept_under("omemo/").unwrap();
+        under.sort();
+        assert_eq!(
+            under,
+            [
+                ("a/b".to_owned(), "0".to_owned()),
+                ("a/c".to_owned(), "1".to_owned())
+            ]
+        );
     }
 }

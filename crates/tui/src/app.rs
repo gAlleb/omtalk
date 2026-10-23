@@ -61,6 +61,8 @@ pub struct Line {
     pub untrusted: bool,
     /// Corrected since it came (XEP-0308): the text is the corrected one.
     pub edited: bool,
+    /// One's own in a room: the room's copy back has come.
+    pub echoed: bool,
     /// Reactions to it (XEP-0444): whose (a nick in a room, an address otherwise), and
     /// all of theirs.
     pub reactions: BTreeMap<String, Vec<String>>,
@@ -135,6 +137,7 @@ impl Line {
             notice: false,
             untrusted: false,
             edited: false,
+            echoed: false,
             reactions: BTreeMap::new(),
             reply_to: None,
             archive_id: None,
@@ -399,6 +402,12 @@ pub enum Action {
     },
     /// One's own status, for every account (`/away`, `/dnd`, `/online`).
     SetStatus(omtalk_xmpp::presence::OwnStatus),
+    /// OMEMO turned on or off in `chat`, to be kept.
+    SetOmemo {
+        account: BareJid,
+        chat: BareJid,
+        on: bool,
+    },
     /// The messages of `chat` holding `words`.
     Search {
         account: BareJid,
@@ -845,6 +854,8 @@ pub struct App {
     pub active: Option<BareJid>,
     /// Contacts' names in each account's roster: a chat with one opened later takes it.
     pub names: BTreeMap<(BareJid, BareJid), String>,
+    /// Chats where OMEMO was turned on or off by hand: kept, a chat opened takes it.
+    pub omemo_choice: BTreeMap<(BareJid, BareJid), bool>,
     /// The names contacts gave themselves (XEP-0172), after the roster's.
     pub nicknames: BTreeMap<(BareJid, BareJid), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
@@ -937,6 +948,7 @@ impl App {
             own_status: Default::default(),
             names: BTreeMap::new(),
             nicknames: BTreeMap::new(),
+            omemo_choice: BTreeMap::new(),
         }
     }
 
@@ -1012,6 +1024,9 @@ impl App {
             return index;
         }
         let mut chat = Chat::new(account.clone(), jid.clone(), kind);
+        if let Some(&on) = self.omemo_choice.get(&(account.clone(), jid.clone())) {
+            chat.omemo = on;
+        }
         if chat.kind == ChatKind::Direct {
             chat.name = self.name_of(&(account.clone(), jid.clone()));
         }
@@ -1625,12 +1640,28 @@ impl App {
         // which has now arrived.
         if message.direction == Direction::Outgoing
             && let Some(id) = &message.id
-            && self.chats[index]
+            && let Some(line) = self.chats[index]
                 .lines
-                .iter()
-                .any(|l| l.outgoing && l.id.as_ref() == Some(id))
+                .iter_mut()
+                .find(|l| l.outgoing && l.id.as_ref() == Some(id))
         {
+            line.echoed = true;
             self.delivery(account, &id.clone(), Delivery::Sent);
+            return Vec::new();
+        }
+        // A gateway (biboumi) sends it back under an id of its own: the same text, sent
+        // from here a moment ago and not back yet, is that message.
+        if message.direction == Direction::Outgoing
+            && message.nick.is_some()
+            && message.at.is_none()
+            && let Some(line) = self.chats[index].lines.iter_mut().rev().take(30).find(|l| {
+                l.outgoing && !l.echoed && &l.text == text && at - l.at < 120 && l.delivery.is_some()
+            })
+        {
+            line.echoed = true;
+            if matches!(line.delivery, Some(Delivery::Sending | Delivery::Queued)) {
+                line.delivery = Some(Delivery::Sent);
+            }
             return Vec::new();
         }
         let who = match (&message.nick, message.direction) {
@@ -1723,6 +1754,7 @@ impl App {
                     notice: true,
                     untrusted: false,
                     edited: false,
+                    echoed: false,
                     reactions: BTreeMap::new(),
                     reply_to: None,
                     archive_id: None,
@@ -1886,10 +1918,7 @@ impl App {
                 self.quit = true;
                 vec![Action::Quit]
             }
-            KeyCode::Char('o') => {
-                self.toggle_omemo();
-                Vec::new()
-            }
+            KeyCode::Char('o') => self.toggle_omemo(),
             KeyCode::Char('s') => self.open_services(None),
             KeyCode::Char('e') => self.open_keys(None),
             KeyCode::Char('p') => self.open_settings(),
@@ -3505,10 +3534,19 @@ impl App {
         self.services_outcome(outcome)
     }
 
-    pub fn toggle_omemo(&mut self) {
-        if let Some(chat) = self.current_mut() {
-            chat.omemo = !chat.omemo;
-        }
+    /// OMEMO on or off in the open chat; the choice is kept for it.
+    pub fn toggle_omemo(&mut self) -> Vec<Action> {
+        let Some(chat) = self.current_mut() else {
+            return Vec::new();
+        };
+        chat.omemo = !chat.omemo;
+        let (account, jid, on) = (chat.account.clone(), chat.jid.clone(), chat.omemo);
+        self.omemo_choice.insert((account.clone(), jid.clone()), on);
+        vec![Action::SetOmemo {
+            account,
+            chat: jid,
+            on,
+        }]
     }
 
     /// The folder holding a chat, if any.
@@ -3996,7 +4034,7 @@ impl App {
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
-                    self.toggle_omemo();
+                    return self.toggle_omemo();
                 } else if inside(self.areas.attach_button) {
                     // The path is typed (Tab helps), or a file dropped on the terminal.
                     self.input = "/upload ".into();
@@ -4329,6 +4367,78 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn omemo_turned_off_in_a_chat_is_kept_for_it() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let irc = jid("#chan%irc.example.org@irc.example.org");
+        let room = app.chat(&me, &irc, ChatKind::Room { nick: "s".into() });
+        app.select(room);
+        assert!(app.chats[room].omemo, "on unless told");
+        let kept = app.toggle_omemo();
+        assert_eq!(
+            kept,
+            [Action::SetOmemo {
+                account: me.clone(),
+                chat: irc.clone(),
+                on: false
+            }]
+        );
+        // As after a restart: the choice read back, the chat made anew.
+        let mut again = super::tests::app();
+        again.omemo_choice.insert((me.clone(), irc.clone()), false);
+        let room = again.chat(&me, &irc, ChatKind::Room { nick: "s".into() });
+        assert!(!again.chats[room].omemo);
+    }
+
+    #[test]
+    fn ones_message_back_from_a_gateway_under_another_id_is_not_shown_twice() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let room = app.chat(
+            &me,
+            &jid("#chan%irc.example.org@irc.example.org"),
+            ChatKind::Room { nick: "s[x]".into() },
+        );
+        app.select(room);
+        let sent = type_text(&mut app, "привет, IRC");
+        assert_eq!(sent.len(), 1);
+        let back = Incoming {
+            peer: jid("#chan%irc.example.org@irc.example.org"),
+            sender: me.clone(),
+            nick: Some("s[x]".into()),
+            device: None,
+            direction: Direction::Outgoing,
+            encrypted: false,
+            text: Some("привет, IRC".into()),
+            at: None,
+            not_for_this_device: false,
+            id: Some("biboumi-made-1".into()),
+            markable: false,
+            archive_id: None,
+            untrusted: false,
+            reply_to: None,
+            replaces: None,
+            shared_file: false,
+        };
+        let now = chrono::Utc::now().timestamp();
+        app.on_incoming(&me, &back, now);
+        let own: Vec<_> = app.chats[room].lines.iter().filter(|l| !l.notice).collect();
+        assert_eq!(own.len(), 1, "once");
+        assert!(own[0].echoed);
+        // The same words again, sent again: a second line, and its own copy back.
+        type_text(&mut app, "привет, IRC");
+        app.on_incoming(
+            &me,
+            &Incoming {
+                id: Some("biboumi-made-2".into()),
+                ..back
+            },
+            now,
+        );
+        assert_eq!(app.chats[room].lines.iter().filter(|l| !l.notice).count(), 2);
     }
 
     #[test]

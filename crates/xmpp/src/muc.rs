@@ -94,7 +94,7 @@ pub fn occupant(presence: &Presence) -> Option<Occupant> {
 
 /// Whether a presence from a room answers our entering it: our own presence back (status
 /// 110) lets us in, an error presence refuses.
-pub(crate) fn join_outcome(presence: &Presence) -> Option<(BareJid, Result<(), Error>)> {
+pub(crate) fn join_outcome(presence: &Presence) -> Option<(BareJid, Result<String, Error>)> {
     let room = presence.from.as_ref()?.to_bare();
     if presence.type_ == PresenceType::Error {
         let error = presence
@@ -103,8 +103,9 @@ pub(crate) fn join_outcome(presence: &Presence) -> Option<(BareJid, Result<(), E
             .find_map(|p| xmpp_parsers::stanza_error::StanzaError::try_from(p.clone()).ok())?;
         return Some((room, Err(Error::Stanza(Box::new(error)))));
     }
-    let entered = occupant(presence).is_some_and(|o| o.is_self && o.present);
-    entered.then_some((room, Ok(())))
+    // Under the nick the room gives, which a gateway may change (biboumi, status 210).
+    let entered = occupant(presence).filter(|o| o.is_self && o.present)?;
+    Some((room, Ok(entered.nick)))
 }
 
 /// Whether one is still in a room, as the room says to a ping of one's own occupant
@@ -148,10 +149,11 @@ impl Account {
 
     /// Enters a room under `nick`, without the room's history (the archive has it), and
     /// returns once the room has let us in. A refusal comes back as `Error::Stanza`:
+    /// The nick the room gave comes back: a gateway may change the one asked for.
     /// `registration-required` for a members-only room without an invitation,
     /// `conflict` for a nick in use, `forbidden` for a ban. Creates the room if it does
     /// not exist yet; configure it with [`Account::make_private`] right after.
-    pub async fn join(&self, room: &BareJid, nick: &str) -> Result<(), Error> {
+    pub async fn join(&self, room: &BareJid, nick: &str) -> Result<String, Error> {
         let to = room
             .with_resource_str(nick)
             .map_err(|e| Error::Unexpected(e.to_string()))?;
@@ -166,9 +168,11 @@ impl Account {
             .with_to(to)
             .with_payload(muc);
         let joined = self.join_room(room.clone(), presence).await;
-        if joined.is_err() {
+        match &joined {
+            // In, under the nick the room gave.
+            Ok(given) => self.entered(room, Some(given)),
             // Refused: out, or still in under the nick one had.
-            self.entered(room, was.as_deref());
+            Err(_) => self.entered(room, was.as_deref()),
         }
         joined
     }

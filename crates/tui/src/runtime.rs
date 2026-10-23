@@ -486,6 +486,14 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
     app.own_status = kept_status;
+    // OMEMO turned off (or on) by hand in a chat stays so.
+    for (key, on) in store.kept_under(KEPT_OMEMO).unwrap_or_default() {
+        if let Some((account, chat)) = key.split_once('/')
+            && let (Ok(account), Ok(chat)) = (account.parse::<BareJid>(), chat.parse::<BareJid>())
+        {
+            app.omemo_choice.insert((account, chat), on == "1");
+        }
+    }
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
     app.send_typing = ui.typing;
@@ -1597,7 +1605,9 @@ async fn join(
         })
         .unwrap_or_else(|| account.node().map(|n| n.to_string()).unwrap_or_default());
     match xmpp.join(&room, &nick).await {
-        Ok(()) => {
+        // Kept under the nick asked for (a gateway gives its own again); shown under the
+        // one the room gave, which its messages come back under.
+        Ok(given) => {
             let _ = shared.store.remember_room(account, &room, &nick);
             tell(Msg::Log {
                 account: account.clone(),
@@ -1623,7 +1633,7 @@ async fn join(
             tell(Msg::Joined {
                 account: account.clone(),
                 room: room.clone(),
-                nick,
+                nick: given,
                 open,
             });
             // Kept page by page; the room shows its newest, the rest comes on scrolling up.
@@ -2273,6 +2283,10 @@ async fn perform(action: Action, shared: Shared) {
                 at,
             });
         }
+        Action::SetOmemo { account, chat, on } => {
+            let key = format!("{KEPT_OMEMO}{account}/{chat}");
+            let _ = shared.store.keep(&key, Some(if on { "1" } else { "0" }));
+        }
         Action::SetStatus(status) => {
             // For the next run too: away stays away after a restart.
             let kept = (status != Default::default()).then(|| status.to_kept());
@@ -2713,7 +2727,7 @@ async fn perform(action: Action, shared: Shared) {
             let Some((xmpp, _)) = get(&account) else { return };
             // Entering again under another nick is how a nick changes (XEP-0045, 7.6).
             match xmpp.join(&room, &nick).await {
-                Ok(()) => {
+                Ok(_) => {
                     let _ = shared.store.remember_room(&account, &room, &nick);
                     // The account's other clients keep the room under the new nick too.
                     let bookmarks = xmpp.bookmarks().await.unwrap_or_default();
@@ -2897,6 +2911,9 @@ async fn perform(action: Action, shared: Shared) {
 
 /// Where one's own status is kept between runs.
 const KEPT_STATUS: &str = "status";
+
+/// Where a chat's OMEMO on or off is kept: this, then "account/chat".
+const KEPT_OMEMO: &str = "omemo/";
 
 /// How many results `/search` shows.
 const SEARCH_LIMIT: usize = 200;

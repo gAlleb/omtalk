@@ -81,7 +81,7 @@ pub async fn run(omemo: &Omemo, account: &Account, command: Command) {
             let nick =
                 nick.unwrap_or_else(|| account.jid().node().map(|n| n.to_string()).unwrap_or_default());
             match account.join(&room, &nick).await {
-                Ok(()) => {
+                Ok(_) => {
                     show::info(&format!("in {room} as {nick}"));
                     show::caught_up(room.as_str(), omemo.catch_up_room(&room).await)
                 }

@@ -30,7 +30,8 @@ enum Command {
     Join {
         room: BareJid,
         presence: Box<xmpp_parsers::presence::Presence>,
-        reply: oneshot::Sender<Result<(), Error>>,
+        /// The nick the room gave, which may not be the one asked for (status 210).
+        reply: oneshot::Sender<Result<String, Error>>,
     },
     /// A message archive query: its results arrive as messages before the answer.
     Archive {
@@ -207,7 +208,7 @@ impl Account {
         &self,
         room: BareJid,
         presence: xmpp_parsers::presence::Presence,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let (reply, answer) = oneshot::channel();
         self.command(Command::Join {
             room,
@@ -384,7 +385,7 @@ async fn run(
     check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut queries: HashMap<String, Collecting> = HashMap::new();
     // Rooms being entered, until the room confirms or refuses.
-    let mut joins: HashMap<BareJid, oneshot::Sender<Result<(), Error>>> = HashMap::new();
+    let mut joins: HashMap<BareJid, oneshot::Sender<Result<String, Error>>> = HashMap::new();
     let (finished_tx, mut finished) = mpsc::unbounded_channel::<(String, Result<Option<Element>, Error>)>();
     loop {
         // Biased: a query's results come before its answer on the stream, but tokio-xmpp
