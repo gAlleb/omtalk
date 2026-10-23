@@ -486,6 +486,23 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
     app.own_status = kept_status;
+    // Contacts' names as last told, before the chats are made from the history.
+    for account in &jids {
+        let kept = |prefix: &str| {
+            store
+                .kept_under(&format!("{prefix}{account}/"))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(jid, name)| Some((jid.parse::<BareJid>().ok()?, name)))
+                .collect::<Vec<_>>()
+        };
+        for (jid, name) in kept(KEPT_CONTACT_NAME) {
+            app.names.insert((account.clone(), jid), name);
+        }
+        for (jid, name) in kept(KEPT_NICKNAME) {
+            app.nicknames.insert((account.clone(), jid), name);
+        }
+    }
     if let Some(kept) = store.kept(KEPT_FOLDED).ok().flatten() {
         app.collapsed = folded_from_kept(&kept);
     }
@@ -903,8 +920,21 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             Some(hash) => drop(app.avatars.insert(jid, hash)),
             None => drop(app.avatars.remove(&jid)),
         },
-        Msg::Names { account, names } => app.contact_names(&account, names),
-        Msg::Nickname { account, jid, nick } => app.nickname(&account, &jid, nick),
+        // Kept for the next start, which shows them before the roster comes.
+        Msg::Names { account, names } => {
+            for (jid, name) in &names {
+                let _ = shared
+                    .store
+                    .keep(&format!("{KEPT_CONTACT_NAME}{account}/{jid}"), name.as_deref());
+            }
+            app.contact_names(&account, names)
+        }
+        Msg::Nickname { account, jid, nick } => {
+            let _ = shared
+                .store
+                .keep(&format!("{KEPT_NICKNAME}{account}/{jid}"), nick.as_deref());
+            app.nickname(&account, &jid, nick)
+        }
         Msg::Reactions { account, reactions } => drop(app.reacted(&account, &reactions)),
         Msg::Found {
             account,
@@ -2992,6 +3022,12 @@ async fn perform(action: Action, shared: Shared) {
 
 /// Where one's own status is kept between runs.
 const KEPT_STATUS: &str = "status";
+
+/// Where contacts' names in the roster are kept: this, then "account/contact".
+const KEPT_CONTACT_NAME: &str = "contact-name/";
+
+/// Where the names contacts gave themselves (XEP-0172) are kept, as the roster's.
+const KEPT_NICKNAME: &str = "nickname/";
 
 /// Where rooms' names are kept: this, then "account/room".
 const KEPT_ROOM_NAME: &str = "room-name/";
