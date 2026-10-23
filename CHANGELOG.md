@@ -1,7 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 — 2026-10-23
 
+- **A request no longer goes unanswered at the start of a session.** tokio-xmpp 6.0.0 could leave a server's answer unread until the request timed out (its receiving half lost a wakeup while a send was under way). omtalk carries the library with that fixed (`vendor/tokio-xmpp`). This was behind keys loading slowly, a device announced late, and some "could not be decrypted" on a first message.
+- **A new device finds your rooms and chats**: rooms come from the account's bookmarks (autojoin), as Gajim and Conversations keep them, and the chats from the last 100 messages of the archive. Before, the rooms list stayed empty until `/join`.
+- **Bookmarks are no longer lost** when omtalk was the first client to bookmark a room: the server kept only the last one, for all your clients. A node made that way is put right.
+- **Replies, the ⚠ of an untrusted device and room message ids survive a restart.**
+- **A file is kept under its own name**, so a viewer and "save as" show it, not a hash. Files kept before are moved, not fetched again.
+- **A click opens any file** with the viewer again (the limit to known kinds is gone).
+- An avatar no longer disappears when the server is slow to answer for it.
+- The OMEMO device is announced again when the server does not answer at login.
+- An account whose connection task fails connects again instead of staying offline.
+- A picture pasted from the clipboard is named `picture-<time>.png` in any language.
+- A contact's new device is taken at once, as Gajim and Conversations take it.
 - **A link is a link**: a page such as `https://…/notes.md` is shown, never fetched. Files are `aesgcm://` links and links their sender marked as files (XEP-0066), as Conversations, Gajim and Monal send uploads.
 - **Nobody can pass for someone else in a room**: only rooms you are in may say who their occupants are; a message in a room's archive carrying a writer of its own has no known writer.
 - **Only the recipient marks your message delivered, read or refused**, and carbons count only from your own server.
