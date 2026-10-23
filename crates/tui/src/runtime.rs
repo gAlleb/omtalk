@@ -547,9 +547,16 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         fetch_if_media(&link, true, &shared);
     }
     tokio::spawn(pump(events, shared.clone()));
-    if !app.chats.is_empty() {
-        // Opening the first chat asks for what its panes show (the peer's devices).
-        for action in app.select(0) {
+    // The chat open when omtalk was left, else the first account's server channel.
+    // Opening it asks for what its panes show (the peer's devices).
+    let last_open = store.kept(KEPT_OPEN).ok().flatten().and_then(|kept| {
+        let (account, jid) = kept.split_once('\t')?;
+        let (account, jid): (BareJid, BareJid) = (account.parse().ok()?, jid.parse().ok()?);
+        app.chats.iter().position(|c| c.account == account && c.jid == jid)
+    });
+    let start = last_open.or_else(|| jids.first().map(|account| app.server_chat(account)));
+    if let Some(index) = start {
+        for action in app.select(index) {
             tokio::spawn(perform(action, shared.clone()));
         }
     }
@@ -581,10 +588,17 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut mouse_captured = true;
     // Folded folders and accounts, kept as they change.
     let mut folded = app.collapsed.clone();
+    let mut opened = app.current().map(|c| format!("{}\t{}", c.account, c.jid));
     loop {
         terminal
             .draw(|frame| view::draw(frame, &mut app, &mut pictures))
             .map_err(|e| e.to_string())?;
+        // The chat open now, for the next start.
+        let open = app.current().map(|c| format!("{}\t{}", c.account, c.jid));
+        if open != opened {
+            opened = open;
+            let _ = shared.store.keep(KEPT_OPEN, opened.as_deref());
+        }
         if app.collapsed != folded {
             folded = app.collapsed.clone();
             let _ = shared.store.keep(KEPT_FOLDED, Some(&folded_to_kept(&folded)));
@@ -2951,6 +2965,9 @@ async fn perform(action: Action, shared: Shared) {
 
 /// Where one's own status is kept between runs.
 const KEPT_STATUS: &str = "status";
+
+/// Where the chat open when omtalk was left is kept: "account\tchat".
+const KEPT_OPEN: &str = "open";
 
 /// Where the folded folders and accounts of the chat list are kept.
 const KEPT_FOLDED: &str = "folded";
