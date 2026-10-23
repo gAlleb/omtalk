@@ -280,6 +280,11 @@ const SEND_WAIT: Duration = Duration::from_secs(3);
 /// stream is resumed; till then the message shows as going, which is true.
 const ACK_WAIT: Duration = Duration::from_secs(600);
 
+/// How long an answer is waited for aside, after its asker has given up (it waits
+/// `iq_timeout`): then what was kept for it (results of an archive query, the place for
+/// the answer) goes.
+const ANSWER_WAIT: Duration = Duration::from_secs(120);
+
 /// How often the password is tried again while the server does not answer.
 const LOGIN_RECHECK: Duration = Duration::from_secs(60);
 
@@ -425,7 +430,11 @@ async fn run(
                     queries.insert(queryid.clone(), Collecting { archive, own, messages: Vec::new(), reply });
                     let finished = finished_tx.clone();
                     tokio::spawn(async move {
-                        let _ = finished.send((queryid, iq_answer(token.await)));
+                        let answer = match tokio::time::timeout(ANSWER_WAIT, token).await {
+                            Ok(answer) => iq_answer(answer),
+                            Err(_) => Err(Error::Timeout),
+                        };
+                        let _ = finished.send((queryid, answer));
                     });
                 }
                 Some(command) => {
@@ -508,7 +517,11 @@ async fn execute(client: &mut Client, command: Command) -> Option<Option<oneshot
             let token = client.send_iq(to, request).await;
             // The answer arrives later; waiting for it here would stall the stream.
             tokio::spawn(async move {
-                let _ = reply.send(iq_answer(token.await));
+                let answer = match tokio::time::timeout(ANSWER_WAIT, token).await {
+                    Ok(answer) => iq_answer(answer),
+                    Err(_) => Err(Error::Timeout),
+                };
+                let _ = reply.send(answer);
             });
         }
         Command::Archive { .. } | Command::Join { .. } => unreachable!("run() handles these itself"),

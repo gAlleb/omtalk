@@ -3422,6 +3422,18 @@ impl App {
             MouseEventKind::ScrollDown if inside(self.areas.messages) => self.scroll(-3),
             MouseEventKind::ScrollUp if inside_opt(self.areas.left) => self.move_selection(-1),
             MouseEventKind::ScrollDown if inside_opt(self.areas.left) => self.move_selection(1),
+            // A room's participants, as with the arrow keys: the pane follows the one picked.
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if inside_opt(self.areas.right) && !self.room_people().is_empty() =>
+            {
+                self.focus = Focus::People;
+                let code = if mouse.kind == MouseEventKind::ScrollUp {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                (0..3).flat_map(|_| self.people_key(code)).collect()
+            }
             _ => Vec::new(),
         }
     }

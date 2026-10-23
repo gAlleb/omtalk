@@ -5126,6 +5126,42 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_over_the_right_pane_goes_through_a_rooms_participants() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        for i in 0..40 {
+            app.chats[room]
+                .occupants
+                .insert(format!("nick{i:02}"), Some(jid(&format!("u{i}@example.org"))));
+        }
+        let text = screen(&mut app, 120, 24);
+        assert!(!text.contains("nick39"), "the last ones are below: {text}");
+        let right = app.areas.right.unwrap();
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: right.x + 2,
+            row: right.y + 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        for _ in 0..20 {
+            app.on_mouse(wheel(MouseEventKind::ScrollDown));
+        }
+        assert_eq!(app.focus, Focus::People);
+        assert_eq!(app.people_cursor, 39, "down to the last");
+        let text = screen(&mut app, 120, 24);
+        assert!(text.contains("nick39"), "{text}");
+        app.on_mouse(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.people_cursor, 36);
+    }
+
+    #[test]
     fn room_participants_are_picked_with_the_keys() {
         use crossterm::event::{KeyCode, KeyEvent};
         let me = jid("me@example.org");

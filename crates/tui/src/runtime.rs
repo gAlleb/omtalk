@@ -1291,14 +1291,31 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
         .into_iter()
         .map(|(room, _)| room)
         .collect();
-    for mark in xmpp.bookmarks().await.unwrap_or_default() {
+    // Read once for all of them; unread, each room asks again.
+    let marks = xmpp.bookmarks().await.ok();
+    for mark in marks.iter().flatten() {
         if mark.autojoin && !rooms.contains(&mark.room) {
-            rooms.push(mark.room);
+            rooms.push(mark.room.clone());
         }
     }
     for room in rooms {
-        join(&account, &xmpp, &omemo, &shared, room, None, false).await;
+        let entry = Entry {
+            bookmarks: marks.as_deref(),
+            ..Entry::default()
+        };
+        join(&account, &xmpp, &omemo, &shared, room, entry).await;
     }
+}
+
+/// How a room is entered.
+#[derive(Default)]
+struct Entry<'a> {
+    nick: Option<String>,
+    /// Entered by the user just now: the room opens. Rooms entered again on start do not
+    /// take the view.
+    open: bool,
+    /// The account's bookmarks, if read already; `None` reads them.
+    bookmarks: Option<&'a [omtalk_xmpp::bookmarks::Bookmark]>,
 }
 
 async fn join(
@@ -1307,17 +1324,26 @@ async fn join(
     omemo: &Omemo,
     shared: &Shared,
     room: BareJid,
-    nick: Option<String>,
-    // Entered by the user just now: the room opens. Rooms entered again on start do not
-    // take the view.
-    open: bool,
+    entry: Entry<'_>,
 ) {
+    let Entry {
+        nick,
+        open,
+        bookmarks,
+    } = entry;
     let tell = |msg| drop(shared.tx.send(msg));
     // The nick: as asked, else the one the account's other clients use in this room (its
     // bookmark, so they all count as one occupant), else the last one used here, else
     // the account's name.
-    let bookmarks = xmpp.bookmarks().await.unwrap_or_default();
-    let bookmark = bookmarks.iter().find(|b| b.room == room);
+    let fetched;
+    let bookmarks = match bookmarks {
+        Some(known) => Some(known),
+        None => {
+            fetched = xmpp.bookmarks().await.ok();
+            fetched.as_deref()
+        }
+    };
+    let bookmark = bookmarks.into_iter().flatten().find(|b| b.room == room);
     let nick = nick
         .or_else(|| bookmark.and_then(|b| b.nick.clone()))
         .or_else(|| {
@@ -1333,8 +1359,9 @@ async fn join(
                 text: trf!("joined {room} as {nick}", "вход в {room} как {nick}"),
             });
             // A room new to the account goes into its bookmarks, as Gajim does, so its
-            // other clients know it and the nick.
-            if bookmark.is_none() {
+            // other clients know it and the nick. Not when they could not be read: one
+            // there would be written over, its name lost.
+            if bookmarks.is_some() && bookmark.is_none() {
                 let entry = omtalk_xmpp::bookmarks::Bookmark {
                     room: room.clone(),
                     name: None,
@@ -1870,7 +1897,19 @@ async fn perform(action: Action, shared: Shared) {
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
-            join(&account, &xmpp, &omemo, &shared, room, nick, true).await;
+            join(
+                &account,
+                &xmpp,
+                &omemo,
+                &shared,
+                room,
+                Entry {
+                    nick,
+                    open: true,
+                    ..Entry::default()
+                },
+            )
+            .await;
         }
         Action::Leave { account, room, nick } => {
             let Some((xmpp, _)) = get(&account) else { return };
@@ -2194,7 +2233,19 @@ async fn perform(action: Action, shared: Shared) {
             } else {
                 room
             };
-            join(&account, &xmpp, &omemo, &shared, room.clone(), nick, true).await;
+            join(
+                &account,
+                &xmpp,
+                &omemo,
+                &shared,
+                room.clone(),
+                Entry {
+                    nick,
+                    open: true,
+                    ..Entry::default()
+                },
+            )
+            .await;
             // The room was just made and is locked until configured: private, as OMEMO
             // in a room needs, kept, and named.
             match xmpp.make_private_named(&room, name.as_deref()).await {

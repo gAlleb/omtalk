@@ -4,6 +4,9 @@
 
 - **A broken OMEMO session puts itself right.** Two devices that started a session with each other at once (each before the other's first message arrived) ended up in different sessions, and every later message showed as "could not be decrypted". omtalk now keeps the sessions a newer one replaced (up to five per device) and tries them, as libsignal does. A device whose message no session here can read gets a new session and an empty message, so only that one message is lost (at most once an hour per device).
 - A chat found in the archive by a new device stays in the list after a restart, even with nothing readable in it.
+- The mouse wheel over a room's participants goes through them, as the arrow keys do.
+- Bookmarks are read once at login, not once per room; one that could not be read is never written over.
+- A request whose answer never comes no longer keeps what was waiting for it.
 
 ## 0.1.3 — 2026-10-23
 
