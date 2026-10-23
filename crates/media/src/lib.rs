@@ -74,20 +74,23 @@ impl Media {
                 _ => return None,
             };
             let (iv, key) = secret.split_at(iv_len);
-            let media = Media::Encrypted {
+            // A file whatever its name: one without an extension (a program, say) too.
+            // Which may be opened with a click is another matter: see `opens_by_viewer`.
+            return Some(Media::Encrypted {
                 url: format!("https://{location}"),
                 iv: iv.to_vec(),
                 key: key.try_into().ok()?,
-            };
-            // Of a known kind only, as a plain link: a click opens it with the viewer
-            // (xdg-open), which runs a .desktop and shows an .html as a page.
-            return media.is_file().then_some(media);
+            });
         }
-        // An address of a page is a link to follow, not a file to fetch: only one that
-        // ends in a file's name of a known kind is shared as a file.
-        if text.starts_with("https://") && text.len() > "https://".len() {
-            let media = Media::Plain { url: text.to_owned() };
-            return media.is_file().then_some(media);
+        // Only for a link its sender shared as a file (see `Media::shared`), and one that
+        // ends in a file's name, as uploads do: not a page ("…/news/", "…?v=…").
+        if let Some(rest) = text.strip_prefix("https://")
+            && let Some((_, path)) = rest.split_once('/')
+            && !path.is_empty()
+            && !path.ends_with('/')
+            && !text.contains(['?', '#'])
+        {
+            return Some(Media::Plain { url: text.to_owned() });
         }
         None
     }
@@ -112,14 +115,13 @@ impl Media {
             .to_owned()
     }
 
-    /// Whether the name is of a kind of file people share: a picture, sound, film,
-    /// document, archive.
-    pub fn is_file(&self) -> bool {
-        let name = self.name().to_ascii_lowercase();
-        let Some((_, extension)) = name.rsplit_once('.') else {
-            return false;
-        };
-        FILE_KINDS.contains(&extension)
+    /// Whether a click may hand the file to the viewer (xdg-open): a known kind only, as
+    /// pictures, documents, archives. Another (a .desktop the viewer would run, an .html
+    /// it would show as a page, a program) is kept and shown where, not opened.
+    pub fn opens_by_viewer(path: &Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| FILE_KINDS.contains(&e.to_ascii_lowercase().as_str()))
     }
 
     /// Whether the name looks like a picture worth showing inline.
@@ -336,19 +338,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_files_of_a_known_kind_are_files_encrypted_or_not() {
+    fn any_shared_file_is_one_and_only_known_kinds_open_with_a_click() {
         let secret = "ab".repeat(44);
-        assert!(Media::from_text(&format!("aesgcm://up.example.org/a/cat.png#{secret}")).is_some());
-        assert!(
-            Media::from_text(&format!("aesgcm://up.example.org/a/run.desktop#{secret}")).is_none(),
-            "a launcher is no file to open with a click"
-        );
-        assert!(Media::shared("https://up.example.org/a/page.html").is_none());
+        for name in ["cat.png", "run.desktop", "omtalk-aarch64"] {
+            assert!(
+                Media::from_text(&format!("aesgcm://up.example.org/a/{name}#{secret}")).is_some(),
+                "an encrypted {name} is a file"
+            );
+        }
         assert!(
             Media::from_text("https://up.example.org/a/cat.png").is_none(),
             "plain: only when shared"
         );
         assert!(Media::shared("https://up.example.org/a/cat.png").is_some());
+        assert!(Media::opens_by_viewer(Path::new("/c/x.PNG")));
+        assert!(
+            !Media::opens_by_viewer(Path::new("/c/run.desktop")),
+            "a launcher is not run by a click"
+        );
+        assert!(
+            !Media::opens_by_viewer(Path::new("/c/omtalk-aarch64")),
+            "nor a program"
+        );
+        assert!(!Media::opens_by_viewer(Path::new("/c/page.html")));
     }
 
     fn encrypt(plain: &[u8], iv: &[u8; 12], key: &[u8; 32]) -> Vec<u8> {
