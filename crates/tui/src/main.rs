@@ -37,8 +37,9 @@ fn main() {
         }
     };
     crate::lang::set(options.config.ui.language);
-    // One omtalk per database: said before anything else, the screen still the shell's.
-    let _database = match runtime::lock_database(&options) {
+    // One omtalk per account and database: said before anything else, the screen still
+    // the shell's.
+    let _accounts = match runtime::lock_accounts(&options) {
         Ok(lock) => lock,
         Err(message) => {
             eprintln!("{message}");

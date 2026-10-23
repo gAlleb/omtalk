@@ -37,9 +37,10 @@ target/release/omtalk you@example.org      # one account
 target/release/omtalk                      # accounts from ~/.config/omtalk/config.toml
 ```
 
-One omtalk runs per database (`~/.local/share/omtalk/omtalk.db`): it is one OMEMO device,
-and two copies of it would knock each other offline. A second client on the same machine
-is a device of its own: `omtalk --db ~/.local/share/omtalk/second.db`.
+Several omtalks run side by side with different accounts. An account in the database
+(`~/.local/share/omtalk/omtalk.db`) is one OMEMO device, so it is open in one omtalk at a
+time: two copies would knock each other offline. A second client of the same account on
+the same machine is a device of its own: `omtalk --db ~/.local/share/omtalk/second.db`.
 
 ```toml
 # ~/.config/omtalk/config.toml

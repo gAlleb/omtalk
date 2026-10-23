@@ -109,31 +109,41 @@ impl Options {
     }
 }
 
-/// Holds the database for this process alone, as long as the returned file lives. The
-/// database is one OMEMO device: two omtalks on it would be one device twice, sharing
-/// a resource the server gives to the last one in, each pushing the other out, and
-/// both writing the same keys. A second client on this machine takes a database of its
-/// own (`--db`), and is a device of its own.
-pub fn lock_database(options: &Options) -> Result<std::fs::File, String> {
-    let path = options.db.with_extension("lock");
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(trf!(
-            "omtalk is running already with {}: a second client here needs a database of its own, as: omtalk --db ~/.local/share/omtalk/second.db",
-            "omtalk уже запущен с {}: второму клиенту на этой машине нужна своя база, например: omtalk --db ~/.local/share/omtalk/second.db",
-            options.db.display()
-        )),
-        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
-    }
+/// Holds this process's accounts in the database, as long as the returned files live.
+/// An account's keys there are one OMEMO device: two omtalks with it would be that
+/// device twice, sharing a resource the server gives to the last one in, each pushing
+/// the other out. Other accounts on the same database run side by side, as before.
+pub fn lock_accounts(options: &Options) -> Result<Vec<std::fs::File>, String> {
+    let stem = options
+        .db
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = options.db.parent().map(PathBuf::from).unwrap_or_default();
+    let _ = std::fs::create_dir_all(&dir);
+    options
+        .config
+        .accounts
+        .iter()
+        .map(|account| {
+            let path = dir.join(format!("{stem}.{}.lock", account.jid));
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            match file.try_lock() {
+                Ok(()) => Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) => Err(trf!(
+                    "{} is open in another omtalk already: a second client of the same account here needs a database of its own, as: omtalk --db ~/.local/share/omtalk/second.db",
+                    "{} уже открыт в другом omtalk: второму клиенту того же аккаунта на этой машине нужна своя база, например: omtalk --db ~/.local/share/omtalk/second.db",
+                    account.jid
+                )),
+                Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+            }
+        })
+        .collect()
 }
 
 /// Account settings with passwords, read before the screen is taken over.

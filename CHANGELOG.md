@@ -6,7 +6,7 @@
 - **Nobody can pass for someone else in a room**: only rooms you are in may say who their occupants are; a message in a room's archive carrying a writer of its own has no known writer; a device seen for the first time must be listed by its account.
 - **Only the recipient marks your message delivered, read or refused**, and carbons count only from your own server.
 - Files: avatar ids are only hashes (never paths), nothing is fetched on start with `auto_download = false`, the cache is yours alone (0700), downloads time out.
-- **One omtalk per database**: a second one started on the same machine and account used to knock the first offline (both are the same device); it now says so and how to start it with a database of its own (`--db`).
+- **One omtalk per account**: a second one with the same account and database used to knock the first offline (both are the same device); it now says so and how to start it with a database of its own (`--db`). Different accounts still run side by side.
 - The keys of a chat show at once from what is known, then refresh from the server.
 - Message styling no longer slows down on long lines.
 - Typing anywhere types into the input line.
