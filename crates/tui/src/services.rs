@@ -100,6 +100,8 @@ pub struct Services {
     pub listing: Option<Listing>,
     /// Row under the cursor: items first, then commands.
     pub cursor: usize,
+    /// A button of the listing has the cursor instead (Tab): Back, Reload, Close.
+    pub button: Option<usize>,
     /// Where Back goes.
     back: Vec<(Jid, Option<String>)>,
     pub form: Option<FormState>,
@@ -107,6 +109,9 @@ pub struct Services {
     pub problem: Option<String>,
     pub loading: bool,
 }
+
+/// The buttons below a listing: Back, Reload, Close.
+pub const LISTING_BUTTONS: usize = 3;
 
 impl Services {
     pub fn open(account: BareJid, jid: Jid) -> (Self, Request) {
@@ -121,6 +126,7 @@ impl Services {
             node: None,
             listing: None,
             cursor: 0,
+            button: None,
             back: Vec::new(),
             form: None,
             problem: None,
@@ -185,8 +191,52 @@ impl Services {
         if self.form.is_some() {
             return self.form_key(key);
         }
+        // Tab goes to the buttons below the list and through them; ←/→ there too,
+        // Enter presses the one picked, ↑/↓ go back to the list.
+        if let Some(button) = self.button {
+            return match key.code {
+                KeyCode::Esc => Outcome::Close,
+                KeyCode::Left => {
+                    self.button = Some(button.saturating_sub(1));
+                    Outcome::Stay
+                }
+                KeyCode::Right => {
+                    self.button = Some((button + 1).min(LISTING_BUTTONS - 1));
+                    Outcome::Stay
+                }
+                KeyCode::Tab => {
+                    self.button = (button + 1 < LISTING_BUTTONS).then_some(button + 1);
+                    Outcome::Stay
+                }
+                KeyCode::BackTab => {
+                    self.button = button.checked_sub(1);
+                    Outcome::Stay
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.button = None;
+                    Outcome::Stay
+                }
+                KeyCode::Enter => {
+                    self.button = None;
+                    match button {
+                        0 => self.go_back(),
+                        1 => self.reload(),
+                        _ => Outcome::Close,
+                    }
+                }
+                _ => Outcome::Stay,
+            };
+        }
         match key.code {
             KeyCode::Esc => Outcome::Close,
+            KeyCode::Tab => {
+                self.button = Some(0);
+                Outcome::Stay
+            }
+            KeyCode::BackTab => {
+                self.button = Some(LISTING_BUTTONS - 1);
+                Outcome::Stay
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 Outcome::Stay
@@ -591,6 +641,35 @@ mod tests {
             }),
         );
         services
+    }
+
+    #[test]
+    fn tab_reaches_the_listings_buttons_and_enter_presses_the_one_picked() {
+        let mut services = Services::open(
+            "me@example.org".parse().unwrap(),
+            "irc.example.org".parse().unwrap(),
+        )
+        .0;
+        services.on_key(key(KeyCode::Tab));
+        assert_eq!(services.button, Some(0), "Back first");
+        services.on_key(key(KeyCode::Right));
+        assert_eq!(services.button, Some(1));
+        assert!(
+            matches!(
+                services.on_key(key(KeyCode::Enter)),
+                Outcome::Request(Request::Browse { .. }, _)
+            ),
+            "Reload"
+        );
+        assert_eq!(services.button, None, "back to the list");
+        for _ in 0..LISTING_BUTTONS {
+            services.on_key(key(KeyCode::Tab));
+        }
+        assert_eq!(services.button, Some(LISTING_BUTTONS - 1), "Close");
+        assert_eq!(services.on_key(key(KeyCode::Enter)), Outcome::Close);
+        services.on_key(key(KeyCode::Tab));
+        services.on_key(key(KeyCode::Down));
+        assert_eq!(services.button, None, "↓ goes back to the rows");
     }
 
     #[test]

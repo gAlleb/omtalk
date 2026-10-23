@@ -2620,14 +2620,28 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
                 }
                 frame.render_widget(Paragraph::new(line), place);
             }
+            // Each with its key; the one Tab reached is stressed.
+            let picked = services.button;
             labels = vec![
-                (tr!("Back", "Назад").into(), ServiceButton::Back, false),
-                (tr!("Reload", "Обновить").into(), ServiceButton::Reload, false),
-                (tr!("Close", "Закрыть").into(), ServiceButton::Close, false),
+                (
+                    tr!("Back ←", "Назад ←").into(),
+                    ServiceButton::Back,
+                    picked == Some(0),
+                ),
+                (
+                    tr!("Reload r", "Обновить r").into(),
+                    ServiceButton::Reload,
+                    picked == Some(1),
+                ),
+                (
+                    tr!("Close Esc", "Закрыть Esc").into(),
+                    ServiceButton::Close,
+                    picked == Some(2),
+                ),
             ];
             hint_text = tr!(
-                "Enter opens · ← back · r reload · Esc closes",
-                "Enter открыть · ← назад · r обновить · Esc закрыть"
+                "Enter opens · Tab buttons · ← back · r reload · Esc closes",
+                "Enter открыть · Tab кнопки · ← назад · r обновить · Esc закрыть"
             )
             .into();
         }
