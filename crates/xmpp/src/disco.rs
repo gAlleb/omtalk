@@ -26,6 +26,9 @@ const FEATURES: &[&str] = &[
     ns::DISPLAYED_MARKERS,
     "urn:xmpp:mds:displayed:0+notify",
     ns::CHATSTATES,
+    // Direct invitations to rooms (XEP-0249) and replies (XEP-0461) are understood.
+    "jabber:x:conference",
+    "urn:xmpp:reply:0",
     // Message styling: *strong*, _emphasis_ and the like are shown (XEP-0393).
     "urn:xmpp:styling:0",
     // Avatars: a change is pushed (XEP-0084).

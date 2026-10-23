@@ -444,7 +444,10 @@ pub fn write(path: &std::path::Path, section: &str, key: &str, value: &Written) 
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     // Whole or not at all: a new file next to it, then put in its place.
-    let fresh = path.with_extension("toml.new");
+    // A name of its own: two settings changed at once must not write the same file.
+    static WRITES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fresh = path.with_extension(format!("toml.new.{}.{n}", std::process::id()));
     std::fs::write(&fresh, doc.to_string()).map_err(|e| format!("{}: {e}", fresh.display()))?;
     if let Ok(meta) = std::fs::metadata(path) {
         let _ = std::fs::set_permissions(&fresh, meta.permissions());

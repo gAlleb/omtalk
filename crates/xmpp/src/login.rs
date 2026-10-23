@@ -67,6 +67,12 @@ pub(crate) async fn check(config: &AccountConfig) -> Login {
     };
     match result {
         Ok(()) => Login::Accepted,
+        // A server that fails a login for now (temporary-auth-failure) or breaks off
+        // (aborted) may take the same password a moment later: retried, not given up.
+        Err(XmppError::Auth(tokio_xmpp::error::AuthError::Fail(
+            xmpp_parsers::sasl::DefinedCondition::TemporaryAuthFailure
+            | xmpp_parsers::sasl::DefinedCondition::Aborted,
+        ))) => Login::Unreachable("the server could not check the password just now".into()),
         Err(XmppError::Auth(error)) => Login::Refused(error.to_string()),
         Err(error) => Login::Unreachable(error.to_string()),
     }

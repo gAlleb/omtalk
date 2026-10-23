@@ -187,7 +187,14 @@ pub fn desktop(
         Some(room) => format!("{who} · {room}"),
         None => who.to_owned(),
     };
-    let body: String = text.chars().take(200).collect();
+    // notify-send bodies are markup to most daemons: a message's "<b>" is text here.
+    let body: String = text
+        .chars()
+        .take(200)
+        .collect::<String>()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     let mut command = vec![
         "notify-send".into(),
         "--app-name=omtalk".into(),

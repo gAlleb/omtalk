@@ -2304,19 +2304,17 @@ async fn perform(action: Action, shared: Shared) {
             fetch_media(link, shared.clone()).await;
         }
         Action::Open(path) => {
-            // Detached and silent: the viewer must not write over the interface.
+            // Detached and silent: the viewer must not write over the interface. Waited
+            // for aside, so that it leaves no zombie behind.
             let opened = std::process::Command::new(&shared.viewer)
                 .arg(&path)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
-            if let Err(e) = opened {
-                tell(Msg::Notice {
-                    account: BareJid::new("omtalk@localhost").unwrap(),
-                    chat: None,
-                    text: format!("{}: {e}", shared.viewer),
-                });
+            match opened {
+                Ok(mut child) => drop(tokio::task::spawn_blocking(move || child.wait())),
+                Err(e) => tell(Msg::Status(format!("{}: {e}", shared.viewer))),
             }
         }
         Action::Quit => {}

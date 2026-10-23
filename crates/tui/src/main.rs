@@ -60,6 +60,9 @@ fn main() {
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
         default_hook(info);
+        // A task that panicked would leave the interface running on a terminal given
+        // back: leave, with the message above.
+        std::process::exit(101);
     }));
 
     if let Err(e) = enable_raw_mode().and_then(|_| {
