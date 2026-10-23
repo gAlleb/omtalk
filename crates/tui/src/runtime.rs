@@ -2466,7 +2466,14 @@ async fn load_avatar(shared: Shared, xmpp: Account, jid: BareJid, from: AvatarFr
     let from = match from {
         AvatarFrom::Ask => match xmpp.avatar_id(&jid).await {
             Ok(Some(id)) => AvatarFrom::Pep(id),
-            _ => AvatarFrom::VCard(None),
+            // No avatar in PEP (or no PEP to read): perhaps one in the vCard.
+            Ok(None) | Err(omtalk_xmpp::Error::Stanza(_)) => AvatarFrom::VCard(None),
+            // No answer is not "no avatar": the vCard of one who has it in PEP only
+            // has none, and what was drawn would go. It stays.
+            Err(_) => {
+                shared.avatar_loads.lock().unwrap().remove(&busy);
+                return;
+            }
         },
         from => from,
     };
