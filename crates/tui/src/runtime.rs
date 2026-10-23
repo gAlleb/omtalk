@@ -1986,6 +1986,15 @@ async fn perform(action: Action, shared: Shared) {
                 }
             }
         }
+        Action::SetStatus(status) => {
+            for (xmpp, _) in shared.accounts.values() {
+                if let Err(e) = xmpp.set_status(status.clone()).await
+                    && !matches!(e, omtalk_xmpp::Error::Queued)
+                {
+                    tell(Msg::Status(trf!("status not sent: {e}", "статус не ушёл: {e}")));
+                }
+            }
+        }
         Action::React {
             account,
             chat,

@@ -106,6 +106,24 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/away",
+        args: ["[TEXT]", "[ТЕКСТ]"],
+        about: [
+            "status: away, with words of your own",
+            "статус: отошёл, можно со своими словами",
+        ],
+    },
+    Command {
+        name: "/dnd",
+        args: ["[TEXT]", "[ТЕКСТ]"],
+        about: ["status: do not disturb", "статус: не беспокоить"],
+    },
+    Command {
+        name: "/online",
+        args: ["[TEXT]", "[ТЕКСТ]"],
+        about: ["status: online again", "статус: снова в сети"],
+    },
+    Command {
         name: "/react",
         args: ["EMOJI", "ЭМОДЗИ"],
         about: [

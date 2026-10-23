@@ -1909,8 +1909,14 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
             theme::warn()
         };
         left.push(Span::styled("● ", Style::default().fg(colour)));
+        // Online, one's own status says more: "away: lunch".
+        let words = if state.online() && app.own_status != Default::default() {
+            crate::app::status_words(&app.own_status)
+        } else {
+            state.words().to_string()
+        };
         left.push(Span::styled(
-            format!("{account} {}  ", state.words()),
+            format!("{account} {words}  "),
             Style::default().fg(theme::dim()),
         ));
     }

@@ -139,11 +139,15 @@ switches focus.
 
 Commands: `/msg`, `/join`, `/leave`, `/add`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/reply`, `/react`, `/edit`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+`/name`, `/nick`, `/reply`, `/react`, `/edit`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
 
 Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last message of
 the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
 message, yours or someone else's, changes in place and is marked "edited".
+
+Your status: `/away [words]`, `/dnd [words]`, `/online [words]`, for all accounts at
+once. Contacts and the rooms you are in see it; it is said again after a reconnect and on
+entering a room, and shows by the account at the bottom. omtalk starts online.
 
 Reactions (XEP-0444): `/react 👍` reacts to the message selected with the mouse, or the
 last one from someone; the same again takes it back. Reactions show under the message,

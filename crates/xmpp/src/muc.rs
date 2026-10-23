@@ -86,13 +86,18 @@ impl Account {
             .map_err(|e| Error::Unexpected(e.to_string()))?;
         let muc = Muc::new().with_history(History::new().with_maxstanzas(0));
         // Counted in already: the room tells who is there before it confirms the entry.
-        let was_in = self.in_room(room);
-        self.entered(room, true);
-        let joined = self
-            .join_room(room.clone(), Presence::available().with_to(to).with_payload(muc))
-            .await;
-        if joined.is_err() && !was_in {
-            self.entered(room, false);
+        let was = self.nick_in(room);
+        self.entered(room, Some(nick));
+        // One's status goes in with one.
+        let presence = self
+            .status()
+            .on(Presence::available())
+            .with_to(to)
+            .with_payload(muc);
+        let joined = self.join_room(room.clone(), presence).await;
+        if joined.is_err() {
+            // Refused: out, or still in under the nick one had.
+            self.entered(room, was.as_deref());
         }
         joined
     }
@@ -101,7 +106,7 @@ impl Account {
         let to = room
             .with_resource_str(nick)
             .map_err(|e| Error::Unexpected(e.to_string()))?;
-        self.entered(room, false);
+        self.entered(room, None);
         self.send(Presence::unavailable().with_to(to)).await
     }
 

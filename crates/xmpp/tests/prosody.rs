@@ -935,3 +935,57 @@ async fn a_bookmark_node_made_here_keeps_all_of_them() {
         assert!(read.contains(room), "{room} lost: {read:?}");
     }
 }
+
+/// One's status goes to the rooms one is in, with one's words, and into rooms entered
+/// after it was set.
+#[tokio::test]
+async fn ones_status_reaches_the_rooms_one_is_in() {
+    use omtalk_xmpp::presence::OwnStatus;
+    use xmpp_parsers::presence::Show;
+    let (mut accounts, mut events) = Accounts::new();
+    let away = accounts.add(config("u49")).await;
+    let watcher = accounts.add(config("u50")).await;
+    online(&mut events, &[&away, &watcher]).await;
+    let room: BareJid = format!("status-{}@muc.localhost", rand_suffix()).parse().unwrap();
+    watcher.join(&room, "watcher").await.unwrap();
+    watcher.set_room_name(&room, "status").await.unwrap();
+    away.join(&room, "away").await.unwrap();
+
+    let status = OwnStatus {
+        show: Some(Show::Away),
+        text: Some("обед".into()),
+    };
+    away.set_status(status.clone()).await.unwrap();
+    assert_eq!(away.status(), status, "kept");
+    assert_eq!(away_seen(&mut events, watcher.jid(), &room, "away").await, "обед");
+
+    // Entering again under another nick: the status goes in with it.
+    away.join(&room, "away2").await.unwrap();
+    assert_eq!(
+        away_seen(&mut events, watcher.jid(), &room, "away2").await,
+        "обед"
+    );
+}
+
+/// The words of the next "away" presence `watcher` gets of `nick` in `room`.
+async fn away_seen(
+    events: &mut UnboundedReceiver<AccountEvent>,
+    watcher: &BareJid,
+    room: &BareJid,
+    nick: &str,
+) -> String {
+    use xmpp_parsers::presence::Show;
+    wait_for(events, |e| match &e.event {
+        Event::Presence(p)
+            if e.account == *watcher
+                && p.from.as_ref().is_some_and(|f| {
+                    f.to_bare() == *room && f.resource().is_some_and(|r| r.as_str() == nick)
+                })
+                && p.show == Some(Show::Away) =>
+        {
+            p.statuses.values().next().cloned()
+        }
+        _ => None,
+    })
+    .await
+}

@@ -61,7 +61,10 @@ pub struct Account {
     /// The rooms this account entered (or is entering) and has not left: only they may
     /// say who their occupants are and speak in groupchat. Anyone can send a presence
     /// or a groupchat message that looks like a room's.
-    rooms: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<BareJid>>>,
+    /// With the nick each is entered under: a status changed goes to them too.
+    rooms: std::sync::Arc<std::sync::Mutex<HashMap<BareJid, String>>>,
+    /// One's own status, said on every login and on entering a room.
+    status: std::sync::Arc<std::sync::Mutex<crate::presence::OwnStatus>>,
 }
 
 impl Account {
@@ -72,27 +75,58 @@ impl Account {
         let jid = config.jid.clone();
         let account = jid.clone();
         let iq_timeout = config.iq_timeout;
-        tokio::spawn(supervise(config, account, queue, events));
+        let status: std::sync::Arc<std::sync::Mutex<crate::presence::OwnStatus>> = Default::default();
+        tokio::spawn(supervise(config, account, queue, events, status.clone()));
         Self {
             jid,
             commands,
             iq_timeout,
             rooms: Default::default(),
+            status,
         }
     }
 
     /// Whether `room` is one this account entered and has not left.
     pub fn in_room(&self, room: &BareJid) -> bool {
-        self.rooms.lock().unwrap().contains(room)
+        self.rooms.lock().unwrap().contains_key(room)
     }
 
-    pub(crate) fn entered(&self, room: &BareJid, yes: bool) {
-        let mut rooms = self.rooms.lock().unwrap();
-        if yes {
-            rooms.insert(room.clone());
-        } else {
-            rooms.remove(room);
+    /// One's own status now.
+    pub fn status(&self) -> crate::presence::OwnStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// Says `status` to contacts (the server passes it on) and to every room entered;
+    /// kept for the next logins and rooms.
+    pub async fn set_status(&self, status: crate::presence::OwnStatus) -> Result<(), Error> {
+        *self.status.lock().unwrap() = status.clone();
+        let rooms: Vec<(BareJid, String)> = self
+            .rooms
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(room, nick)| (room.clone(), nick.clone()))
+            .collect();
+        self.send(status.on(crate::disco::presence())).await?;
+        for (room, nick) in rooms {
+            if let Ok(to) = room.with_resource_str(&nick) {
+                self.send(status.on(crate::disco::presence()).with_to(to)).await?;
+            }
         }
+        Ok(())
+    }
+
+    /// Counts `room` in under `nick`, or out (`None`).
+    pub(crate) fn entered(&self, room: &BareJid, nick: Option<&str>) {
+        let mut rooms = self.rooms.lock().unwrap();
+        match nick {
+            Some(nick) => drop(rooms.insert(room.clone(), nick.to_owned())),
+            None => drop(rooms.remove(room)),
+        }
+    }
+
+    pub(crate) fn nick_in(&self, room: &BareJid) -> Option<String> {
+        self.rooms.lock().unwrap().get(room).cloned()
     }
 
     pub fn jid(&self) -> &BareJid {
@@ -243,6 +277,7 @@ async fn supervise(
     account: BareJid,
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::UnboundedSender<AccountEvent>,
+    status: std::sync::Arc<std::sync::Mutex<crate::presence::OwnStatus>>,
 ) {
     let emit = |event| {
         let _ = events.send(AccountEvent {
@@ -263,7 +298,7 @@ async fn supervise(
     // tokio-xmpp's own task ends only when it fails inside; the account would stay
     // offline till omtalk restarts. A new connection instead, after a pause that grows.
     let mut pause = Duration::from_secs(2);
-    while let Ended::Lost = run(connect(&config), &config, &mut commands, &emit, liveness).await {
+    while let Ended::Lost = run(connect(&config), &config, &mut commands, &emit, liveness, &status).await {
         emit(Event::Disconnected {
             reason: "the connection task ended; connecting again".into(),
         });
@@ -312,6 +347,7 @@ async fn run(
     commands: &mut mpsc::Receiver<Command>,
     emit: &impl Fn(Event),
     liveness: Liveness,
+    status: &std::sync::Mutex<crate::presence::OwnStatus>,
 ) -> Ended {
     let own = &config.jid;
     // While the server does not answer, whether the password still works: tokio-xmpp
@@ -367,7 +403,8 @@ async fn run(
                     {
                         let _ = reply.send(outcome);
                     }
-                    if let Some(event) = handle(&mut client, own, event).await {
+                    let said = status.lock().unwrap().clone();
+                    if let Some(event) = handle(&mut client, own, event, &said).await {
                         emit(event);
                     }
                 }
@@ -531,7 +568,12 @@ async fn execute(client: &mut Client, command: Command) -> Option<Option<oneshot
 }
 
 /// Answers what the protocol requires and turns the rest into an [`Event`].
-async fn handle(client: &mut Client, own: &BareJid, event: ClientEvent) -> Option<Event> {
+async fn handle(
+    client: &mut Client,
+    own: &BareJid,
+    event: ClientEvent,
+    status: &crate::presence::OwnStatus,
+) -> Option<Event> {
     match event {
         ClientEvent::Online {
             bound_jid, resumed, ..
@@ -545,7 +587,7 @@ async fn handle(client: &mut Client, own: &BareJid, event: ClientEvent) -> Optio
                     items: Vec::new(),
                 };
                 drop(client.send_iq(None, IqRequest::Get(query.into())).await);
-                let _ = client.send_stanza(disco::presence().into()).await;
+                let _ = client.send_stanza(status.on(disco::presence()).into()).await;
             }
             Some(Event::Online {
                 jid: bound_jid.try_into_full().ok()?,

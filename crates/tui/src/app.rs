@@ -365,6 +365,8 @@ pub enum Action {
         /// A correction (XEP-0308) of one's own message with this id.
         replace: Option<String>,
     },
+    /// One's own status, for every account (`/away`, `/dnd`, `/online`).
+    SetStatus(omtalk_xmpp::presence::OwnStatus),
     /// One's reactions to the message `id` (XEP-0444), all of them now; as `by` they
     /// are kept.
     React {
@@ -743,6 +745,8 @@ pub struct App {
     pub active: Option<BareJid>,
     /// Contacts' names in each account's roster: a chat with one opened later takes it.
     pub names: BTreeMap<(BareJid, BareJid), String>,
+    /// One's own status, as set last (`/away`…): plain online at the start.
+    pub own_status: omtalk_xmpp::presence::OwnStatus,
     /// When Ctrl+C was pressed once: a second one within [`QUIT_AGAIN`] quits.
     pub quit_asked: Option<std::time::Instant>,
     pub quit: bool,
@@ -822,6 +826,7 @@ impl App {
             active: None,
             quit: false,
             quit_asked: None,
+            own_status: Default::default(),
             names: BTreeMap::new(),
         }
     }
@@ -2418,6 +2423,22 @@ impl App {
                 return self.open_keys(peer);
             }
             ("/reply", _) => return self.reply_here(),
+            ("/away" | "/dnd" | "/online", _) => {
+                use xmpp_parsers::presence::Show;
+                let show = match name {
+                    "/away" => Some(Show::Away),
+                    "/dnd" => Some(Show::Dnd),
+                    _ => None,
+                };
+                let text = line[name.len()..].trim();
+                let status = omtalk_xmpp::presence::OwnStatus {
+                    show,
+                    text: (!text.is_empty()).then(|| text.to_owned()),
+                };
+                self.own_status = status.clone();
+                self.status = trf!("status: {}", "статус: {}", status_words(&status));
+                return vec![Action::SetStatus(status)];
+            }
             ("/react", _) => {
                 let reaction = line["/react".len()..].trim();
                 return self.react_here(reaction);
@@ -3678,6 +3699,22 @@ impl App {
     }
 }
 
+/// One's own status in words: "away: lunch".
+pub fn status_words(status: &omtalk_xmpp::presence::OwnStatus) -> String {
+    use xmpp_parsers::presence::Show;
+    let show = match status.show {
+        None => tr!("online", "в сети"),
+        Some(Show::Away) => tr!("away", "отошёл"),
+        Some(Show::Dnd) => tr!("do not disturb", "не беспокоить"),
+        Some(Show::Xa) => tr!("away for long", "давно нет"),
+        Some(Show::Chat) => tr!("free to chat", "готов поболтать"),
+    };
+    match &status.text {
+        Some(text) => format!("{show}: {text}"),
+        None => show.to_owned(),
+    }
+}
+
 /// Whether `text` is an action, "/me waves" (XEP-0245), shown as "* nick waves".
 pub fn is_action(text: &str) -> bool {
     text.strip_prefix("/me")
@@ -3871,6 +3908,33 @@ mod tests {
         type_text(&mut app, "/edit");
         app.on_key(key(KeyCode::Esc));
         assert!(app.editing.is_none() && app.input.is_empty());
+    }
+
+    #[test]
+    fn away_and_dnd_set_ones_status_with_words_and_online_clears_it() {
+        use omtalk_xmpp::presence::OwnStatus;
+        use xmpp_parsers::presence::Show;
+        let mut app = app();
+        let sent = type_text(&mut app, "/away обед до двух");
+        let away = OwnStatus {
+            show: Some(Show::Away),
+            text: Some("обед до двух".into()),
+        };
+        assert_eq!(sent, [Action::SetStatus(away.clone())]);
+        assert_eq!(app.own_status, away);
+        assert_eq!(status_words(&app.own_status), "отошёл: обед до двух");
+        assert!(matches!(
+            &type_text(&mut app, "/dnd")[..],
+            [Action::SetStatus(OwnStatus {
+                show: Some(Show::Dnd),
+                text: None
+            })]
+        ));
+        assert_eq!(
+            type_text(&mut app, "/online"),
+            [Action::SetStatus(OwnStatus::default())]
+        );
+        assert_eq!(app.own_status, OwnStatus::default());
     }
 
     #[test]

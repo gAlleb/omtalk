@@ -28,6 +28,28 @@ pub enum State {
     Xa,
 }
 
+/// One's own status, as told to contacts and rooms: away, do not disturb…, and words
+/// of one's own. The default is plain online.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OwnStatus {
+    pub show: Option<Show>,
+    pub text: Option<String>,
+}
+
+impl OwnStatus {
+    /// `presence` saying it.
+    pub fn on(&self, mut presence: Presence) -> Presence {
+        presence.show = self.show.clone();
+        presence.statuses.clear();
+        if let Some(text) = self.text.as_ref().filter(|t| !t.trim().is_empty()) {
+            presence
+                .statuses
+                .insert(xmpp_parsers::message::Lang::default(), text.trim().to_owned());
+        }
+        presence
+    }
+}
+
 /// What a presence says about a client, if it is about one: not a room's (see
 /// [`crate::muc`]), not a subscription, not an error.
 pub fn online(presence: &Presence) -> Option<Online> {
