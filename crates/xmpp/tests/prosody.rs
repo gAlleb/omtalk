@@ -1024,3 +1024,26 @@ async fn a_chats_archive_is_read_backwards_page_by_page() {
     let bodies: Vec<String> = before.messages.iter().map(body).collect();
     assert_eq!(bodies.last(), Some(&format!("{tag}-0")), "{bodies:?}");
 }
+
+/// A room says whether one is still in it (XEP-0410): yes while one is, no once it has
+/// let one go without one knowing (here: left behind omtalk's back).
+#[tokio::test]
+async fn a_room_says_whether_one_is_still_in_it() {
+    use omtalk_xmpp::muc::InRoom;
+    let (mut accounts, mut events) = Accounts::new();
+    let me = accounts.add(config("u57")).await;
+    online(&mut events, &[&me]).await;
+    let room: BareJid = format!("ping-{}@muc.localhost", rand_suffix()).parse().unwrap();
+    me.join(&room, "me").await.unwrap();
+    me.set_room_name(&room, "ping").await.unwrap();
+    assert_eq!(me.self_ping(&room).await, InRoom::Yes);
+
+    let gone = xmpp_parsers::presence::Presence::unavailable().with_to(room.with_resource_str("me").unwrap());
+    me.send(gone).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(me.in_room(&room), "omtalk did not see it go");
+    assert_eq!(me.self_ping(&room).await, InRoom::No);
+    // Entered again, it is in once more.
+    me.join(&room, "me").await.unwrap();
+    assert_eq!(me.self_ping(&room).await, InRoom::Yes);
+}

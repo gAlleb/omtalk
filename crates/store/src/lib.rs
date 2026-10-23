@@ -6,6 +6,7 @@
 mod closed;
 mod folders;
 mod history;
+mod kept;
 mod reactions;
 mod seen;
 
@@ -98,6 +99,7 @@ const MIGRATIONS: &[&str] = &[
     ",
     history::MIGRATION_EDITED,
     reactions::MIGRATION,
+    kept::MIGRATION,
 ];
 
 #[derive(Clone)]

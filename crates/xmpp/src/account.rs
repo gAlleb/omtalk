@@ -96,6 +96,12 @@ impl Account {
         self.status.lock().unwrap().clone()
     }
 
+    /// Takes `status` as one's own without saying it: for the start, before the login
+    /// says it.
+    pub fn keep_status(&self, status: crate::presence::OwnStatus) {
+        *self.status.lock().unwrap() = status;
+    }
+
     /// Says `status` to contacts (the server passes it on) and to every room entered;
     /// kept for the next logins and rooms.
     pub async fn set_status(&self, status: crate::presence::OwnStatus) -> Result<(), Error> {
@@ -123,6 +129,11 @@ impl Account {
             Some(nick) => drop(rooms.insert(room.clone(), nick.to_owned())),
             None => drop(rooms.remove(room)),
         }
+    }
+
+    pub(crate) fn rooms_entered(&self) -> Vec<(BareJid, String)> {
+        let rooms = self.rooms.lock().unwrap();
+        rooms.iter().map(|(r, n)| (r.clone(), n.clone())).collect()
     }
 
     pub(crate) fn nick_in(&self, room: &BareJid) -> Option<String> {

@@ -1623,8 +1623,15 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                     picked_row = Some(rows.len());
                 }
                 person += 1;
+                // Away or busy: the dot says so, and the words after the name.
+                let status = chat.occupant_status.get(nick).and_then(crate::app::others_status);
+                let dot = if status.is_some() {
+                    theme::warn()
+                } else {
+                    theme::ok()
+                };
                 let mut spans = vec![
-                    Span::styled("● ", Style::default().fg(theme::ok())),
+                    Span::styled("● ", Style::default().fg(dot)),
                     Span::styled(nick.clone(), theme::nick(nick)),
                 ];
                 if let Some(real) = real
@@ -1632,6 +1639,12 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 {
                     spans.push(Span::styled(
                         format!(" {real}"),
+                        Style::default().fg(theme::dim()),
+                    ));
+                }
+                if let Some(status) = status {
+                    spans.push(Span::styled(
+                        format!(" · {status}"),
                         Style::default().fg(theme::dim()),
                     ));
                 }
@@ -5428,6 +5441,33 @@ mod tests {
         ));
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("↑ загрузка…"), "{text}");
+    }
+
+    #[test]
+    fn a_participant_away_shows_it_beside_the_name() {
+        use omtalk_xmpp::presence::OwnStatus;
+        use xmpp_parsers::presence::Show;
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        app.chats[room]
+            .occupants
+            .insert("bob".into(), Some(jid("bob@example.org")));
+        app.chats[room].occupants.insert("me".into(), Some(me.clone()));
+        app.chats[room].occupant_status.insert(
+            "bob".into(),
+            OwnStatus {
+                show: Some(Show::Away),
+                text: Some("обед".into()),
+            },
+        );
+        let text = screen(&mut app, 140, 20);
+        assert!(text.contains("bob · отошёл: обед"), "{text}");
     }
 
     #[test]

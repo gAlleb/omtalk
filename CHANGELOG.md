@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Your status is remembered**: after `/away` and a restart you are still away.
+- **A room that let you go is entered again** (XEP-0410): omtalk asks each room every five minutes, and after a connection comes back, whether you are still in it; a network that changed or a server restart could leave a room silent with nothing showing it. What was missed comes with entering again.
+- **A room's participants show their status**: "bob · away: lunch", the dot in another colour.
+
 ## 0.1.4 — 2026-10-23
 
 - **Corrections (XEP-0308)**: `/edit` corrects your last message; a corrected message, yours or another's, changes in place, marked "edited", also in encrypted chats and after a restart.

@@ -37,6 +37,34 @@ pub struct OwnStatus {
 }
 
 impl OwnStatus {
+    /// As kept between runs: the show ("away", "dnd"… or empty), a line break, the words.
+    pub fn to_kept(&self) -> String {
+        let show = match self.show {
+            None => "",
+            Some(Show::Away) => "away",
+            Some(Show::Dnd) => "dnd",
+            Some(Show::Xa) => "xa",
+            Some(Show::Chat) => "chat",
+        };
+        format!("{show}\n{}", self.text.as_deref().unwrap_or_default())
+    }
+
+    /// [`OwnStatus::to_kept`] read back; what is not understood is plain online.
+    pub fn from_kept(kept: &str) -> Self {
+        let (show, text) = kept.split_once('\n').unwrap_or((kept, ""));
+        let show = match show {
+            "away" => Some(Show::Away),
+            "dnd" => Some(Show::Dnd),
+            "xa" => Some(Show::Xa),
+            "chat" => Some(Show::Chat),
+            _ => None,
+        };
+        Self {
+            show,
+            text: (!text.is_empty()).then(|| text.to_owned()),
+        }
+    }
+
     /// `presence` saying it.
     pub fn on(&self, mut presence: Presence) -> Presence {
         presence.show = self.show.clone();
@@ -130,6 +158,20 @@ pub fn client_name(node: &str, resource: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_status_is_kept_and_read_back() {
+        let away = OwnStatus {
+            show: Some(Show::Away),
+            text: Some("обед\nдо двух".into()),
+        };
+        assert_eq!(OwnStatus::from_kept(&away.to_kept()), away);
+        assert_eq!(
+            OwnStatus::from_kept(&OwnStatus::default().to_kept()),
+            OwnStatus::default()
+        );
+        assert_eq!(OwnStatus::from_kept("nonsense"), OwnStatus::default());
+    }
     use xmpp_parsers::minidom::Element;
 
     fn presence(xml: &str) -> Presence {

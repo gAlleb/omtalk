@@ -245,6 +245,8 @@ enum Msg {
         present: bool,
         /// Leaving `nick` for this one (status 303).
         new_nick: Option<String>,
+        /// Their status, as the room passes it on.
+        status: omtalk_xmpp::presence::OwnStatus,
     },
     /// A shared file was fetched (or not).
     Media {
@@ -415,6 +417,12 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     // as the database is.
     private_dir(&config::cache_dir());
     let (mut accounts, events) = Accounts::new();
+    let kept_status = store
+        .kept(KEPT_STATUS)
+        .ok()
+        .flatten()
+        .map(|kept| omtalk_xmpp::presence::OwnStatus::from_kept(&kept))
+        .unwrap_or_default();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut shared = Shared {
         accounts: HashMap::new(),
@@ -435,14 +443,29 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         };
         config.resource = omtalk_xmpp::device_resource(state.keys.device_id);
         let account = accounts.add(config).await;
+        // One's status as left last time, said by the login.
+        account.keep_status(kept_status.clone());
         let omemo = Arc::new(Omemo::persisting(account.clone(), state, store.omemo(&jid)));
         shared.accounts.insert(jid.clone(), (account, omemo));
         jids.push(jid);
     }
 
     let ui = &options.config.ui;
+    // Now and then, whether the rooms still have us.
+    for (jid, (xmpp, omemo)) in &shared.accounts {
+        let (account, xmpp, omemo, shared) = (jid.clone(), xmpp.clone(), omemo.clone(), shared.clone());
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(ROOM_CHECK);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                still_in_rooms(account.clone(), xmpp.clone(), omemo.clone(), shared.clone()).await;
+            }
+        });
+    }
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
+    app.own_status = kept_status;
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
     app.send_typing = ui.typing;
@@ -989,6 +1012,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             real,
             present,
             new_nick,
+            status,
         } => {
             // A nick changed: the same person, a new name, said in the room.
             if let Some(new) = new_nick
@@ -1013,8 +1037,14 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             };
             if let Some(chat) = index.map(|i| &mut app.chats[i]) {
                 if present {
+                    if status == Default::default() {
+                        chat.occupant_status.remove(&nick);
+                    } else {
+                        chat.occupant_status.insert(nick.clone(), status);
+                    }
                     chat.occupants.insert(nick, real);
                 } else {
+                    chat.occupant_status.remove(&nick);
                     chat.occupants.remove(&nick);
                 }
             }
@@ -1050,6 +1080,14 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 });
                 if !resumed {
                     tokio::spawn(come_online(
+                        account.clone(),
+                        xmpp.clone(),
+                        omemo.clone(),
+                        shared.clone(),
+                    ));
+                } else {
+                    // A stream resumed after a while: a room may have let one go meanwhile.
+                    tokio::spawn(still_in_rooms(
                         account.clone(),
                         xmpp.clone(),
                         omemo.clone(),
@@ -1226,6 +1264,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         real: occupant.real_jid,
                         present: occupant.present,
                         new_nick: occupant.new_nick,
+                        status: occupant.status,
                     });
                 }
             }
@@ -1302,6 +1341,34 @@ fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
     }
     at
 }
+
+/// Asks each room entered whether one is still in it (XEP-0410), and enters again the
+/// ones that let one go (a network that changed, a server restarted): what was missed
+/// comes with it. Silently, a room that let one go looks the same, but nothing comes.
+async fn still_in_rooms(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
+    for (room, nick) in xmpp.rooms() {
+        if xmpp.self_ping(&room).await == omtalk_xmpp::muc::InRoom::No {
+            shared
+                .tx
+                .send(Msg::Log {
+                    account: account.clone(),
+                    text: trf!(
+                        "{room} let us go; entering again",
+                        "{room} нас отпустила; входим снова"
+                    ),
+                })
+                .ok();
+            let entry = Entry {
+                nick: Some(nick),
+                ..Entry::default()
+            };
+            join(&account, &xmpp, &omemo, &shared, room, entry).await;
+        }
+    }
+}
+
+/// How often the rooms are asked whether one is still in them.
+const ROOM_CHECK: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// After every new login: announce the device, read what was missed, enter the rooms.
 async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
@@ -2095,6 +2162,9 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::SetStatus(status) => {
+            // For the next run too: away stays away after a restart.
+            let kept = (status != Default::default()).then(|| status.to_kept());
+            let _ = shared.store.keep(KEPT_STATUS, kept.as_deref());
             for (xmpp, _) in shared.accounts.values() {
                 if let Err(e) = xmpp.set_status(status.clone()).await
                     && !matches!(e, omtalk_xmpp::Error::Queued)
@@ -2712,6 +2782,9 @@ async fn perform(action: Action, shared: Shared) {
         Action::Quit => {}
     }
 }
+
+/// Where one's own status is kept between runs.
+const KEPT_STATUS: &str = "status";
 
 /// How many older messages one scroll to the top brings.
 const OLDER_PAGE: usize = 50;

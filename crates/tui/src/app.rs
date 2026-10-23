@@ -175,6 +175,8 @@ pub struct Chat {
     pub older_before: Option<String>,
     /// Room occupants by nick, with the real account when the room shows it.
     pub occupants: BTreeMap<String, Option<BareJid>>,
+    /// Their status where it is not plain online: away, do not disturb…
+    pub occupant_status: BTreeMap<String, omtalk_xmpp::presence::OwnStatus>,
     /// A room's members (owners, admins, members), present or not; read when it opens.
     pub members: Vec<BareJid>,
     /// A room's own name, if it has one.
@@ -205,6 +207,7 @@ impl Chat {
             older_done: false,
             older_before: None,
             occupants: BTreeMap::new(),
+            occupant_status: BTreeMap::new(),
             members: Vec::new(),
             name: None,
             topic: None,
@@ -1224,6 +1227,9 @@ impl App {
         let chat = &mut self.chats[index];
         let real = chat.occupants.remove(old).flatten();
         chat.occupants.insert(new.to_owned(), real);
+        if let Some(status) = chat.occupant_status.remove(old) {
+            chat.occupant_status.insert(new.to_owned(), status);
+        }
         let own = matches!(&chat.kind, ChatKind::Room { nick } if nick == old);
         if own {
             chat.kind = ChatKind::Room { nick: new.to_owned() };
@@ -3898,6 +3904,11 @@ impl App {
             _ => Vec::new(),
         }
     }
+}
+
+/// Someone's status beside their name, if not plain online: "away: lunch".
+pub fn others_status(status: &omtalk_xmpp::presence::OwnStatus) -> Option<String> {
+    (status != &omtalk_xmpp::presence::OwnStatus::default()).then(|| status_words(status))
 }
 
 /// One's own status in words: "away: lunch".

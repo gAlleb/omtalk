@@ -10,6 +10,7 @@ use xmpp_parsers::muc::muc::History;
 use xmpp_parsers::muc::user::{Affiliation, MucUser, Role, Status};
 use xmpp_parsers::ns;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 use crate::{Account, Error};
 
@@ -32,6 +33,8 @@ pub struct Occupant {
     pub present: bool,
     /// Leaving under this nick to come back under another (status 303): the new one.
     pub new_nick: Option<String>,
+    /// Their status: away, do not disturb…, and their words.
+    pub status: crate::presence::OwnStatus,
 }
 
 /// Reads a presence from a room occupant; `None` for any other presence.
@@ -56,6 +59,10 @@ pub fn occupant(presence: &Presence) -> Option<Occupant> {
             .contains(&Status::NewNick)
             .then(|| item.nick.clone())
             .flatten(),
+        status: crate::presence::OwnStatus {
+            show: presence.show.clone(),
+            text: presence.statuses.values().next().cloned(),
+        },
     })
 }
 
@@ -74,7 +81,45 @@ pub(crate) fn join_outcome(presence: &Presence) -> Option<(BareJid, Result<(), E
     entered.then_some((room, Ok(())))
 }
 
+/// Whether one is still in a room, as the room says to a ping of one's own occupant
+/// (XEP-0410).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InRoom {
+    Yes,
+    /// The room no longer has one: entered again, one gets what was missed.
+    No,
+    /// No telling (no answer, the room is gone, …): nothing to do now.
+    Unknown,
+}
+
 impl Account {
+    /// The rooms entered, with the nick each was entered under.
+    pub fn rooms(&self) -> Vec<(BareJid, String)> {
+        self.rooms_entered()
+    }
+
+    /// Asks `room` whether one is still in it (XEP-0410): a ping to one's own occupant
+    /// there, which the room answers itself if one is not.
+    pub async fn self_ping(&self, room: &BareJid) -> InRoom {
+        let Some(nick) = self.nick_in(room) else {
+            return InRoom::No;
+        };
+        let Ok(to) = room.with_resource_str(&nick) else {
+            return InRoom::Unknown;
+        };
+        match self.get(Some(to.into()), xmpp_parsers::ping::Ping).await {
+            Ok(_) => InRoom::Yes,
+            Err(Error::Stanza(e)) => match e.defined_condition {
+                // The client there answers no pings, but one is in.
+                DefinedCondition::ServiceUnavailable | DefinedCondition::FeatureNotImplemented => InRoom::Yes,
+                // Not an occupant (any more), or the nick is not one's.
+                DefinedCondition::NotAcceptable | DefinedCondition::ItemNotFound => InRoom::No,
+                _ => InRoom::Unknown,
+            },
+            Err(_) => InRoom::Unknown,
+        }
+    }
+
     /// Enters a room under `nick`, without the room's history (the archive has it), and
     /// returns once the room has let us in. A refusal comes back as `Error::Stanza`:
     /// `registration-required` for a members-only room without an invitation,
