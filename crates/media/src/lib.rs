@@ -74,11 +74,14 @@ impl Media {
                 _ => return None,
             };
             let (iv, key) = secret.split_at(iv_len);
-            return Some(Media::Encrypted {
+            let media = Media::Encrypted {
                 url: format!("https://{location}"),
                 iv: iv.to_vec(),
                 key: key.try_into().ok()?,
-            });
+            };
+            // Of a known kind only, as a plain link: a click opens it with the viewer
+            // (xdg-open), which runs a .desktop and shows an .html as a page.
+            return media.is_file().then_some(media);
         }
         // An address of a page is a link to follow, not a file to fetch: only one that
         // ends in a file's name of a known kind is shared as a file.
@@ -183,6 +186,9 @@ async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
         .https_only(!cfg!(test))
+        // A server that stops answering must not leave "downloading…" for ever.
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| Error::Download(e.to_string()))?;
     let mut response = client
@@ -278,6 +284,8 @@ pub async fn upload(
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
         .https_only(!cfg!(test) && !url.starts_with("http://127.0.0.1"))
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| Error::Upload(e.to_string()))?;
     let total = data.len() as u64;
@@ -327,6 +335,22 @@ fn hex(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn only_files_of_a_known_kind_are_files_encrypted_or_not() {
+        let secret = "ab".repeat(44);
+        assert!(Media::from_text(&format!("aesgcm://up.example.org/a/cat.png#{secret}")).is_some());
+        assert!(
+            Media::from_text(&format!("aesgcm://up.example.org/a/run.desktop#{secret}")).is_none(),
+            "a launcher is no file to open with a click"
+        );
+        assert!(Media::shared("https://up.example.org/a/page.html").is_none());
+        assert!(
+            Media::from_text("https://up.example.org/a/cat.png").is_none(),
+            "plain: only when shared"
+        );
+        assert!(Media::shared("https://up.example.org/a/cat.png").is_some());
+    }
+
     fn encrypt(plain: &[u8], iv: &[u8; 12], key: &[u8; 32]) -> Vec<u8> {
         let mut data = plain.to_vec();
         let tag = AesGcm::<Aes256, U12>::new(key.into())
@@ -351,20 +375,20 @@ mod tests {
         assert_eq!(media.name(), "feb0.png");
 
         assert_eq!(
-            Media::from_text("https://example.org/a.jpg"),
+            Media::shared("https://example.org/a.jpg"),
             Some(Media::Plain {
                 url: "https://example.org/a.jpg".into()
             })
         );
         assert_eq!(
-            Media::from_text("https://example.org/news/2026/10/22/"),
+            Media::shared("https://example.org/news/2026/10/22/"),
             None,
             "a page is a link, not a file"
         );
-        assert_eq!(Media::from_text("https://www.youtube.com/watch?v=abc"), None);
-        assert!(Media::from_text("https://up.example.org/x/report.PDF").is_some());
+        assert_eq!(Media::shared("https://www.youtube.com/watch?v=abc"), None);
+        assert!(Media::shared("https://up.example.org/x/report.PDF").is_some());
         assert_eq!(
-            Media::from_text("посмотри https://example.org/a.jpg"),
+            Media::shared("посмотри https://example.org/a.jpg"),
             None,
             "only a message that is just the link"
         );

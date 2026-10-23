@@ -327,6 +327,13 @@ fn log_event<T: std::fmt::Debug>(journal: &Option<std::fs::File>, event: T) -> T
     event
 }
 
+/// Makes `dir` (and its parents) if need be, readable by the user alone (0700).
+fn private_dir(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
 /// How long a message stays in the status line.
 const STATUS_FADE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -336,6 +343,9 @@ fn now() -> i64 {
 
 pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), String> {
     let store = Store::open(&options.db).map_err(|e| format!("{}: {e}", options.db.display()))?;
+    // The cache holds files of encrypted chats, decrypted, and avatars: one's own only,
+    // as the database is.
+    private_dir(&config::cache_dir());
     let (mut accounts, events) = Accounts::new();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut shared = Shared {
@@ -407,9 +417,12 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         .flat_map(|c| c.lines.iter())
         .filter_map(|l| l.media.as_ref().map(|m| m.link.clone()))
         .collect();
+    urls.sort();
     urls.dedup();
+    // As for a message coming: what is here shows, the rest is fetched only if files
+    // are fetched by themselves (auto_download).
     for link in urls {
-        tokio::spawn(fetch_media(link, shared.clone()));
+        fetch_if_media(&link, true, &shared);
     }
     tokio::spawn(pump(events, shared.clone()));
     if !app.chats.is_empty() {
@@ -2344,6 +2357,12 @@ enum AvatarFrom {
 async fn load_avatar(shared: Shared, xmpp: Account, jid: BareJid, from: AvatarFrom) {
     use std::sync::atomic::Ordering;
     if !shared.avatars.load(Ordering::Relaxed) {
+        return;
+    }
+    // An id names a file in the cache: only an avatar's SHA-1, never a path. Anyone may
+    // send one ("../", "/etc/…").
+    let is_hash = |id: &str| id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit());
+    if matches!(&from, AvatarFrom::Pep(id) | AvatarFrom::VCard(Some(id)) if !is_hash(id)) {
         return;
     }
     let dir = config::cache_dir().join("avatars");
