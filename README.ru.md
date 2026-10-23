@@ -11,7 +11,7 @@
 `tests/oracle/uv.lock`):
 
 ```sh
-git clone ssh://git@git.3s0.ru:2233/stefan/omtalk.git && cd omtalk
+git clone https://github.com/gAlleb/omtalk.git && cd omtalk
 mise trust && mise install
 mise run test
 ```

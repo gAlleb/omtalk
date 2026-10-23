@@ -11,7 +11,7 @@ use xmpp_parsers::ns;
 use xmpp_parsers::presence::Presence;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-const CAPS_NODE: &str = "https://git.3s0.ru/stefan/omtalk";
+const CAPS_NODE: &str = "https://github.com/gAlleb/omtalk";
 
 /// Features this client implements. A `+notify` feature asks the server to push
 /// changes of that PEP node: without the device list one, OMEMO would miss new devices.
