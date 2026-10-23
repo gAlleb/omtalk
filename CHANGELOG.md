@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A link is a link**: a page such as `https://…/notes.md` is shown, never fetched. Files are `aesgcm://` links and links their sender marked as files (XEP-0066), as Conversations, Gajim and Monal send uploads.
+- **Nobody can pass for someone else in a room**: only rooms you are in may say who their occupants are; a message in a room's archive carrying a writer of its own has no known writer; a device seen for the first time must be listed by its account.
+- **Only the recipient marks your message delivered, read or refused**, and carbons count only from your own server.
+- Files: avatar ids are only hashes (never paths), nothing is fetched on start with `auto_download = false`, the cache is yours alone (0700), downloads time out, encrypted files only of known kinds.
+- Message styling no longer slows down on long lines.
+- Typing anywhere types into the input line.
+- A temporary login failure is retried; the file viewer leaves no zombies; notification text is escaped; a panic quits instead of leaving a broken terminal.
 - **Your own device list is never published over when it could not be read**: a server error at login made omtalk publish a list of itself alone, dropping your other clients from OMEMO.
 - **A new session is kept before its one-time key is spent**: a network error in between lost the first message.
 - **Sending without a connection no longer freezes the account** (and quitting); the message waits, shown as "waiting for the connection", and goes when the connection is back.
