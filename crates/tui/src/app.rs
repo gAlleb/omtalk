@@ -196,6 +196,9 @@ pub struct Chat {
     /// Where the chat is read up to, as one's clients told the server (XEP-0490): the
     /// archive's id of that message. Opening the chat moves it to the newest message.
     pub read_mark: Option<String>,
+    /// Whether that message is in the history here. If not, another client read further
+    /// than omtalk has yet: the newest here is older, and naming it would move the mark back.
+    pub read_mark_here: bool,
 }
 
 impl Chat {
@@ -220,6 +223,7 @@ impl Chat {
             devices: None,
             markable: None,
             read_mark: None,
+            read_mark_here: false,
         }
     }
 
@@ -1526,11 +1530,14 @@ impl App {
             .take()
             .filter(|_| self.read_markers && !chat.is_room());
         // Read up to the newest message here, whenever it came (before a restart too),
-        // if the server does not have it so already.
+        // if the server does not have it so already, and never back from where another
+        // client read to.
         let newest = chat.lines.iter().rev().find_map(|l| l.archive_id.clone());
-        let archive_id = newest.filter(|id| chat.read_mark.as_ref() != Some(id));
+        let behind = chat.read_mark.is_none() || chat.read_mark_here;
+        let archive_id = newest.filter(|id| behind && chat.read_mark.as_ref() != Some(id));
         if let Some(id) = &archive_id {
             chat.read_mark = Some(id.clone());
+            chat.read_mark_here = true;
         }
         if marker.is_none() && archive_id.is_none() {
             return Vec::new();
@@ -1564,6 +1571,7 @@ impl App {
             };
             let chat = &mut self.chats[index];
             chat.read_mark = Some(id);
+            chat.read_mark_here = after.is_some();
             if let Some(after) = after {
                 chat.unread = after;
                 if after == 0 {
@@ -1736,6 +1744,14 @@ impl App {
             self.push_archived(index, line);
         } else {
             self.push(index, line);
+        }
+        // The message another client read up to has come: all before it is read, only
+        // what comes after is unread.
+        let chat = &mut self.chats[index];
+        if !chat.read_mark_here && message.archive_id.is_some() && message.archive_id == chat.read_mark {
+            chat.read_mark_here = true;
+            chat.unread = 0;
+            chat.markable = None;
         }
         if message.direction == Direction::Incoming {
             let chat = &mut self.chats[index];
@@ -4578,6 +4594,64 @@ mod tests {
             !app.select(bob)
                 .iter()
                 .any(|a| matches!(a, Action::Displayed { .. }))
+        );
+    }
+
+    #[test]
+    fn a_mark_read_further_elsewhere_is_not_moved_back() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
+        let mut line = Line::message(1, "x".into(), "…".into(), true, false);
+        line.archive_id = Some("b1".into());
+        app.chats[bob].lines.push(line);
+        app.select(carol);
+        // Read on the phone up to b3, which has not come here yet.
+        app.read_marks(&me, vec![(jid("bob@example.org"), "b3".into(), None)]);
+        let opened = app.select(bob);
+        assert!(
+            !opened.iter().any(|a| matches!(
+                a,
+                Action::Displayed {
+                    archive_id: Some(_),
+                    ..
+                }
+            )),
+            "{opened:?}"
+        );
+        assert_eq!(app.chats[bob].read_mark.as_deref(), Some("b3"));
+        // The archive brings b2, b3 (read there), then b4: only b4 is unread.
+        app.select(carol);
+        for (i, id) in ["b2", "b3", "b4"].into_iter().enumerate() {
+            let archived = Incoming {
+                peer: jid("bob@example.org"),
+                sender: jid("bob@example.org"),
+                nick: None,
+                device: Some(1),
+                direction: Direction::Incoming,
+                encrypted: true,
+                text: Some("hi".into()),
+                at: Some(2 + i as i64),
+                not_for_this_device: false,
+                id: Some(id.into()),
+                markable: false,
+                archive_id: Some(id.into()),
+                untrusted: false,
+                reply_to: None,
+                replaces: None,
+                shared_file: false,
+            };
+            app.on_incoming(&me, &archived, 10);
+        }
+        assert_eq!(app.chats[bob].unread, 1);
+        // Opened now: read up to b4, forward.
+        let opened = app.select(bob);
+        assert!(
+            opened
+                .iter()
+                .any(|a| matches!(a, Action::Displayed { archive_id: Some(id), .. } if id == "b4")),
+            "{opened:?}"
         );
     }
 
