@@ -664,6 +664,8 @@ pub struct App {
     pub sent: Vec<String>,
     /// Which of `sent` the input line shows now, and the draft it replaced.
     pub recall: Option<(usize, String)>,
+    /// How far the chat list is scrolled, in rows; the view keeps the chat picked in sight.
+    pub chats_scroll: usize,
     /// The participant picked in a room's pane, while it has the focus.
     pub people_cursor: usize,
     /// Direct chats whose history was asked of the archive already.
@@ -725,6 +727,7 @@ impl App {
             avatars_asked: BTreeSet::new(),
             history_asked: BTreeSet::new(),
             people_cursor: 0,
+            chats_scroll: 0,
             sent: Vec::new(),
             recall: None,
             avatar_blocks: BTreeMap::new(),

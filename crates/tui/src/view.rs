@@ -120,6 +120,22 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut y = inner.y;
     let rows = app.tree();
+    // Longer than the pane: scrolled so that the chat picked is in sight, and no further
+    // than the end.
+    let height = inner.height as usize;
+    let picked = rows
+        .iter()
+        .position(|(entry, _)| matches!(entry, Entry::Chat(i) if Some(*i) == app.selected));
+    let mut scroll = app.chats_scroll;
+    if let Some(row) = picked {
+        if row < scroll {
+            scroll = row;
+        } else if row >= scroll + height {
+            scroll = row + 1 - height;
+        }
+    }
+    scroll = scroll.min(rows.len().saturating_sub(height));
+    app.chats_scroll = scroll;
     // Whether the branch at each depth goes on below the current row.
     let mut open: Vec<bool> = Vec::new();
     // Whether the heading at each depth is a folder: its chats hang from under its
@@ -156,6 +172,10 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
         open[depth] = !last;
         folder.resize(depth + 1, false);
         folder[depth] = matches!(entry, Entry::Heading(Group::Folder(..)));
+        // Above the scroll: counted for the branches, not drawn.
+        if at < scroll {
+            continue;
+        }
         let row = Rect::new(inner.x, y, inner.width, 1);
         match entry {
             Entry::Heading(group) => {
@@ -5479,5 +5499,26 @@ mod tests {
         );
         key(&mut app, KeyCode::Up);
         assert_eq!(app.input, "второе", "from the first line: the history");
+    }
+
+    #[test]
+    fn a_long_chat_list_scrolls_to_keep_the_chat_picked_in_sight() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chats: Vec<usize> = (0..40)
+            .map(|i| app.chat(&me, &jid(&format!("p{i:02}@home.org")), ChatKind::Direct))
+            .collect();
+        app.select(chats[0]);
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("p00") && !text.contains("p39"), "{text}");
+        app.select(chats[39]);
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("p39"), "the chat picked is in sight: {text}");
+        assert!(!text.contains("p00 "), "the top is scrolled away: {text}");
+        let (place, _) = *app.areas.chat_rows.iter().find(|(_, i)| *i == chats[39]).unwrap();
+        assert!(place.y < 19, "and can be clicked");
+        // Back up: it follows.
+        app.select(chats[3]);
+        assert!(screen(&mut app, 100, 20).contains("p03"));
     }
 }
