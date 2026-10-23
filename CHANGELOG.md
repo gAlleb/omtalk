@@ -1,19 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 — 2026-10-23
 
-- **A broken OMEMO session puts itself right.** Two devices that started a session with each other at once (each before the other's first message arrived) ended up in different sessions, and every later message showed as "could not be decrypted". omtalk now keeps the sessions a newer one replaced (up to five per device) and tries them, as libsignal does. A device whose message no session here can read gets a new session and an empty message, so only that one message is lost (at most once an hour per device).
-- A chat found in the archive by a new device stays in the list after a restart, even with nothing readable in it.
-- The mouse wheel over a room's participants goes through them, as the arrow keys do.
-- Bookmarks are read once at login, not once per room; one that could not be read is never written over.
-- A request whose answer never comes no longer keeps what was waiting for it.
-- **Every letter typed away from the input line goes into it**: the panes no longer keep `j`/`k`, `g`, `r`, `z`, `m` or Space; they move with the arrows, Home/End and the mouse (a reply: prefix+`a`, `/reply` or a double click; folding: `←`; only the current account: prefix+`z`).
-- **Ctrl+C quits only when pressed twice** within three seconds; the first says so.
-- **Contacts go by their names from the roster** in the chat list and the chat's title; a rename in another client shows at once.
 - **Corrections (XEP-0308)**: `/edit` corrects your last message; a corrected message, yours or another's, changes in place, marked "edited", also in encrypted chats and after a restart.
 - **Reactions (XEP-0444)**: `/react 👍` on the selected or the last message, again to take it back; others' show under their message with counts, kept after a restart.
 - **Your status**: `/away`, `/dnd`, `/online`, with words of your own, for all accounts; rooms you are in see it too, and it survives a reconnect.
 - **Older history as you scroll up** (or click "↑ earlier"): 50 at a time, from what this device keeps, then from the server's archive.
+- **Contacts go by their names from the roster** in the chat list and the chat's title; a rename in another client shows at once.
+- **A broken OMEMO session puts itself right.** Two devices that started a session with each other at once (each before the other's first message arrived) ended up in different sessions, and every later message showed as "could not be decrypted". omtalk now keeps the sessions a newer one replaced (up to five per device) and tries them, as libsignal does. A device whose message no session here can read gets a new session and an empty message, so only that one message is lost (at most once an hour per device).
+- **Every letter typed away from the input line goes into it**: the panes no longer keep `j`/`k`, `g`, `r`, `z`, `m` or Space; they move with the arrows, Home/End and the mouse (a reply: prefix+`a`, `/reply` or a double click; folding: `←`; only the current account: prefix+`z`).
+- **Ctrl+C quits only when pressed twice** within three seconds; the first says so.
+- The mouse wheel over a room's participants goes through them, as the arrow keys do.
+- A chat found in the archive by a new device stays in the list after a restart, even with nothing readable in it.
+- Bookmarks are read once at login, not once per room; one that could not be read is never written over.
+- A request whose answer never comes no longer keeps what was waiting for it.
 
 ## 0.1.3 — 2026-10-23
 
