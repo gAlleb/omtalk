@@ -3441,6 +3441,71 @@ mod tests {
     }
 
     #[test]
+    fn folders_change_places_by_dragging_a_heading_or_by_command() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&me);
+        let anna = app.chat(&me, &jid("anna@home.org"), ChatKind::Direct);
+        let boss = app.chat(&me, &jid("boss@home.org"), ChatKind::Direct);
+        let type_line = |app: &mut App, text: &str| {
+            app.focus = Focus::Input;
+            for c in text.chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        };
+        app.select(anna);
+        type_line(&mut app, "/folder Дом");
+        app.select(boss);
+        type_line(&mut app, "/folder Работа");
+        let order = |app: &App| -> Vec<String> { app.folders.iter().map(|f| f.name.clone()).collect() };
+        assert_eq!(order(&app), ["Дом", "Работа"]);
+        // The server channel right under the account's name, before the folders.
+        assert_eq!(app.list()[1], Entry::Chat(server));
+
+        // Работа dragged on to Дом: before it.
+        screen(&mut app, 120, 20);
+        let heading = |app: &App, name: &str| {
+            app.areas
+                .group_rows
+                .iter()
+                .find(|(_, g)| *g == Group::Folder(me.clone(), name.into()))
+                .map(|(r, _)| *r)
+                .unwrap()
+        };
+        let at = |kind, area: Rect| MouseEvent {
+            kind,
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(at(
+            MouseEventKind::Down(MouseButton::Left),
+            heading(&app, "Работа"),
+        ));
+        let saved = app.on_mouse(at(MouseEventKind::Up(MouseButton::Left), heading(&app, "Дом")));
+        assert!(matches!(&saved[..], [Action::SaveFolders(_)]), "{saved:?}");
+        assert_eq!(order(&app), ["Работа", "Дом"]);
+        assert!(app.collapsed.is_empty(), "dragged, not folded");
+
+        // A click (let go where it was held) still folds.
+        screen(&mut app, 120, 20);
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Left), heading(&app, "Дом")));
+        app.on_mouse(at(MouseEventKind::Up(MouseButton::Left), heading(&app, "Дом")));
+        assert!(app.collapsed.contains(&Group::Folder(me.clone(), "Дом".into())));
+
+        // By command: the open chat's folder, one place.
+        app.select(boss);
+        type_line(&mut app, "/folder-down");
+        assert_eq!(order(&app), ["Дом", "Работа"]);
+        type_line(&mut app, "/folder-down");
+        assert_eq!(order(&app), ["Дом", "Работа"], "the last stays last");
+        type_line(&mut app, "/folder-up");
+        assert_eq!(order(&app), ["Работа", "Дом"]);
+    }
+
+    #[test]
     fn chats_go_into_folders_by_command_and_by_dragging() {
         use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         let me = jid("me@home.org");

@@ -75,6 +75,19 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/folder-up",
+        args: ["", ""],
+        about: ["move the open chat's folder up", "поднять папку открытого чата"],
+    },
+    Command {
+        name: "/folder-down",
+        args: ["", ""],
+        about: [
+            "move the open chat's folder down",
+            "опустить папку открытого чата",
+        ],
+    },
+    Command {
         name: "/rename-folder",
         args: ["OLD NEW", "СТАРАЯ НОВАЯ"],
         about: ["rename a folder", "переименовать папку"],
@@ -388,7 +401,7 @@ mod tests {
         );
         assert_eq!(
             commands_for("/f").iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/folder"]
+            ["/folder", "/folder-up", "/folder-down"]
         );
         assert_eq!(commands_for("/").len(), COMMANDS.len());
         assert!(

@@ -103,7 +103,8 @@ the left is a tree of account → folders → chats. `/folder NAME` puts the cur
 a folder of its account (creating it if needed); `/folder` with no name takes it out. You
 can also drag a chat with the mouse onto a folder heading, or back onto the account. A
 folder folds like an account. An empty folder
-disappears. `/rename-folder OLD NEW` (for names with spaces: `old folder → new`).
+disappears. `/folder-up` and `/folder-down` move the open chat's folder, or drag a folder's heading on to
+another. `/rename-folder OLD NEW` (for names with spaces: `old folder → new`).
 
 Colours come from the terminal palette (pywal and similar tools recolour omtalk along with
 everything else), and `[theme]` can give any role a colour of your own.
