@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **What was missed in a room shows as it is read**, page by page, not all at once at the end: a long absence (hundreds of encrypted messages) no longer leaves the room looking empty for a while.
+- **Nothing read from an archive is lost when a later page fails**: before, all that had been read was thrown away while the place to go on from had already moved past it, so those messages never showed.
+- A room whose archive was empty on the first visit is read from its start the next time, not just its last 50 messages.
+
 ## 0.1.4 — 2026-10-23
 
 - **Corrections (XEP-0308)**: `/edit` corrects your last message; a corrected message, yours or another's, changes in place, marked "edited", also in encrypted chats and after a restart.

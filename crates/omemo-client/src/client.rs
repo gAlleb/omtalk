@@ -490,7 +490,17 @@ impl Omemo {
     /// [`Omemo::announce`]. On the very first run there is no position yet: the archive
     /// is not read, only marked, so an old history is not replayed.
     pub async fn catch_up(&self) -> Result<CatchUp, Error> {
-        self.catch_up_archive(None).await
+        let mut messages = Vec::new();
+        let mut caught = self.catch_up_archive(None, |m| messages.push(m)).await?;
+        caught.messages = messages;
+        Ok(caught)
+    }
+
+    /// [`Omemo::catch_up`], each message handed to `each` as soon as its page is read: a
+    /// long archive shows as it comes, and what was read stays read if a later page
+    /// fails (the position has moved past it).
+    pub async fn catch_up_each(&self, each: impl FnMut(Incoming) + Send) -> Result<CatchUp, Error> {
+        self.catch_up_archive(None, each).await
     }
 
     /// The same for a group chat's archive: what the room got while this device was not
@@ -498,10 +508,28 @@ impl Omemo {
     /// each sender's account. The first time in a room there is no position yet, and its
     /// last [`ROOM_HISTORY`] messages are read instead.
     pub async fn catch_up_room(&self, room: &BareJid) -> Result<CatchUp, Error> {
-        self.catch_up_archive(Some(room)).await
+        let mut messages = Vec::new();
+        let mut caught = self.catch_up_archive(Some(room), |m| messages.push(m)).await?;
+        caught.messages = messages;
+        Ok(caught)
     }
 
-    async fn catch_up_archive(&self, room: Option<&BareJid>) -> Result<CatchUp, Error> {
+    /// [`Omemo::catch_up_room`] page by page, as [`Omemo::catch_up_each`].
+    pub async fn catch_up_room_each(
+        &self,
+        room: &BareJid,
+        each: impl FnMut(Incoming) + Send,
+    ) -> Result<CatchUp, Error> {
+        self.catch_up_archive(Some(room), each).await
+    }
+
+    /// Reads an archive from where this device stopped. Each page's messages go to `each`
+    /// once it is read; the [`CatchUp`] returned counts, its `messages` are empty.
+    async fn catch_up_archive(
+        &self,
+        room: Option<&BareJid>,
+        mut each: impl FnMut(Incoming) + Send,
+    ) -> Result<CatchUp, Error> {
         let own = self.account.jid().clone();
         let archive = room.cloned().unwrap_or_else(|| own.clone());
         let mut after = self.state.lock().await.archive_positions.get(&archive).cloned();
@@ -510,6 +538,11 @@ impl Omemo {
             match room {
                 Some(_) => {
                     let page = self.account.archive_last(room, ROOM_HISTORY).await?;
+                    // Nothing there yet: read from its start next time (an empty position),
+                    // not its last few again, or what comes meanwhile is cut to them.
+                    if page.messages.is_empty() {
+                        self.set_archive_position(&archive, "").await?;
+                    }
                     for archived in page.messages {
                         self.take_archived(room, archived, &mut caught).await?;
                     }
@@ -522,18 +555,21 @@ impl Omemo {
                     for archived in page.messages {
                         self.open_archived(None, archived, &mut caught).await;
                     }
-                    if let Some(newest) = self.account.archive_newest(room).await? {
-                        self.set_archive_position(&archive, &newest).await?;
-                    }
+                    caught.messages.drain(..).for_each(&mut each);
+                    let newest = self.account.archive_newest(room).await?;
+                    self.set_archive_position(&archive, newest.as_deref().unwrap_or_default())
+                        .await?;
                 }
             }
+            caught.messages.drain(..).for_each(&mut each);
             self.caught_up.lock().await.insert(archive);
             return Ok(caught);
         }
         loop {
             let page = match self
                 .account
-                .archive_after(room, after.as_deref(), ARCHIVE_PAGE)
+                // An empty position: from the archive's start.
+                .archive_after(room, after.as_deref().filter(|a| !a.is_empty()), ARCHIVE_PAGE)
                 .await
             {
                 Ok(page) => page,
@@ -557,8 +593,14 @@ impl Omemo {
             };
             for archived in page.messages {
                 after = Some(archived.id.clone());
-                self.take_archived(room, archived, &mut caught).await?;
+                // A message whose position was kept but which did not get out would be
+                // lost for good: what was read goes out before anything can fail.
+                if let Err(e) = self.take_archived(room, archived, &mut caught).await {
+                    caught.messages.drain(..).for_each(&mut each);
+                    return Err(e);
+                }
             }
+            caught.messages.drain(..).for_each(&mut each);
             if page.complete || page.last.is_none() {
                 break;
             }

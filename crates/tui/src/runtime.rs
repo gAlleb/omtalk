@@ -1343,9 +1343,16 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             names: contacts.into_iter().map(|c| (c.jid, c.name)).collect(),
         });
     }
-    match omemo.catch_up().await {
+    // Shown and kept page by page, as they are read.
+    let mut got = 0;
+    let caught = omemo
+        .catch_up_each(|message| {
+            got += usize::from(message.text.is_some());
+            deliver(&shared, &account, message);
+        })
+        .await;
+    match caught {
         Ok(caught) => {
-            let got = caught.messages.iter().filter(|m| m.text.is_some()).count();
             if got > 0 || caught.unreadable > 0 {
                 let unreadable = match caught.unreadable {
                     0 => String::new(),
@@ -1369,9 +1376,6 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
                     )
                     .into(),
                 });
-            }
-            for message in caught.messages {
-                deliver(&shared, &account, message);
             }
             if !caught.peers.is_empty() {
                 tell(Msg::Chats {
@@ -1486,7 +1490,11 @@ async fn join(
                 nick,
                 open,
             });
-            match omemo.catch_up_room(&room).await {
+            // Shown and kept page by page: a long absence fills the room as it is read.
+            match omemo
+                .catch_up_room_each(&room, |message| deliver(shared, account, message))
+                .await
+            {
                 Ok(caught) => {
                     if caught.position_lost {
                         tell(Msg::Notice {
@@ -1511,9 +1519,6 @@ async fn join(
                                 caught.unreadable
                             ),
                         });
-                    }
-                    for message in caught.messages {
-                        deliver(shared, account, message);
                     }
                 }
                 Err(e) => tell(Msg::Notice {
