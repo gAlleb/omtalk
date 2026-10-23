@@ -287,6 +287,14 @@ enum Msg {
         id: String,
         state: Delivery,
     },
+    /// How far one's message got, as `from` says over the network: a receipt, a read
+    /// marker, a refusal. Taken only for a message in the chat with `from`.
+    Marked {
+        account: BareJid,
+        from: BareJid,
+        id: String,
+        state: Delivery,
+    },
     /// What an address offers, for the services window.
     Listed {
         jid: Jid,
@@ -695,17 +703,23 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         },
         Msg::Delivery { account, id, state } => {
             // Kept, so the ✓✓ is there after a restart too.
-            let kept = match &state {
-                Delivery::Sent => Some(omtalk_store::Delivery::Sent),
-                Delivery::Delivered => Some(omtalk_store::Delivery::Delivered),
-                Delivery::Read => Some(omtalk_store::Delivery::Read),
-                Delivery::Failed(why) => Some(omtalk_store::Delivery::Failed(why.clone())),
-                Delivery::Uploading(_) | Delivery::Sending | Delivery::Queued => None,
-            };
-            if let Some(kept) = kept {
+            if let Some(kept) = kept_delivery(&state) {
                 let _ = shared.store.set_delivery(&account, &id, &kept);
             }
             app.delivery(&account, &id, state)
+        }
+        Msg::Marked {
+            account,
+            from,
+            id,
+            state,
+        } => {
+            let kept = kept_delivery(&state);
+            if let Some(chat) = app.delivery_from(&account, &from, &id, state)
+                && let Some(kept) = kept
+            {
+                let _ = shared.store.set_delivery_in(&account, &chat, &id, &kept);
+            }
         }
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
         Msg::Restored { account, chat, lines } => {
@@ -1002,21 +1016,25 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         state,
                     });
                 }
-                for mark in receipts::marks(message) {
+                for (mark, from) in receipts::marks(&account, message) {
                     let (id, state) = match mark {
                         receipts::Mark::Received(id) => (id, Delivery::Delivered),
                         receipts::Mark::Displayed(id) => (id, Delivery::Read),
                     };
-                    tell(Msg::Delivery {
+                    tell(Msg::Marked {
                         account: account.clone(),
+                        from,
                         id,
                         state,
                     });
                 }
                 // One's message came back: the recipient's server (or one's own) refused it.
-                if let Some((id, condition, text)) = receipts::bounce(message) {
-                    tell(Msg::Delivery {
+                if let Some((id, condition, text)) = receipts::bounce(message)
+                    && let Some(from) = message.from.as_ref().map(|f| f.to_bare())
+                {
+                    tell(Msg::Marked {
                         account: account.clone(),
+                        from,
                         id,
                         state: Delivery::Failed(bounce_words(&condition, text.as_deref())),
                     });
@@ -1476,6 +1494,17 @@ fn bounce_words(condition: &omtalk_xmpp::stanza_error::DefinedCondition, server:
     match server {
         Some(text) => format!("{what}: {text}"),
         None => what.to_owned(),
+    }
+}
+
+/// How far a message got, as the store keeps it; `None` for a state not kept.
+fn kept_delivery(state: &Delivery) -> Option<omtalk_store::Delivery> {
+    match state {
+        Delivery::Sent => Some(omtalk_store::Delivery::Sent),
+        Delivery::Delivered => Some(omtalk_store::Delivery::Delivered),
+        Delivery::Read => Some(omtalk_store::Delivery::Read),
+        Delivery::Failed(why) => Some(omtalk_store::Delivery::Failed(why.clone())),
+        Delivery::Uploading(_) | Delivery::Sending | Delivery::Queued => None,
     }
 }
 

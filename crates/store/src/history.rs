@@ -130,6 +130,26 @@ impl Store {
         Ok(())
     }
 
+    /// [`Store::set_delivery`] for the message `id` in `chat` only.
+    pub fn set_delivery_in(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        id: &str,
+        delivery: &Delivery,
+    ) -> Result<(), Error> {
+        let failure = match delivery {
+            Delivery::Failed(why) => Some(why.as_str()),
+            _ => None,
+        };
+        self.db.lock().unwrap().execute(
+            "UPDATE messages SET delivery = ?4, failure = ?5
+             WHERE account = ?1 AND chat = ?2 AND id = ?3 AND outgoing = 1 AND (delivery IS NULL OR delivery < ?4)",
+            params![account.as_str(), chat.as_str(), id, delivery.code(), failure],
+        )?;
+        Ok(())
+    }
+
     /// One's own message `id` got further; an older step (a receipt after the read
     /// marker) changes nothing, and a failure stays.
     pub fn set_delivery(&self, account: &BareJid, id: &str, delivery: &Delivery) -> Result<(), Error> {

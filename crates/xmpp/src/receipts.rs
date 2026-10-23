@@ -79,30 +79,49 @@ pub enum Mark {
     Displayed(String),
 }
 
-/// The receipts and markers a message carries, also inside a carbon copy: one's own
-/// other device that read a message marks it read here too.
-pub fn marks(message: &Message) -> Vec<Mark> {
+/// The receipts and markers a message carries, each with whose chat it is about: the
+/// sender's for a direct one. Inside a carbon copy too (one's own other device that read
+/// a message marks it read here), but only a copy the own account's server sent: anyone
+/// else could wrap a made-up marker in one.
+pub fn marks(own: &xmpp_parsers::jid::BareJid, message: &Message) -> Vec<(Mark, xmpp_parsers::jid::BareJid)> {
     let mut found = Vec::new();
-    let mut look = |payloads: &[Element]| {
+    let mut look = |payloads: &[Element], chat: &xmpp_parsers::jid::BareJid| {
         for p in payloads {
             let id = p.attr(xml_ncname!("id")).map(str::to_owned);
-            match id {
-                Some(id) if p.is("received", ns::RECEIPTS) => found.push(Mark::Received(id)),
-                Some(id) if p.is("received", ns::DISPLAYED_MARKERS) => found.push(Mark::Received(id)),
-                Some(id) if p.is("displayed", ns::DISPLAYED_MARKERS) => found.push(Mark::Displayed(id)),
-                _ => {}
-            }
+            let mark = match id {
+                Some(id) if p.is("received", ns::RECEIPTS) => Mark::Received(id),
+                Some(id) if p.is("received", ns::DISPLAYED_MARKERS) => Mark::Received(id),
+                Some(id) if p.is("displayed", ns::DISPLAYED_MARKERS) => Mark::Displayed(id),
+                _ => continue,
+            };
+            found.push((mark, chat.clone()));
         }
     };
-    look(&message.payloads);
+    let Some(from) = message.from.as_ref().map(|f| f.to_bare()) else {
+        return found;
+    };
+    look(&message.payloads, &from);
+    if from != *own {
+        return found;
+    }
     for p in &message.payloads {
-        if p.is("sent", ns::CARBONS) || p.is("received", ns::CARBONS) {
-            for inner in p
-                .children()
-                .flat_map(|f| f.children())
-                .filter(|m| m.is("message", ns::DEFAULT_NS))
-            {
-                look(&inner.children().cloned().collect::<Vec<_>>());
+        let sent = p.is("sent", ns::CARBONS);
+        if !(sent || p.is("received", ns::CARBONS)) {
+            continue;
+        }
+        for inner in p
+            .children()
+            .flat_map(|f| f.children())
+            .filter(|m| m.is("message", ns::DEFAULT_NS))
+        {
+            // A copy of what one sent is about its recipient; of what came, its sender.
+            let party = inner.attr(if sent {
+                xml_ncname!("to")
+            } else {
+                xml_ncname!("from")
+            });
+            if let Some(chat) = party.and_then(|j| j.parse::<Jid>().ok()).map(|j| j.to_bare()) {
+                look(&inner.children().cloned().collect::<Vec<_>>(), &chat);
             }
         }
     }
@@ -202,32 +221,59 @@ mod tests {
         assert!(!wants_receipt(&room), "rooms take no receipts");
         assert!(room.payloads.iter().any(|p| p.is("origin-id", ns::SID)));
 
-        let back = receipt("me@example.org/omtalk".parse().unwrap(), "m1");
-        assert_eq!(marks(&back), [Mark::Received("m1".into())]);
-        let read = displayed("me@example.org".parse().unwrap(), "m1");
-        assert_eq!(marks(&read), [Mark::Displayed("m1".into())]);
+        let own: xmpp_parsers::jid::BareJid = "me@example.org".parse().unwrap();
+        let bob: xmpp_parsers::jid::BareJid = "bob@example.org".parse().unwrap();
+        let from = |mut m: Message, who: &str| {
+            m.from = Some(who.parse().unwrap());
+            m
+        };
+        let back = from(
+            receipt("me@example.org/omtalk".parse().unwrap(), "m1"),
+            "bob@example.org/pc",
+        );
+        assert_eq!(
+            marks(&own, &back),
+            [(Mark::Received("m1".into()), bob.clone())],
+            "about bob's chat"
+        );
+        let read = from(
+            displayed("me@example.org".parse().unwrap(), "m1"),
+            "bob@example.org/pc",
+        );
+        assert_eq!(marks(&own, &read), [(Mark::Displayed("m1".into()), bob.clone())]);
 
-        // The same inside a carbon: one's other device read it.
-        let carbon: Element = r#"<message xmlns="jabber:client" from="me@example.org" to="me@example.org/omtalk">
+        // The same inside a carbon: one's other device read it. Only the own server's.
+        let carbon = |outer: &str| -> Message {
+            let element: Element = format!(
+                r#"<message xmlns="jabber:client" from="{outer}" to="me@example.org/omtalk">
             <sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0">
               <message xmlns="jabber:client" to="bob@example.org"><displayed xmlns="urn:xmpp:chat-markers:0" id="b7"/></message>
             </forwarded></sent></message>"#
+            )
             .parse()
             .unwrap();
+            Message::try_from(element).unwrap()
+        };
         assert_eq!(
-            marks(&Message::try_from(carbon).unwrap()),
-            [Mark::Displayed("b7".into())]
+            marks(&own, &carbon("me@example.org")),
+            [(Mark::Displayed("b7".into()), bob.clone())]
+        );
+        assert!(
+            marks(&own, &carbon("mallory@example.org")).is_empty(),
+            "a carbon from anyone but the own server is no carbon"
         );
 
         // A receipt is owed to others for real messages that ask, never to oneself.
-        let own: xmpp_parsers::jid::BareJid = "me@example.org".parse().unwrap();
         let mut asked =
             Message::chat(Some("me@example.org".parse().unwrap())).with_body(Default::default(), "hi".into());
         mark_outgoing(&mut asked, "q1");
         asked.from = Some("bob@example.org/gajim".parse().unwrap());
         let answer_ = answer(&own, &asked).expect("owed");
         assert_eq!(answer_.to, Some("bob@example.org/gajim".parse().unwrap()));
-        assert_eq!(marks(&answer_), [Mark::Received("q1".into())]);
+        assert_eq!(
+            marks(&own, &from(answer_.clone(), "me@example.org/omtalk"))[0].0,
+            Mark::Received("q1".into())
+        );
         asked.from = Some("me@example.org/phone".parse().unwrap());
         assert!(answer(&own, &asked).is_none(), "not to one's own devices");
         let mut empty = Message::chat(Some("me@example.org".parse().unwrap()));

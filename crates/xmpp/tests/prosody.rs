@@ -592,7 +592,10 @@ async fn receipts_and_read_markers_go_through_the_server() {
     while seen.len() < 2 {
         let marks = wait_for(&mut events, |e| match &e.event {
             Event::Message(m) if e.account == *alice.jid() => {
-                let marks = receipts::marks(m);
+                let marks: Vec<_> = receipts::marks(alice.jid(), m)
+                    .into_iter()
+                    .map(|(mark, _)| mark)
+                    .collect();
                 (!marks.is_empty()).then_some(marks)
             }
             _ => None,

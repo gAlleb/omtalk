@@ -1210,7 +1210,48 @@ impl App {
     /// How far one's message `id` got. A step back is ignored (a late receipt after the
     /// read marker), a failure always shows.
     pub fn delivery(&mut self, account: &BareJid, id: &str, state: Delivery) {
-        for chat in self.chats.iter_mut().filter(|c| &c.account == account) {
+        self.delivery_in(account, None, id, state);
+    }
+
+    /// [`App::delivery`] said by `from` over the network: only about a message in the
+    /// chat with `from` (or with its server, for a server's refusal). Anyone who knows a
+    /// message's id (in a room, everyone) could otherwise mark it read, or failed. The
+    /// chat it was about, if any.
+    pub fn delivery_from(
+        &mut self,
+        account: &BareJid,
+        from: &BareJid,
+        id: &str,
+        state: Delivery,
+    ) -> Option<BareJid> {
+        self.delivery_in(account, Some(from), id, state)
+    }
+
+    fn delivery_in(
+        &mut self,
+        account: &BareJid,
+        from: Option<&BareJid>,
+        id: &str,
+        state: Delivery,
+    ) -> Option<BareJid> {
+        let about = |chat: &Chat| match from {
+            None => true,
+            Some(from) if from.node().is_none() => chat.jid.domain() == from.domain() || chat.jid == *from,
+            Some(from) => chat.jid == *from,
+        };
+        let mut found = None;
+        for chat in self
+            .chats
+            .iter_mut()
+            .filter(|c| &c.account == account && about(c))
+        {
+            if chat
+                .lines
+                .iter()
+                .any(|l| l.outgoing && l.id.as_deref() == Some(id))
+            {
+                found = Some(chat.jid.clone());
+            }
             for line in chat
                 .lines
                 .iter_mut()
@@ -1228,6 +1269,7 @@ impl App {
                 }
             }
         }
+        found
     }
 
     /// What is owed now that chat `index` is in sight: the sender's read marker (if

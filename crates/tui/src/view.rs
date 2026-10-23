@@ -5604,4 +5604,39 @@ mod tests {
             "an encrypted file is always one"
         );
     }
+
+    #[test]
+    fn only_the_recipient_says_a_message_was_read() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        let mut line = Line::message(1, "я".into(), "привет".into(), true, true);
+        line.id = Some("m1".into());
+        line.delivery = Some(Delivery::Sent);
+        app.chats[bob].lines.push(line);
+        let state = |app: &App| app.chats[bob].lines[0].delivery.clone();
+
+        assert_eq!(
+            app.delivery_from(&me, &jid("mallory@evil.example"), "m1", Delivery::Read),
+            None
+        );
+        assert_eq!(
+            state(&app),
+            Some(Delivery::Sent),
+            "a stranger's word is no read marker"
+        );
+        assert_eq!(
+            app.delivery_from(&me, &jid("bob@home.org"), "m1", Delivery::Read),
+            Some(jid("bob@home.org"))
+        );
+        assert_eq!(state(&app), Some(Delivery::Read));
+        // A refusal from bob's server is about bob's chat too.
+        let mut other = Line::message(2, "я".into(), "ещё".into(), true, true);
+        other.id = Some("m2".into());
+        app.chats[bob].lines.push(other);
+        assert!(
+            app.delivery_from(&me, &jid("home.org"), "m2", Delivery::Failed("x".into()))
+                .is_some()
+        );
+    }
 }
