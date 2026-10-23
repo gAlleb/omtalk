@@ -4027,6 +4027,8 @@ mod tests {
         app.select(bob);
         let typed = |app: &mut App, text: &str| {
             app.focus = Focus::Input;
+            app.input.clear();
+            app.cursor = 0;
             text.chars()
                 .for_each(|c| drop(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
             app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -5520,5 +5522,29 @@ mod tests {
         // Back up: it follows.
         app.select(chats[3]);
         assert!(screen(&mut app, 100, 20).contains("p03"));
+    }
+
+    #[test]
+    fn a_refused_command_leaves_the_line_to_put_right() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = app_with_chat();
+        app.focus = Focus::Input;
+        let typed = "/upload /no/such/path/kitten.png";
+        for c in typed.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.status.is_empty(), "said why");
+        assert_eq!(app.input, typed, "the line is back, to be put right");
+        assert_eq!(app.cursor, typed.chars().count());
+
+        // One that works empties the line, as before.
+        app.input.clear();
+        app.cursor = 0;
+        for c in "/settings".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
     }
 }

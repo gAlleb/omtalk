@@ -1240,7 +1240,9 @@ async fn join(
                         tell(Msg::Notice {
                             account: account.clone(),
                             chat: Some(room.clone()),
-                            text: format!(
+                            text: trf!(
+                                "{} encrypted messages from the archive cannot be read: written before this \
+                                 device existed, or not for it",
                                 "{} зашифр. сообщений из архива не прочитать: они написаны до появления \
                                  этого устройства или не для него",
                                 caught.unreadable

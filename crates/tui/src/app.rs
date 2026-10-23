@@ -664,6 +664,9 @@ pub struct App {
     pub sent: Vec<String>,
     /// Which of `sent` the input line shows now, and the draft it replaced.
     pub recall: Option<(usize, String)>,
+    /// The last command was refused or answered with how to use it: the line typed goes
+    /// back into the input, to be put right instead of typed again.
+    pub refused: bool,
     /// How far the chat list is scrolled, in rows; the view keeps the chat picked in sight.
     pub chats_scroll: usize,
     /// The participant picked in a room's pane, while it has the focus.
@@ -728,6 +731,7 @@ impl App {
             history_asked: BTreeSet::new(),
             people_cursor: 0,
             chats_scroll: 0,
+            refused: false,
             sent: Vec::new(),
             recall: None,
             avatar_blocks: BTreeMap::new(),
@@ -1863,7 +1867,13 @@ impl App {
         }
         // "/me waves" is a message, sent as it is (XEP-0245); other "/…" are commands.
         if input.trim_start().starts_with('/') && !is_action(input.trim_start()) {
-            return self.command(input.trim());
+            self.refused = false;
+            let actions = self.command(input.trim());
+            if self.refused {
+                self.cursor = input.chars().count();
+                self.input = input;
+            }
+            return actions;
         }
         // A pasted block keeps its indentation; only empty lines around it go.
         let text = input.trim_end().trim_start_matches(['\n', '\r']).to_owned();
@@ -2217,6 +2227,7 @@ impl App {
             Ok(actions) => actions,
             Err(message) => {
                 self.status = message;
+                self.refused = true;
                 Vec::new()
             }
         }
@@ -2373,6 +2384,7 @@ impl App {
     /// A word in the status line, as a command's answer.
     fn say(&mut self, text: &str) -> Vec<Action> {
         self.status = text.to_owned();
+        self.refused = true;
         Vec::new()
     }
 
@@ -3363,6 +3375,9 @@ mod tests {
     }
 
     fn type_text(app: &mut App, text: &str) -> Vec<Action> {
+        // A fresh line, as one types after putting a refused one aside.
+        app.input.clear();
+        app.cursor = 0;
         let mut actions = Vec::new();
         for c in text.chars() {
             actions.extend(app.on_key(key(KeyCode::Char(c))));
