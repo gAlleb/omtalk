@@ -1945,7 +1945,9 @@ async fn perform(action: Action, shared: Shared) {
             // picture shows without coming down again.
             if let Some(media) = omtalk_media::Media::shared(&link) {
                 let cached = media.cache_path(&shared.cache);
-                let _ = tokio::fs::create_dir_all(&shared.cache).await;
+                if let Some(dir) = cached.parent() {
+                    let _ = tokio::fs::create_dir_all(dir).await;
+                }
                 let _ = tokio::fs::copy(&path, &cached).await;
             }
             fetch_if_media(&link, true, &shared);
@@ -2468,7 +2470,7 @@ fn fetch_if_media(text: &str, shared_file: bool, shared: &Shared) {
         return;
     };
     // Not by itself: what is here already shows, the rest waits for a click.
-    if !shared.auto_download && !media.cache_path(&shared.cache).exists() {
+    if !shared.auto_download && media.cached(&shared.cache).is_none() {
         let _ = shared.tx.send(Msg::Media {
             url: media.url().to_owned(),
             state: MediaState::Offered,

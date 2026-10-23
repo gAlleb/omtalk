@@ -94,14 +94,23 @@ impl Media {
         matches!(self, Media::Encrypted { .. })
     }
 
-    /// The file name the link ends in, for showing and for the extension.
+    /// The file's name as sent: the link's last part, decoded ("%D0%BE…" is "о…"). A
+    /// name only, never a path: it names the file on disk.
     pub fn name(&self) -> String {
         let path = self.url().split(['?', '#']).next().unwrap_or_default();
-        path.rsplit('/')
+        let last = path.rsplit('/').next().unwrap_or_default();
+        let decoded = percent_encoding::percent_decode_str(last).decode_utf8_lossy();
+        let name: String = decoded
+            .rsplit(['/', '\\'])
             .next()
-            .filter(|n| !n.is_empty())
-            .unwrap_or("file")
-            .to_owned()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        match name.trim() {
+            "" | "." | ".." => "file".to_owned(),
+            name => name.to_owned(),
+        }
     }
 
     /// Whether the name looks like a picture worth showing inline.
@@ -112,27 +121,51 @@ impl Media {
             .any(|ext| name.ends_with(ext))
     }
 
-    /// Where the file is kept once fetched: named after the link (key included), so a
-    /// file is fetched once and two links never share a file.
+    /// Where the file is kept once fetched: under its own name (what a viewer shows and
+    /// a "save as" offers), in a folder named after the link, key included, so a file is
+    /// fetched once and two links never share a file.
     pub fn cache_path(&self, cache_dir: &Path) -> PathBuf {
+        cache_dir.join(self.digest()).join(self.name())
+    }
+
+    /// The file if it is here already. One kept by an older omtalk, named after the link
+    /// alone, is moved where it goes now.
+    pub fn cached(&self, cache_dir: &Path) -> Option<PathBuf> {
+        let path = self.cache_path(cache_dir);
+        if path.is_file() {
+            return Some(path);
+        }
+        let name = self.name();
+        let extension = name
+            .rsplit_once('.')
+            .map(|(_, e)| format!(".{e}"))
+            .unwrap_or_default();
+        let old = cache_dir.join(format!("{}{extension}", self.digest()));
+        if old.is_file() {
+            // Without an extension the old file has the new folder's name: moved aside
+            // first.
+            let aside = old.with_extension("moving");
+            std::fs::rename(&old, &aside).ok()?;
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            std::fs::rename(&aside, &path).ok()?;
+            return Some(path);
+        }
+        None
+    }
+
+    fn digest(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.url().as_bytes());
         if let Media::Encrypted { iv, key, .. } = self {
             hasher.update(iv);
             hasher.update(key);
         }
-        let digest: String = hasher
+        hasher
             .finalize()
             .iter()
             .take(16)
             .map(|b| format!("{b:02x}"))
-            .collect();
-        let name = self.name();
-        let extension = name
-            .rsplit_once('.')
-            .map(|(_, e)| format!(".{e}"))
-            .unwrap_or_default();
-        cache_dir.join(format!("{digest}{extension}"))
+            .collect()
     }
 
     /// The file on disk, fetched and decrypted if it is not there yet.
@@ -146,15 +179,17 @@ impl Media {
         cache_dir: &Path,
         progress: impl Fn(u64, Option<u64>),
     ) -> Result<PathBuf, Error> {
-        let path = self.cache_path(cache_dir);
-        if tokio::fs::try_exists(&path).await? {
+        if let Some(path) = self.cached(cache_dir) {
             return Ok(path);
         }
+        let path = self.cache_path(cache_dir);
         let mut data = download(self.url(), progress).await?;
         if let Media::Encrypted { iv, key, .. } = self {
             data = decrypt(&data, iv, key)?;
         }
-        tokio::fs::create_dir_all(cache_dir).await?;
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
         // Written aside and renamed, so a half-written file is never taken for a whole one.
         let partial = path.with_extension("part");
         tokio::fs::write(&partial, &data).await?;
@@ -414,7 +449,40 @@ mod tests {
             key: [2; 32],
         };
         assert_ne!(a.cache_path(dir), b.cache_path(dir));
-        assert!(a.cache_path(dir).to_string_lossy().ends_with(".png"));
+        assert_eq!(
+            a.cache_path(dir).file_name().unwrap(),
+            "a.png",
+            "kept under its name"
+        );
+    }
+
+    #[test]
+    fn a_name_is_decoded_and_never_a_path() {
+        let name = |url: &str| Media::Plain { url: url.into() }.name();
+        assert_eq!(
+            name("https://x/up/%D0%BE%D1%82%D1%87%D1%91%D1%82.pdf"),
+            "отчёт.pdf"
+        );
+        assert_eq!(name("https://x/up/omtalk-aarch64"), "omtalk-aarch64");
+        assert_eq!(name("https://x/up/a%20b.txt"), "a b.txt");
+        assert_eq!(name("https://x/up/..%2F..%2F.bashrc"), ".bashrc");
+        assert_eq!(name("https://x/up/%2E%2E"), "file");
+        assert_eq!(name("https://x/up/"), "file");
+    }
+
+    #[test]
+    fn a_file_kept_by_an_older_omtalk_is_moved_not_fetched_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = Media::Plain {
+            url: "https://x/up/omtalk-aarch64".into(),
+        };
+        let old = dir.path().join(media.digest());
+        std::fs::write(&old, b"bin").unwrap();
+        let found = media.cached(dir.path()).expect("found where it was");
+        assert_eq!(found, media.cache_path(dir.path()));
+        assert_eq!(std::fs::read(&found).unwrap(), b"bin");
+        assert!(!old.is_file(), "the old name is the folder now");
+        assert_eq!(media.cached(dir.path()), Some(found), "and found there next time");
     }
 
     /// Serves `body` once over plain HTTP on localhost; tests allow http.

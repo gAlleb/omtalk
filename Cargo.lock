@@ -2032,6 +2032,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "omtalk-xmpp",
+ "percent-encoding",
  "reqwest",
  "rustls",
  "sha2 0.11.1",
