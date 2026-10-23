@@ -1,0 +1,96 @@
+[package]
+name = "tokio-xmpp"
+version = "6.0.0"
+authors = ["Astro <astro@spaceboyz.net>", "Emmanuel Gil Peyrot <linkmauve@linkmauve.fr>", "pep <pep+code@bouah.net>", "O01eg <o01eg@yandex.ru>", "SonnyX <randy@vonderweide.nl>", "Paul Fariello <paul@fariello.eu>"]
+description = "Asynchronous XMPP for Rust with tokio"
+license = "MPL-2.0"
+homepage = "https://gitlab.com/xmpp-rs/xmpp-rs"
+repository = "https://gitlab.com/xmpp-rs/xmpp-rs"
+documentation = "https://docs.rs/tokio-xmpp"
+categories = ["asynchronous", "network-programming"]
+keywords = ["xmpp", "tokio"]
+edition = "2021"
+
+[dependencies]
+bytes = "1"
+futures = "0.3"
+log = "0.4"
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "macros", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+webpki-roots = { version = "1", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+rxml = { version = "0.14.0", features = ["compact_str", "tokio"] }
+rand = "0.10"
+syntect = { version = "5", optional = true }
+pin-project-lite = { version = "0.2" }
+thiserror = "2.0"
+# same repository dependencies
+sasl = { version = "0.5", path = "../sasl" }
+xmpp-parsers = { version = "0.23", path = "../parsers", features = [ "log" ] }
+xso = { version = "0.4", path = "../xso" }
+
+# these are only needed for starttls ServerConnector support
+hickory-resolver = { version = "0.26", optional = true}
+idna = { version = "1.0", optional = true}
+native-tls = { version = "0.2", optional = true }
+tokio-native-tls = { version = "0.3", optional = true }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["logging", "tls12"] }
+ktls = { version = "6", optional = true }
+
+[dev-dependencies]
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+# this is needed for echo-component example
+tokio = { version = "1", features = ["signal", "test-util"] }
+tokio-xmpp = { path = ".", default-features = false, features = ["rustls-native-certs"]}
+
+[[example]]
+name = "contact_addr"
+required-features = ["starttls", "aws_lc_rs"]
+
+[[example]]
+name = "download_avatars"
+required-features = ["starttls", "aws_lc_rs"]
+
+[[example]]
+name = "echo_bot"
+required-features = ["starttls", "aws_lc_rs"]
+
+[[example]]
+name = "echo_component"
+required-features = ["starttls", "insecure-tcp"]
+
+[[example]]
+name = "echo_server"
+required-features = ["starttls", "aws_lc_rs"]
+
+[[example]]
+name = "keep_connection"
+required-features = ["starttls"]
+
+[features]
+default = ["direct-tls", "starttls", "aws_lc_rs", "rustls-native-certs"]
+starttls = ["dns"]
+direct-tls = ["dns"]
+
+aws_lc_rs = ["rustls-any-backend", "tokio-rustls/aws_lc_rs"]
+ring = ["rustls-any-backend", "tokio-rustls/ring"]
+native-tls = ["dep:tokio-native-tls", "dep:native-tls"]
+ktls = ["rustls-any-backend", "dep:ktls"]
+
+rustls-any-backend = ["dep:tokio-rustls"]
+
+rustls-native-certs = ["dep:rustls-native-certs"]
+webpki-roots = ["dep:webpki-roots"]
+
+insecure-tcp = []
+syntax-highlighting = ["syntect"]
+# Enable serde support in jid crate
+serde = [ "xmpp-parsers/serde" ]
+# Required by starttls, and used by insecure-tcp by default
+dns = [ "hickory-resolver", "idna" ]
+component = ["xmpp-parsers/component", "insecure-tcp"]
+
+pedantic = ["xmpp-parsers/pedantic"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(xmpprs_doc_build)'] }
