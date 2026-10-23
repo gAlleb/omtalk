@@ -1280,6 +1280,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 None => {}
             },
             Event::Presence(presence) => {
+                trace_presence(&account, presence, &xmpp);
                 // A vCard avatar's hash, on a person's presence (not an occupant's).
                 if let Some(Some(hash)) = avatar::photo_of(presence)
                     && muc::occupant(presence).is_none()
@@ -1414,6 +1415,29 @@ async fn still_in_rooms(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shar
 
 /// How often the rooms are asked whether one is still in them.
 const ROOM_CHECK: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// With OMTALK_LOG set, each presence that comes into that file too, with what omtalk
+/// makes of it: for finding out why a room's participants do not show.
+fn trace_presence(account: &BareJid, presence: &xmpp_parsers::presence::Presence, xmpp: &Account) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("OMTALK_LOG") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let occupant = muc::occupant(presence);
+    let in_room = occupant.as_ref().map(|o| xmpp.in_room(&o.room));
+    let payloads: Vec<String> = presence.payloads.iter().map(String::from).collect();
+    let _ = writeln!(
+        file,
+        "{} {account} presence from={:?} type={:?} occupant={:?} in_room={in_room:?} payloads={payloads:?}",
+        chrono::Utc::now().format("%H:%M:%S%.3f"),
+        presence.from.as_ref().map(|f| f.to_string()),
+        presence.type_,
+        occupant.map(|o| (o.nick, o.present)),
+    );
+}
 
 /// After every new login: announce the device, read what was missed, enter the rooms.
 async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
