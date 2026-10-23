@@ -159,6 +159,12 @@ enum Msg {
         message: Incoming,
         at: i64,
     },
+    /// A chat's history from the store, for a chat opened again: before what it has.
+    Restored {
+        account: BareJid,
+        chat: BareJid,
+        lines: Vec<Line>,
+    },
     /// The avatar of `jid` is ready to draw ("avatar:HASH" among the pictures), or gone.
     Avatar {
         jid: BareJid,
@@ -564,28 +570,35 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
                 None => ChatKind::Direct,
             };
             let index = app.chat(account, &summary.chat, kind);
-            for message in store
+            let messages = store
                 .recent_messages(account, &summary.chat, HISTORY)
-                .unwrap_or_default()
-            {
-                let who = match (&message.nick, message.outgoing) {
-                    (Some(nick), _) => nick.clone(),
-                    (None, true) => tr!("me", "я").to_owned(),
-                    (None, false) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
-                };
-                let mut line =
-                    Line::message(message.at, who, message.body, message.encrypted, message.outgoing);
-                line.id = message.id;
-                line.delivery = message.delivery.map(|d| match d {
-                    omtalk_store::Delivery::Sent => Delivery::Sent,
-                    omtalk_store::Delivery::Delivered => Delivery::Delivered,
-                    omtalk_store::Delivery::Read => Delivery::Read,
-                    omtalk_store::Delivery::Failed(why) => Delivery::Failed(why),
-                });
-                app.chats[index].lines.push(line);
-            }
+                .unwrap_or_default();
+            app.chats[index].lines.extend(stored_lines(messages));
         }
     }
+}
+
+/// Messages from the store as the chat shows them.
+fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
+    messages
+        .into_iter()
+        .map(|message| {
+            let who = match (&message.nick, message.outgoing) {
+                (Some(nick), _) => nick.clone(),
+                (None, true) => tr!("me", "я").to_owned(),
+                (None, false) => message.sender.node().map(|n| n.to_string()).unwrap_or_default(),
+            };
+            let mut line = Line::message(message.at, who, message.body, message.encrypted, message.outgoing);
+            line.id = message.id;
+            line.delivery = message.delivery.map(|d| match d {
+                omtalk_store::Delivery::Sent => Delivery::Sent,
+                omtalk_store::Delivery::Delivered => Delivery::Delivered,
+                omtalk_store::Delivery::Read => Delivery::Read,
+                omtalk_store::Delivery::Failed(why) => Delivery::Failed(why),
+            });
+            line
+        })
+        .collect()
 }
 
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
@@ -675,6 +688,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.delivery(&account, &id, state)
         }
         Msg::ReadElsewhere { account, chat } => app.read_elsewhere(&account, &chat),
+        Msg::Restored { account, chat, lines } => {
+            let index = app.chat(&account, &chat, ChatKind::Direct);
+            let newer = std::mem::take(&mut app.chats[index].lines);
+            app.chats[index].lines = lines;
+            app.chats[index].lines.extend(newer);
+        }
         Msg::Avatar { jid, hash } => match hash {
             Some(hash) => drop(app.avatars.insert(jid, hash)),
             None => drop(app.avatars.remove(&jid)),
@@ -2058,6 +2077,20 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::History { account, peer } => {
+            // A chat closed and opened again has its history here: that, not the archive
+            // read a second time (and every message kept twice).
+            let kept = shared
+                .store
+                .recent_messages(&account, &peer, HISTORY)
+                .unwrap_or_default();
+            if !kept.is_empty() {
+                tell(Msg::Restored {
+                    account,
+                    chat: peer,
+                    lines: stored_lines(kept),
+                });
+                return;
+            }
             let Some((_, omemo)) = get(&account) else { return };
             match omemo.history_with(&peer, HISTORY_FROM_ARCHIVE).await {
                 Ok(history) => {

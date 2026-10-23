@@ -94,9 +94,14 @@ impl Store {
     /// Saves a message; a chat closed before opens again with it.
     pub fn save_message(&self, account: &BareJid, message: &StoredMessage) -> Result<(), Error> {
         self.reopen_chat(account, &message.chat)?;
+        // A message that has an id is kept once: the archive read again, a carbon and
+        // its original, bring it more than once.
         self.db.lock().unwrap().execute(
             "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+             WHERE ?9 IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM messages WHERE account = ?1 AND chat = ?2 AND sender = ?3 AND id = ?9
+             )",
             params![
                 account.as_str(),
                 message.chat.as_str(),
@@ -247,6 +252,33 @@ mod tests {
             id: None,
             delivery: None,
         }
+    }
+
+    #[test]
+    fn a_message_with_an_id_is_kept_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let me = jid("me@example.org");
+        let named = StoredMessage {
+            id: Some("x1".into()),
+            ..message("bob@example.org", "привет", 1)
+        };
+        store.save_message(&me, &named).unwrap();
+        store.save_message(&me, &named).unwrap();
+        let unnamed = message("bob@example.org", "без id", 2);
+        store.save_message(&me, &unnamed).unwrap();
+        store.save_message(&me, &unnamed).unwrap();
+        let bodies: Vec<String> = store
+            .recent_messages(&me, &jid("bob@example.org"), 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        assert_eq!(
+            bodies,
+            ["привет", "без id", "без id"],
+            "one with an id once; without, as they come"
+        );
     }
 
     #[test]
