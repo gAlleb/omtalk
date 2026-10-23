@@ -65,11 +65,54 @@ pub fn blocks(text: &str) -> Vec<Block<'_>> {
 pub fn marks(line: &str) -> Vec<Mark> {
     let chars: Vec<char> = line.chars().collect();
     let mut out = vec![Mark::default(); chars.len()];
-    span(&chars, 0, chars.len(), Mark::default(), &mut out);
+    let closers = Closers::of(&chars);
+    span(&chars, &closers, 0, chars.len(), Mark::default(), &mut out);
     out
 }
 
-fn span(chars: &[char], start: usize, end: usize, mark: Mark, out: &mut [Mark]) {
+/// Where each directive could close (after a non-space), and where lines break: found
+/// once, so that looking for a span's end is a search, not a walk to the end of the
+/// line for every opening (a line of "*a *a *a …" took seconds).
+struct Closers {
+    by_directive: [Vec<usize>; 4],
+    breaks: Vec<usize>,
+}
+
+const DIRECTIVES: [char; 4] = ['*', '_', '~', '`'];
+
+impl Closers {
+    fn of(chars: &[char]) -> Self {
+        let mut by_directive: [Vec<usize>; 4] = Default::default();
+        let mut breaks = Vec::new();
+        for (j, c) in chars.iter().enumerate() {
+            if *c == '\n' {
+                breaks.push(j);
+            }
+            if let Some(d) = DIRECTIVES.iter().position(|d| d == c)
+                && j > 0
+                && !chars[j - 1].is_whitespace()
+            {
+                by_directive[d].push(j);
+            }
+        }
+        Self { by_directive, breaks }
+    }
+
+    /// The first place from `from` on, before `end` and before the line breaks, where
+    /// directive `c` closes.
+    fn close(&self, c: char, from: usize, end: usize) -> Option<usize> {
+        let d = DIRECTIVES.iter().position(|d| *d == c)?;
+        let line_end = self.breaks[self.breaks.partition_point(|&b| b < from)..]
+            .first()
+            .copied()
+            .unwrap_or(usize::MAX);
+        let places = &self.by_directive[d];
+        let at = places[places.partition_point(|&j| j < from)..].first().copied()?;
+        (at < end && at < line_end).then_some(at)
+    }
+}
+
+fn span(chars: &[char], closers: &Closers, start: usize, end: usize, mark: Mark, out: &mut [Mark]) {
     let mut i = start;
     while i < end {
         let c = chars[i];
@@ -80,9 +123,7 @@ fn span(chars: &[char], start: usize, end: usize, mark: Mark, out: &mut [Mark]) 
             && may_open
             && i + 1 < end
             && !chars[i + 1].is_whitespace()
-            && let Some(close) = (i + 2..end)
-                .take_while(|&j| chars[j] != '\n')
-                .find(|&j| chars[j] == c && !chars[j - 1].is_whitespace())
+            && let Some(close) = closers.close(c, i + 2, end)
         {
             let directive = Mark {
                 directive: true,
@@ -102,7 +143,7 @@ fn span(chars: &[char], start: usize, end: usize, mark: Mark, out: &mut [Mark]) 
             if c == '`' {
                 out[i + 1..close].iter_mut().for_each(|m| *m = inner);
             } else {
-                span(chars, i + 1, close, inner, out);
+                span(chars, closers, i + 1, close, inner, out);
             }
             i = close + 1;
             continue;
@@ -159,6 +200,19 @@ mod tests {
         );
         assert_eq!(show("2*3*4 = 24"), "2*3*4 = 24");
         assert_eq!(show("snake_case_name"), "snake_case_name");
+    }
+
+    #[test]
+    fn a_long_line_of_openings_is_read_at_once() {
+        let line = "*a ".repeat(50_000);
+        let started = std::time::Instant::now();
+        let marks = marks(&line);
+        assert_eq!(marks.len(), line.chars().count());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
