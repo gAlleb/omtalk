@@ -1591,10 +1591,12 @@ async fn perform(action: Action, shared: Shared) {
                             &account,
                             &to,
                             &text,
-                            true,
                             &id,
-                            Some(omtalk_store::Delivery::Sent),
-                            false,
+                            Own {
+                                encrypted: true,
+                                delivery: Some(omtalk_store::Delivery::Sent),
+                                shared_file: false,
+                            },
                         );
                         delivery(Delivery::Sent);
                         for (jid, device, e) in report.failed {
@@ -1627,7 +1629,18 @@ async fn perform(action: Action, shared: Shared) {
                     }
                     // Encrypted and queued: it goes when the connection is back.
                     Err(omtalk_omemo::Error::Xmpp(omtalk_xmpp::Error::Queued)) => {
-                        save_own(&shared, &account, &to, &text, true, &id, None, false);
+                        save_own(
+                            &shared,
+                            &account,
+                            &to,
+                            &text,
+                            &id,
+                            Own {
+                                encrypted: true,
+                                delivery: None,
+                                shared_file: false,
+                            },
+                        );
                         delivery(Delivery::Queued);
                     }
                     Err(e) => {
@@ -1652,17 +1665,30 @@ async fn perform(action: Action, shared: Shared) {
                                 &account,
                                 &to,
                                 &text,
-                                false,
                                 &id,
-                                Some(omtalk_store::Delivery::Sent),
-                                false,
+                                Own {
+                                    encrypted: false,
+                                    delivery: Some(omtalk_store::Delivery::Sent),
+                                    shared_file: false,
+                                },
                             );
                         }
                         delivery(Delivery::Sent);
                     }
                     Err(omtalk_xmpp::Error::Queued) => {
                         if !room {
-                            save_own(&shared, &account, &to, &text, false, &id, None, false);
+                            save_own(
+                                &shared,
+                                &account,
+                                &to,
+                                &text,
+                                &id,
+                                Own {
+                                    encrypted: false,
+                                    delivery: None,
+                                    shared_file: false,
+                                },
+                            );
                         }
                         delivery(Delivery::Queued);
                     }
@@ -1821,10 +1847,12 @@ async fn perform(action: Action, shared: Shared) {
                             &account,
                             &to,
                             &link,
-                            encrypted,
                             &id,
-                            Some(omtalk_store::Delivery::Sent),
-                            true,
+                            Own {
+                                encrypted: encrypted,
+                                delivery: Some(omtalk_store::Delivery::Sent),
+                                shared_file: true,
+                            },
                         );
                     }
                     tell(Msg::Delivery {
@@ -2249,17 +2277,16 @@ async fn perform(action: Action, shared: Shared) {
     }
 }
 
-/// Keeps a message sent from here, as on the server: its ✓ is kept with it.
-fn save_own(
-    shared: &Shared,
-    account: &BareJid,
-    chat: &BareJid,
-    text: &str,
+/// How a message sent from here is kept.
+struct Own {
     encrypted: bool,
-    id: &str,
     delivery: Option<omtalk_store::Delivery>,
+    /// A file shared (one's own upload), not text.
     shared_file: bool,
-) {
+}
+
+/// Keeps a message sent from here, as on the server: its ✓ is kept with it.
+fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, id: &str, own: Own) {
     let _ = shared.store.save_message(
         account,
         &StoredMessage {
@@ -2267,12 +2294,12 @@ fn save_own(
             sender: account.clone(),
             nick: None,
             outgoing: true,
-            encrypted,
+            encrypted: own.encrypted,
             body: text.to_owned(),
             at: now(),
             id: Some(id.to_owned()),
-            delivery,
-            shared_file,
+            delivery: own.delivery,
+            shared_file: own.shared_file,
         },
     );
 }
