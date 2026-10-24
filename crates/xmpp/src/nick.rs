@@ -2,9 +2,24 @@
 //! whose clients ask for it ("+notify"). A name of one's own choosing in the roster
 //! comes first; this one is for those who have none there.
 
-use crate::PepItem;
+use xmpp_parsers::minidom::Element;
+
+use crate::{Access, Account, Error, PepItem};
 
 pub const NODE: &str = "http://jabber.org/protocol/nick";
+
+impl Account {
+    /// Gives oneself a name, for those who have none for one in their roster; `None`
+    /// takes it away (an empty one, as XEP-0172 says). Seen by those who see one's status.
+    pub async fn set_nickname(&self, nick: Option<&str>) -> Result<(), Error> {
+        let mut payload = Element::builder("nick", NODE);
+        if let Some(nick) = nick {
+            payload = payload.append(nick);
+        }
+        self.publish(NODE, Some("current"), payload.build(), Access::Presence)
+            .await
+    }
+}
 
 /// The name in a notification of the node: `Some(None)` when it was taken away (or is
 /// empty), `None` when the items say nothing of it.
@@ -21,7 +36,6 @@ pub fn of(items: &[PepItem]) -> Option<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::minidom::Element;
 
     fn item(payload: Element) -> PepItem {
         PepItem {

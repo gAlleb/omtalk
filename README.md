@@ -145,7 +145,7 @@ switches focus.
 
 Commands: `/msg`, `/join`, `/leave`, `/add`, `/remove`, `/accept`, `/refuse`, `/devices`,
 `/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/reply`, `/react`, `/edit`, `/search`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+`/name`, `/nick`, `/nickname`, `/reply`, `/react`, `/edit`, `/search`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
 
 Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last message of
 the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
@@ -281,15 +281,21 @@ Conversations). An invitation sent to you appears in the server channel with a r
 
 A room shows its title on the left and in the header, with its topic next to it; a topic
 change shows in the chat. `/topic text` changes the topic, `/name Title` the title (owner
-only). `/nick nick` changes your nick in the room; other people's nick changes show in the
-chat («alice теперь алиса», "alice is now алиса"), and the person stays the same in the
-list.
+only). `/nick nick` changes your nick in the room, `/nick` alone brings back the default
+one (your address before `@`); other people's nick changes show in the chat («alice теперь
+алиса», "alice is now алиса"), and the person stays the same in the list.
+
+Three names, besides the address: your nick in each room (`/nick`), the name you give
+yourself for everyone (`/nickname Name`, XEP-0172: seen by contacts who have no name of
+their own for you), and the name you give a contact, seen only by you (`/name Name` in the
+chat with them, kept in your roster for all your clients). Each without a name takes it
+away.
 
 The right pane of a room shows the topic and the room's address at the top, then who is in
 the room now, then «не в сети» ("offline"): members (owners, admins, members) who are not
 in the room. A click on them opens a direct chat. Open rooms may not show their member
-lists; then that section is missing. At the bottom there is a hint with the room commands
-(`/topic`, `/name`, `/invite`, `/nick`, `/close`).
+lists; then that section is missing. Owners, admins, moderators and members are marked as
+IRC marks them (`~`, `@`, `%`, `+`) and listed first.
 
 ## Presence and delivery
 

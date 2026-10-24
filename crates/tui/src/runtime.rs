@@ -2565,6 +2565,42 @@ async fn perform(action: Action, shared: Shared) {
                 text,
             });
         }
+        Action::RenameContact { account, jid, name } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            // The roster push that follows shows the name everywhere.
+            let text = match (xmpp.rename_contact(&jid, name.as_deref()).await, &name) {
+                (Ok(()), Some(name)) => trf!("named {name} in your contacts", "в контактах — {name}"),
+                (Ok(()), None) => {
+                    tr!("no name in your contacts any more", "имя в контактах убрано").to_owned()
+                }
+                (Err(e), _) => trf!("the name did not change: {e}", "имя не сменилось: {e}"),
+            };
+            tell(Msg::Notice {
+                account,
+                chat: Some(jid),
+                text,
+            });
+        }
+        Action::SetNickname { account, nick } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let text = match (xmpp.set_nickname(nick.as_deref()).await, &nick) {
+                (Ok(()), Some(nick)) => trf!(
+                    "your contacts now see you as {nick}",
+                    "контакты теперь видят вас как {nick}"
+                ),
+                (Ok(()), None) => tr!(
+                    "your name is taken away; contacts see your address",
+                    "ваше имя убрано; контакты видят адрес"
+                )
+                .to_owned(),
+                (Err(e), _) => trf!("the name did not change: {e}", "имя не сменилось: {e}"),
+            };
+            tell(Msg::Notice {
+                account,
+                chat: None,
+                text,
+            });
+        }
         Action::AddContact { account, jid, name } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let text = match xmpp.add_contact(&jid, name.as_deref()).await {

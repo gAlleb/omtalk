@@ -1054,3 +1054,40 @@ async fn a_room_says_whether_one_is_still_in_it() {
     me.join(&room, "me").await.unwrap();
     assert_eq!(me.self_ping(&room).await, InRoom::Yes);
 }
+
+#[tokio::test]
+async fn a_contact_is_named_and_unnamed_and_ones_own_name_reaches_contacts() {
+    use omtalk_xmpp::nick;
+    let (mut a_accounts, mut a_events) = Accounts::new();
+    let (mut b_accounts, mut b_events) = Accounts::new();
+    let me = a_accounts.add(config("u58")).await;
+    let friend = b_accounts.add(config("u59")).await;
+    online(&mut a_events, &[&me]).await;
+    online(&mut b_events, &[&friend]).await;
+    // Friends both ways, as contacts are: names reach those who see one's status.
+    me.add_contact(friend.jid(), None).await.unwrap();
+    friend.add_contact(me.jid(), None).await.unwrap();
+    me.accept_contact(friend.jid()).await.unwrap();
+    friend.accept_contact(me.jid()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    me.rename_contact(friend.jid(), Some("Миша")).await.unwrap();
+    let named = me.roster().await.unwrap();
+    let entry = named.iter().find(|c| &c.jid == friend.jid()).unwrap();
+    assert_eq!(entry.name.as_deref(), Some("Миша"));
+    assert!(entry.we_see_them, "renaming keeps the subscription");
+    me.rename_contact(friend.jid(), None).await.unwrap();
+    let unnamed = me.roster().await.unwrap();
+    assert_eq!(
+        unnamed.iter().find(|c| &c.jid == friend.jid()).unwrap().name,
+        None
+    );
+
+    me.set_nickname(Some("Стефан")).await.unwrap();
+    let items = friend.items(me.jid(), nick::NODE).await.unwrap();
+    assert_eq!(nick::of(&items), Some(Some("Стефан".to_owned())));
+    me.set_nickname(None).await.unwrap();
+    let items = friend.items(me.jid(), nick::NODE).await.unwrap();
+    assert_eq!(nick::of(&items), Some(None), "taken away");
+    let _ = (&mut a_events, &mut b_events);
+}

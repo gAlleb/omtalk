@@ -199,8 +199,19 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/nick",
-        args: ["NICK", "НИК"],
-        about: ["change your nick in the room", "сменить свой ник в комнате"],
+        args: ["[NICK]", "[НИК]"],
+        about: [
+            "your nick in the room; none: back to the default",
+            "свой ник в комнате; без ника — обычный",
+        ],
+    },
+    Command {
+        name: "/nickname",
+        args: ["[NAME]", "[ИМЯ]"],
+        about: [
+            "the name you give yourself, seen by your contacts; none: take it away",
+            "своё имя, которое видят контакты; без имени — убрать",
+        ],
     },
     Command {
         name: "/topic",
@@ -212,10 +223,10 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/name",
-        args: ["TITLE", "НАЗВАНИЕ"],
+        args: ["[TITLE]", "[НАЗВАНИЕ]"],
         about: [
-            "the room's title (owner only)",
-            "название комнаты (только владелец)",
+            "the room's title (owner only); a contact's name for you, none: take it away",
+            "название комнаты (только владелец); имя контакта для вас, без имени — убрать",
         ],
     },
     Command {

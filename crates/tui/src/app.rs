@@ -451,6 +451,17 @@ pub enum Action {
         account: BareJid,
         jid: BareJid,
     },
+    /// The name one gives a contact in the roster; `None` takes it away.
+    RenameContact {
+        account: BareJid,
+        jid: BareJid,
+        name: Option<String>,
+    },
+    /// The name one gives oneself (XEP-0172); `None` takes it away.
+    SetNickname {
+        account: BareJid,
+        nick: Option<String>,
+    },
     /// A chat closed before is open again.
     ReopenChat {
         account: BareJid,
@@ -2903,13 +2914,12 @@ impl App {
             ("/commands", _) => return self.open_chat_commands(),
             ("/nick", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
-                    let nick = line[name.len()..].trim().to_owned();
-                    if nick.is_empty() {
-                        return self.say(tr!(
-                            "/nick NICK changes your nick in this room",
-                            "/nick НИК — сменить свой ник в этой комнате"
-                        ));
-                    }
+                    // None given: the one a room gets by default, the address's name part.
+                    let nick = Some(line[name.len()..].trim())
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| chat.account.node().map(|n| n.to_string()))
+                        .unwrap_or_default();
                     Ok(vec![Action::Nick {
                         account: chat.account.clone(),
                         room: chat.jid.clone(),
@@ -2938,6 +2948,26 @@ impl App {
                     }])
                 }
                 None => Err(tr!("this is not a room", "это не комната").to_owned()),
+            },
+            // In a direct chat: the contact's name in one's roster; none given takes it away.
+            ("/name", _) if self.current().is_some_and(|c| c.kind == ChatKind::Direct) => {
+                let chat = self.current().expect("a direct chat is open");
+                let new = line[name.len()..].trim();
+                Ok(vec![Action::RenameContact {
+                    account: chat.account.clone(),
+                    jid: chat.jid.clone(),
+                    name: (!new.is_empty()).then(|| new.to_owned()),
+                }])
+            }
+            ("/nickname", _) => match self.current().map(|c| c.account.clone()).or(self.active.clone()) {
+                Some(account) => {
+                    let nick = line[name.len()..].trim();
+                    Ok(vec![Action::SetNickname {
+                        account,
+                        nick: (!nick.is_empty()).then(|| nick.to_owned()),
+                    }])
+                }
+                None => Err(tr!("no account", "нет аккаунта").to_owned()),
             },
             ("/name", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
@@ -4771,6 +4801,57 @@ mod tests {
             matches!(&removed[..], [Action::RemoveContact { jid, .. }] if jid.as_str() == "carol@example.org"),
             "{removed:?}"
         );
+    }
+
+    #[test]
+    fn the_three_names_are_set_and_taken_away() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        // A contact's name in one's roster, in the chat with them.
+        type_text(&mut app, "/msg bob@example.org");
+        let named = type_text(&mut app, "/name Миша");
+        assert!(
+            matches!(&named[..], [Action::RenameContact { jid, name: Some(n), .. }]
+                if jid.as_str() == "bob@example.org" && n == "Миша"),
+            "{named:?}"
+        );
+        let unnamed = type_text(&mut app, "/name");
+        assert!(
+            matches!(&unnamed[..], [Action::RenameContact { name: None, .. }]),
+            "{unnamed:?}"
+        );
+        // One's own name for everyone, from any chat.
+        let set = type_text(&mut app, "/nickname Стефан");
+        assert!(
+            matches!(&set[..], [Action::SetNickname { account, nick: Some(n) }] if *account == me && n == "Стефан"),
+            "{set:?}"
+        );
+        assert!(matches!(
+            &type_text(&mut app, "/nickname")[..],
+            [Action::SetNickname { nick: None, .. }]
+        ));
+        // One's nick in a room; none given: back to the address's name part.
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "s".into() },
+        );
+        app.select(room);
+        let renamed = type_text(&mut app, "/nick Стефан");
+        assert!(
+            matches!(&renamed[..], [Action::Nick { nick, .. }] if nick == "Стефан"),
+            "{renamed:?}"
+        );
+        let back = type_text(&mut app, "/nick");
+        assert!(
+            matches!(&back[..], [Action::Nick { nick, .. }] if nick == "me"),
+            "{back:?}"
+        );
+        // In a room, /name is still the room's title.
+        assert!(matches!(
+            &type_text(&mut app, "/name Команда")[..],
+            [Action::SetRoomName { name, .. }] if name == "Команда"
+        ));
     }
 
     #[test]

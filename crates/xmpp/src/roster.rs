@@ -55,6 +55,43 @@ impl Account {
         Ok(roster.items.into_iter().map(Contact::from).collect())
     }
 
+    /// Names `jid` in the contact list (`None`: no name, the address or their own
+    /// nickname shows again). Their groups and the subscription stay as they are; one
+    /// not in the list yet is put there, without asking for their status.
+    pub async fn rename_contact(&self, jid: &BareJid, name: Option<&str>) -> Result<(), Error> {
+        let query = Roster {
+            ver: None,
+            items: Vec::new(),
+        };
+        let groups = match self.get(None, query).await? {
+            Some(answer) => Roster::try_from(answer)
+                .map_err(|e| Error::Unexpected(e.to_string()))?
+                .items
+                .into_iter()
+                .find(|i| &i.jid == jid)
+                .map(|i| i.groups)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let item = Item {
+            jid: jid.clone(),
+            name: name.map(Into::into),
+            subscription: Subscription::None,
+            ask: Default::default(),
+            approved: None,
+            groups,
+        };
+        self.set(
+            None,
+            Roster {
+                ver: None,
+                items: vec![item],
+            },
+        )
+        .await
+        .map(drop)
+    }
+
     /// Adds `jid` to the contact list and asks to see their status.
     pub async fn add_contact(&self, jid: &BareJid, name: Option<&str>) -> Result<(), Error> {
         let item = Item {
