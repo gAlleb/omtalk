@@ -1,15 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 — 2026-10-24
 
+What is read and what is delivered is now the same in omtalk, Gajim and Monal, after a restart too.
+
+- **What is read is the same everywhere** (XEP-0490): on logging in omtalk takes from the server how far each chat was read, in Monal, Gajim or here, and shows as unread only what came after; a restart no longer makes everything look read. Opening a chat marks its newest message read for your other clients, messages from before this start too; Monal kept showing those as unread. And omtalk never moves that mark back: read further on another device than omtalk has yet, opening the chat here leaves it where it is.
+- **Delivered and read are known after a restart**: a message read (or received) while omtalk was closed showed one grey tick for good; the server keeps the recipient's receipt and read marker in the archive, and omtalk now takes them from there on logging in, as it takes the messages.
+- **Read means read up to there**: the recipient's client marks only the newest message it read, and that covers all before it (XEP-0333); omtalk showed only that one as read, the earlier ones kept one tick.
 - **A line says where the new messages begin** ("── new ──") on opening a chat with unread ones, and the chat is shown from there when they do not all fit; it goes once the chat is left or one writes in it.
 - **`compact = true`** (or "Time and name on the message's line" in the settings) puts the time and the name on the message's own line, names in one column, as IRC clients have it; a short message takes one line instead of two. Off by default.
 - **A room's header has its name only**: its topic is in the right pane, whole; with that pane folded, the topic is beside the name as before.
 - **The right pane of a room has no list of commands** any more (Tab completes them); members offline show by the name the chat list has for them (the roster's, or the one they gave themselves), without the address.
-- **Read means read up to there**: the recipient's client marks only the newest message it read, and that covers all before it (XEP-0333); omtalk showed only that one as read, the earlier ones kept one tick.
-- **Delivered and read are known after a restart**: a message read (or received) while omtalk was closed showed one grey tick for good; the server keeps the recipient's receipt and read marker in the archive, and omtalk now takes them from there on logging in, as it takes the messages.
-- **What is read is the same everywhere** (XEP-0490): on logging in omtalk takes from the server how far each chat was read, in Monal, Gajim or here, and shows as unread only what came after; a restart no longer makes everything look read. Opening a chat marks its newest message read for your other clients, messages from before this start too; Monal kept showing those as unread.
-- **omtalk never moves the read mark back**: read further on another device than omtalk has yet, opening the chat here no longer marks only up to its own newest message, which made what was read there unread again in Gajim and Monal. The messages it then catches up on count as unread only after the one read there.
 
 ## 0.1.5 — 2026-10-23
 
