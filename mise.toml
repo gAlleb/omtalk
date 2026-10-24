@@ -30,12 +30,15 @@ description = "Собрать omtalk для 64-битного ARM (Raspberry Pi 
 run = "rustup target add aarch64-unknown-linux-musl && cargo zigbuild --release -p omtalk --target aarch64-unknown-linux-musl && ls -l target/aarch64-unknown-linux-musl/release/omtalk"
 
 [tasks.dist]
-description = "Собрать omtalk для раздачи: статические файлы для x86_64 и aarch64 в dist/"
+description = "Собрать omtalk для раздачи: статические файлы для x86_64 и aarch64 и их SHA256SUMS в dist/"
 run = """
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 cargo zigbuild --release -p omtalk --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
 mkdir -p dist
 cp --remove-destination target/x86_64-unknown-linux-musl/release/omtalk dist/omtalk-x86_64
 cp --remove-destination target/aarch64-unknown-linux-musl/release/omtalk dist/omtalk-aarch64
-ls -l dist
+cd dist
+sha256sum omtalk-x86_64 omtalk-aarch64 > SHA256SUMS
+sha256sum -c SHA256SUMS
+ls -l
 """
