@@ -2125,9 +2125,9 @@ fn unreadable_words(count: usize) -> String {
         } else {
             "old messages were"
         };
-        let them = if count == 1 { "it" } else { "them" };
+        let they = if count == 1 { "it" } else { "they" };
         return format!(
-            "{count} more {what} encrypted before this device existed: {them} cannot be read here"
+            "{count} more {what} encrypted before this device existed: {they} cannot be read here"
         );
     }
     let ru = |one, few, many| crate::lang::ru_plural(count, one, few, many);
