@@ -4058,7 +4058,19 @@ impl App {
     }
 
     /// The search's results came.
-    pub fn found(&mut self, account: &BareJid, chat: &BareJid, words: &str, found: Vec<Found>) {
+    pub fn found(&mut self, account: &BareJid, chat: &BareJid, words: &str, mut found: Vec<Found>) {
+        // In a direct chat the other side by the name the chat list has for them.
+        if let Some(title) = self
+            .chats
+            .iter()
+            .find(|c| &c.account == account && &c.jid == chat && c.kind == ChatKind::Direct)
+            .map(Chat::title)
+        {
+            let me = tr!("me", "я");
+            for hit in found.iter_mut().filter(|h| h.who != me) {
+                hit.who = title.clone();
+            }
+        }
         if let Some(search) = self
             .search
             .as_mut()

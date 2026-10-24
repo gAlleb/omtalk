@@ -497,14 +497,18 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             if !chat.omemo {
                 icons.plain_mark = icons.plain_mark_open_chat;
             }
+            let peer = (chat.kind == ChatKind::Direct).then(|| chat.title());
             let mut rows = message_rows(
                 &chat.lines,
                 width,
                 icons,
                 &ready,
                 &own,
-                app.compact,
-                chat.new_since,
+                Look {
+                    compact: app.compact,
+                    new_since: chat.new_since,
+                    peer: peer.as_deref(),
+                },
             );
             // Above the oldest message, while older ones may be had: a click (or
             // scrolling up past it) brings them.
@@ -960,15 +964,36 @@ impl From<TextLine<'static>> for Row {
     }
 }
 
+/// How a chat is drawn beyond its lines.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Look<'a> {
+    /// Time and name on a message's first line (`ui.compact`).
+    pub compact: bool,
+    /// The "new" line above the first message at or after this.
+    pub new_since: Option<i64>,
+    /// A direct chat's other side, by the chat list's name.
+    pub peer: Option<&'a str>,
+}
+
 pub fn message_rows(
     lines: &[Line],
     width: usize,
     icons: theme::Icons,
     ready: &dyn Fn(&str) -> bool,
     own: &str,
-    compact: bool,
-    new_since: Option<i64>,
+    look: Look<'_>,
 ) -> Vec<Row> {
+    let Look {
+        compact,
+        new_since,
+        peer,
+    } = look;
+    // In a direct chat the other side goes by the name the chat list has for them (the
+    // roster's, the one they gave themselves), not by what the message came with.
+    let shown = |l: &Line| match peer {
+        Some(peer) if !l.outgoing => peer.to_owned(),
+        _ => l.who.clone(),
+    };
     let mut new_line = new_since;
     let mut rows = Vec::new();
     let mut last_day = None;
@@ -977,7 +1002,7 @@ pub fn message_rows(
     let nick_width = lines
         .iter()
         .filter(|l| !l.notice)
-        .map(|l| l.who.width().max(1))
+        .map(|l| shown(l).width().max(1))
         .max()
         .unwrap_or(1)
         .min(NICK_COLUMN);
@@ -1054,15 +1079,16 @@ pub fn message_rows(
         let same_group = last_who.is_some_and(|(who, outgoing, at)| {
             who == line.who && outgoing == line.outgoing && line.at - at < 300
         });
+        let who_shown = shown(line);
         if !same_group && compact {
             let who_style = if line.outgoing {
                 Style::default()
                     .fg(theme::outgoing())
                     .add_modifier(Modifier::BOLD)
             } else {
-                theme::nick(&line.who)
+                theme::nick(&who_shown)
             };
-            let who = truncate(if line.who.is_empty() { "?" } else { &line.who }, nick_width);
+            let who = truncate(if who_shown.is_empty() { "?" } else { &who_shown }, nick_width);
             heads.push((
                 rows.len(),
                 vec![
@@ -1078,21 +1104,21 @@ pub fn message_rows(
                     .fg(theme::outgoing())
                     .add_modifier(Modifier::BOLD)
             } else {
-                theme::nick(&line.who)
+                theme::nick(&who_shown)
             };
             let mut header = Row::from(TextLine::from(vec![
                 Span::styled(
-                    if line.who.is_empty() {
+                    if who_shown.is_empty() {
                         "?".to_owned()
                     } else {
-                        line.who.clone()
+                        who_shown.clone()
                     },
                     who_style,
                 ),
                 Span::styled(format!("  {clock}"), Style::default().fg(theme::dim())),
             ]));
             if !line.outgoing && !line.who.is_empty() {
-                header.who = Some((line.who.clone(), line.who.width() as u16));
+                header.who = Some((line.who.clone(), who_shown.width() as u16));
             }
             rows.push(header);
         }
@@ -1185,10 +1211,10 @@ pub fn message_rows(
                     .fg(theme::outgoing())
                     .add_modifier(Modifier::BOLD)
             } else {
-                theme::nick(&line.who)
+                theme::nick(&who_shown)
             };
             let text_style = Style::default().fg(theme::text()).add_modifier(Modifier::ITALIC);
-            let who = if line.outgoing { own } else { line.who.as_str() };
+            let who = if line.outgoing { own } else { who_shown.as_str() };
             let lead = format!("* {who} ");
             let mut first = true;
             for part in wrap(&format!("{lead}{action}"), text_width) {
@@ -1228,7 +1254,7 @@ pub fn message_rows(
                 TextLine::from(vec![
                     Span::raw(pad.clone()),
                     Span::styled(
-                        format!("↩ {}", original.who),
+                        format!("↩ {}", shown(original)),
                         Style::default().fg(theme::accent()),
                     ),
                 ])
@@ -3141,6 +3167,52 @@ mod tests {
         app.push(bob, line("привет", 1_700_000_000, true));
         app.push(bob, line("это без шифрования", 1_700_000_010, false));
         app
+    }
+
+    #[test]
+    fn a_contact_writes_under_the_name_the_chat_list_has_for_them() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let mama = app.chat(&me, &jid("tanya@home.org"), ChatKind::Direct);
+        app.chats[mama].name = Some("Mama".into());
+        app.select(mama);
+        app.push(
+            mama,
+            Line::message(1_700_000_000, "tanya".into(), "привет".into(), true, false),
+        );
+        app.push(
+            mama,
+            Line::message(1_700_000_400, "я".into(), "и тебе".into(), true, true),
+        );
+        for compact in [false, true] {
+            app.compact = compact;
+            let text = screen(&mut app, 120, 20);
+            let chat: String = text.lines().map(|l| l.split('│').nth(3).unwrap_or("")).collect();
+            assert!(chat.contains("Mama") && !chat.contains("tanya"), "{text}");
+        }
+        // Search results too.
+        let words = "привет".to_owned();
+        app.search = Some(crate::app::Search {
+            account: me.clone(),
+            chat: jid("tanya@home.org"),
+            words: words.clone(),
+            found: None,
+            cursor: 0,
+        });
+        app.found(
+            &me,
+            &jid("tanya@home.org"),
+            &words,
+            vec![crate::app::Found {
+                at: 1_700_000_000,
+                who: "tanya".into(),
+                text: "привет".into(),
+            }],
+        );
+        assert_eq!(
+            app.search.as_ref().unwrap().found.as_ref().unwrap()[0].who,
+            "Mama"
+        );
     }
 
     #[test]
