@@ -508,6 +508,10 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     compact: app.compact,
                     new_since: chat.new_since,
                     peer: peer.as_deref(),
+                    own_nick: match &chat.kind {
+                        ChatKind::Room { nick } if !nick.is_empty() => Some(nick.as_str()),
+                        _ => None,
+                    },
                 },
             );
             // Above the oldest message, while older ones may be had: a click (or
@@ -973,6 +977,9 @@ pub struct Look<'a> {
     pub new_since: Option<i64>,
     /// A direct chat's other side, by the chat list's name.
     pub peer: Option<&'a str>,
+    /// In a room, one's own nick there: one's messages from here go by it too, as those
+    /// from one's other clients do (the room names them so).
+    pub own_nick: Option<&'a str>,
 }
 
 pub fn message_rows(
@@ -987,11 +994,14 @@ pub fn message_rows(
         compact,
         new_since,
         peer,
+        own_nick,
     } = look;
     // In a direct chat the other side goes by the name the chat list has for them (the
     // roster's, the one they gave themselves), not by what the message came with.
-    let shown = |l: &Line| match peer {
-        Some(peer) if !l.outgoing => peer.to_owned(),
+    let shown = |l: &Line| match (peer, own_nick) {
+        (Some(peer), _) if !l.outgoing => peer.to_owned(),
+        // Sent from here, "me": in a room, the nick everyone there sees.
+        (_, Some(nick)) if l.outgoing && ["me", "я"].contains(&l.who.as_str()) => nick.to_owned(),
         _ => l.who.clone(),
     };
     let mut new_line = new_since;
@@ -1149,7 +1159,7 @@ pub fn message_rows(
                         line: None,
                     });
                 }
-                push_delivery(&mut rows, line, body_width, gutter, true);
+                push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, true);
                 continue;
             }
             let (icon, state, colour) = match &slot.state {
@@ -1195,7 +1205,7 @@ pub fn message_rows(
                 fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
                 line: None,
             });
-            push_delivery(&mut rows, line, body_width, gutter, false);
+            push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, false);
             continue;
         }
         let mut first = true;
@@ -1241,7 +1251,7 @@ pub fn message_rows(
                 rows.push(TextLine::from(spans).into());
                 first = false;
             }
-            push_delivery(&mut rows, line, body_width, gutter, false);
+            push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, false);
             continue;
         }
         // A reply: whom it answers, if that message is here, then its quote as a block.
@@ -1340,7 +1350,7 @@ pub fn message_rows(
                 first = false;
             }
         }
-        push_delivery(&mut rows, line, body_width, gutter, false);
+        push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, false);
         // Reactions (XEP-0444), each with how many sent it, in the order they came.
         if !line.reactions.is_empty() {
             let mut counts: Vec<(&str, usize)> = Vec::new();
@@ -1414,8 +1424,24 @@ fn split_quote(text: &str) -> (Vec<&str>, &str) {
 
 /// How far one's message got, after its last word, or below where it does not fit (and
 /// always below a picture, whose rows hold no text).
-fn push_delivery(rows: &mut Vec<Row>, line: &Line, body_width: usize, gutter: usize, below: bool) {
-    let Some(delivery) = &line.delivery else { return };
+fn push_delivery(
+    rows: &mut Vec<Row>,
+    line: &Line,
+    room: bool,
+    body_width: usize,
+    gutter: usize,
+    below: bool,
+) {
+    // One's message in a room from another client of one's: the room sent it round, so
+    // it is in, as one sent from here is once the room sends it back.
+    let sent = Delivery::Sent;
+    let Some(delivery) = line
+        .delivery
+        .as_ref()
+        .or((room && line.outgoing).then_some(&sent))
+    else {
+        return;
+    };
     let (mark, style) = delivery_mark(delivery);
     let last = rows.last_mut().expect("a message has a row");
     if !below && last.text.width() + mark.width() < body_width + gutter {
@@ -3167,6 +3193,47 @@ mod tests {
         app.push(bob, line("привет", 1_700_000_000, true));
         app.push(bob, line("это без шифрования", 1_700_000_010, false));
         app
+    }
+
+    #[test]
+    fn in_a_room_ones_messages_go_by_ones_nick_from_every_client() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.home.org"),
+            ChatKind::Room {
+                nick: "Стёпочка".into(),
+            },
+        );
+        app.select(room);
+        // From here, then from Monal (the room names it by the nick).
+        app.push(
+            room,
+            Line::message(1_700_000_000, "я".into(), "отсюда".into(), true, true),
+        );
+        app.push(
+            room,
+            Line::message(1_700_000_600, "Стёпочка".into(), "из Monal".into(), true, true),
+        );
+        let text = screen(&mut app, 120, 20);
+        let chat: String = text
+            .lines()
+            .map(|l| l.split('│').nth(3).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(chat.matches("Стёпочка").count(), 2, "{text}");
+        assert!(!chat.contains("я  "), "{text}");
+        // Both marked as in the room, the one from Monal too.
+        assert!(chat.contains("из Monal ✓"), "{text}");
+        // A direct chat keeps "я".
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        app.push(
+            bob,
+            Line::message(1_700_000_000, "я".into(), "привет".into(), true, true),
+        );
+        assert!(screen(&mut app, 120, 20).contains("я  "));
     }
 
     #[test]

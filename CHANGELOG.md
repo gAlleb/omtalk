@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **In a room your messages go by your nick there**, from omtalk as from your other clients (Gajim, Monal), which the room names so; they were "me" from here and the nick from elsewhere. Those from your other clients get the ✓ too: the room sent them round, so they are in. As Gajim does.
 - **In a direct chat the contact writes under the name the chat list has for them** (the one in your roster, or the one they gave themselves), in the chat and in search results; it was the address's name part ("tanya" in the chat with "Mama").
 - **All three names can be set and taken away**: `/nickname Name` is the name you give yourself for everyone (XEP-0172), `/name Name` in a direct chat the name you give the contact (in your roster, for all your clients), `/nick` in a room your nick there. Each without a name takes it away; `/nick` alone goes back to the default nick.
 - **A room's participants show their standing**, as IRC clients mark it: `~` owner, `@` admin (an IRC op through biboumi), `%` moderator (halfop), `+` member (voice); they are listed first, in that order. In the right pane only, not in the chat.
