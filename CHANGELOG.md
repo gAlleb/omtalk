@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A line says where the new messages begin** ("── new ──") on opening a chat with unread ones, and the chat is shown from there when they do not all fit; it goes once the chat is left or one writes in it.
+- **`compact = true`** (or "Time and name on the message's line" in the settings) puts the time and the name on the message's own line, names in one column, as IRC clients have it; a short message takes one line instead of two. Off by default.
+- **A room's header has its name only**: its topic is in the right pane, whole; with that pane folded, the topic is beside the name as before.
+- **The right pane of a room has no list of commands** any more (Tab completes them); members offline show by the name the chat list has for them (the roster's, or the one they gave themselves), without the address.
 - **Read means read up to there**: the recipient's client marks only the newest message it read, and that covers all before it (XEP-0333); omtalk showed only that one as read, the earlier ones kept one tick.
 - **Delivered and read are known after a restart**: a message read (or received) while omtalk was closed showed one grey tick for good; the server keeps the recipient's receipt and read marker in the archive, and omtalk now takes them from there on logging in, as it takes the messages.
 - **What is read is the same everywhere** (XEP-0490): on logging in omtalk takes from the server how far each chat was read, in Monal, Gajim or here, and shows as unread only what came after; a restart no longer makes everything look read. Opening a chat marks its newest message read for your other clients, messages from before this start too; Monal kept showing those as unread.

@@ -528,6 +528,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     app.notify = notify;
     app.config_ui = ui.clone();
     app.show_avatars = ui.avatars;
+    app.compact = ui.compact;
     app.config_notify = options.config.notify.clone();
     app.icons = match ui.icons {
         config::IconSet::Nerd => crate::theme::nerd(),

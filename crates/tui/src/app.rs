@@ -178,6 +178,9 @@ pub struct Chat {
     pub older_before: Option<String>,
     /// Show the chat from its first message at or after this time (a search result).
     pub jump_to: Option<i64>,
+    /// When the first message unread on opening came: a line above it says "new" until
+    /// the chat is left or one writes in it.
+    pub new_since: Option<i64>,
     /// Room occupants by nick, with the real account when the room shows it.
     pub occupants: BTreeMap<String, Option<BareJid>>,
     /// Their status where it is not plain online: away, do not disturb…
@@ -215,6 +218,7 @@ impl Chat {
             older_done: false,
             older_before: None,
             jump_to: None,
+            new_since: None,
             occupants: BTreeMap::new(),
             occupant_status: BTreeMap::new(),
             members: Vec::new(),
@@ -843,6 +847,8 @@ pub struct App {
     pub settings: Option<crate::settings::Settings>,
     /// Avatars are shown (and fetched).
     pub show_avatars: bool,
+    /// Time and name on a message's first line (`ui.compact`).
+    pub compact: bool,
     /// Whose avatar is ready to draw: jid → its hash (the picture is "avatar:HASH").
     pub avatars: BTreeMap<BareJid, String>,
     /// Avatars drawn here with block characters (a terminal without pictures): the
@@ -930,6 +936,7 @@ impl App {
             keys: None,
             settings: None,
             show_avatars: false,
+            compact: false,
             avatars: BTreeMap::new(),
             avatars_asked: BTreeSet::new(),
             history_asked: BTreeSet::new(),
@@ -1012,7 +1019,7 @@ impl App {
 
     /// What a contact is called: the name in the roster, else the one they gave
     /// themselves; neither, and the address shows.
-    fn name_of(&self, key: &(BareJid, BareJid)) -> Option<String> {
+    pub fn name_of(&self, key: &(BareJid, BareJid)) -> Option<String> {
         self.names.get(key).or(self.nicknames.get(key)).cloned()
     }
 
@@ -1172,6 +1179,7 @@ impl App {
         self.focused = focused;
         match self.selected {
             Some(index) if focused => {
+                self.note_new(index);
                 self.chats[index].unread = 0;
                 self.mark_read(index)
             }
@@ -1448,6 +1456,8 @@ impl App {
     pub fn sending(&mut self, index: usize, text: &str, encrypted: bool, id: &str, at: i64) {
         let mut line = Line::message(at, tr!("me", "я").into(), text.to_owned(), encrypted, true);
         line.id = Some(id.to_owned());
+        // Answered: what was new is read.
+        self.chats[index].new_since = None;
         line.delivery = Some(Delivery::Sending);
         self.push(index, line);
     }
@@ -1594,7 +1604,8 @@ impl App {
                 }
             }
             if self.selected == Some(index) && self.focused && chat.unread > 0 {
-                chat.unread = 0;
+                self.note_new(index);
+                self.chats[index].unread = 0;
                 actions.extend(self.mark_read(index));
             }
         }
@@ -1621,6 +1632,13 @@ impl App {
                 room,
                 state: ChatState::Paused,
             });
+        }
+        // The chat left is read: its "new" line goes.
+        if let Some(left) = self.selected.filter(|&s| s != index) {
+            self.chats[left].new_since = None;
+        }
+        if self.focused {
+            self.note_new(index);
         }
         self.selected = Some(index);
         self.active = Some(self.chats[index].account.clone());
@@ -1651,6 +1669,26 @@ impl App {
             });
         }
         actions
+    }
+
+    /// Where what is unread in chat `index` begins, for the "new" line, and the chat shown
+    /// from there when it does not all fit.
+    fn note_new(&mut self, index: usize) {
+        let chat = &mut self.chats[index];
+        if chat.unread == 0 {
+            return;
+        }
+        let first = chat
+            .lines
+            .iter()
+            .rev()
+            .filter(|l| !l.notice && !l.outgoing)
+            .nth(chat.unread - 1)
+            .map(|l| l.at);
+        if let Some(at) = first {
+            chat.new_since = Some(at);
+            chat.jump_to = Some(at);
+        }
     }
 
     pub fn push(&mut self, index: usize, line: Line) {
@@ -3336,6 +3374,7 @@ impl App {
         ui.read_markers = self.read_markers;
         ui.typing = self.send_typing;
         ui.avatars = self.show_avatars;
+        ui.compact = self.compact;
         self.settings = Some(crate::settings::Settings::open(crate::settings::Current {
             ui: &ui,
             notify: &self.config_notify,
@@ -3438,6 +3477,11 @@ impl App {
             ("avatars", Value::Bool(on)) => {
                 self.show_avatars = *on;
                 self.config_ui.avatars = *on;
+                Ok(())
+            }
+            ("compact", Value::Bool(on)) => {
+                self.compact = *on;
+                self.config_ui.compact = *on;
                 Ok(())
             }
             ("viewer", Value::Text(text)) if text.is_empty() => {

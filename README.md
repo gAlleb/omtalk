@@ -63,6 +63,7 @@ mouse = true           # false: the mouse belongs to the terminal (tmux-style se
 read_markers = true    # false: the other side does not see that you read their messages
 typing = true          # false: the other side does not see that you are typing
 avatars = false        # true: the contact's or room's avatar in the right pane
+compact = false        # true: time and name on the message's line, as in IRC clients
 language = "en"        # the interface's language: en or ru
 
 [notify]               # each one: all, private, mention, private+mention or none

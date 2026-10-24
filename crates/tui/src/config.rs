@@ -16,6 +16,7 @@
 //! right = 30            # width of the participants pane
 //! auto_download = true  # false: shared files wait for a click ("скачать")
 //! avatars = false       # true: people's and rooms' pictures in the right pane
+//! compact = false       # true: time and name on the message's own line, not above it
 //! language = "en"       # the interface's language: en or ru
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! read_markers = true   # let senders see that their messages were read
@@ -172,6 +173,9 @@ pub struct Ui {
     pub auto_download: bool,
     /// Show people's and rooms' avatars (and fetch them).
     pub avatars: bool,
+    /// Time and name on the first line of a message, as IRC clients have it, not on a
+    /// line of their own above it.
+    pub compact: bool,
     /// The interface's language: "en" (the default) or "ru".
     pub language: crate::lang::Language,
 }
@@ -191,6 +195,7 @@ impl Default for Ui {
             bell: true,
             auto_download: true,
             avatars: false,
+            compact: false,
             language: crate::lang::Language::English,
         }
     }

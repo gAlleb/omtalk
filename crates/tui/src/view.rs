@@ -34,6 +34,8 @@ pub type Pictures = HashMap<String, StatefulProtocol>;
 
 /// Rows a picture takes in the conversation, and its widest.
 const PICTURE_ROWS: usize = 10;
+/// The widest a name gets in the compact chat's column of names.
+const NICK_COLUMN: usize = 12;
 const PICTURE_WIDTH: u16 = 48;
 
 pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
@@ -73,7 +75,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
         strip(frame, left, "›");
         app.areas.show_left = Some(left);
     }
-    center_pane(frame, app, center, pictures);
+    center_pane(frame, app, center, pictures, show_right);
     if show_right {
         side(frame, app, right, pictures);
     } else {
@@ -405,7 +407,7 @@ fn chat_row(
     ]))
 }
 
-fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
+fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures, right_shown: bool) {
     let input_height = input_height(app, area.width).min(area.height.saturating_sub(3).max(3));
     let [messages, input] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(input_height)]).areas(area);
@@ -426,7 +428,9 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             };
             (chat.title(), format!("{} · {seen}", chat.jid))
         }
-        // A room: its topic beside its name, else its address.
+        // A room: its name; the right pane has its topic and address in full. With that
+        // pane folded, the topic (else the address) beside the name.
+        Some(chat) if chat.is_room() && right_shown => (chat.title(), String::new()),
         Some(chat) if chat.is_room() => {
             let room = chat.topic.clone().unwrap_or_else(|| chat.jid.to_string());
             (chat.title(), truncate(&room, (area.width as usize / 2).max(10)))
@@ -435,13 +439,16 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         None => ("omtalk".to_owned(), String::new()),
     };
     let scrolled = app.current().is_some_and(|c| c.scroll > 0);
-    let mut block = pane(&title, app.focus == Focus::Messages).title(
-        TextLine::from(Span::styled(
-            format!(" {subtitle} "),
-            Style::default().fg(theme::dim()),
-        ))
-        .alignment(Alignment::Right),
-    );
+    let mut block = pane(&title, app.focus == Focus::Messages);
+    if !subtitle.is_empty() {
+        block = block.title(
+            TextLine::from(Span::styled(
+                format!(" {subtitle} "),
+                Style::default().fg(theme::dim()),
+            ))
+            .alignment(Alignment::Right),
+        );
+    }
     if scrolled {
         block = block.title_bottom(
             TextLine::from(Span::styled(" ↓ End ", Style::default().fg(theme::accent())))
@@ -490,7 +497,15 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             if !chat.omemo {
                 icons.plain_mark = icons.plain_mark_open_chat;
             }
-            let mut rows = message_rows(&chat.lines, width, icons, &ready, &own);
+            let mut rows = message_rows(
+                &chat.lines,
+                width,
+                icons,
+                &ready,
+                &own,
+                app.compact,
+                chat.new_since,
+            );
             // Above the oldest message, while older ones may be had: a click (or
             // scrolling up past it) brings them.
             let more = !chat.older_done && chat.kind != ChatKind::Server && !chat.lines.is_empty();
@@ -515,7 +530,8 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                         .is_some_and(|l| chat.lines.get(l).is_some_and(|l| l.at >= at))
                 })
             {
-                chat.scroll = rows.len().saturating_sub(row + height);
+                // A row above it in sight too: the "new" line, or what led to the hit.
+                chat.scroll = rows.len().saturating_sub(row.saturating_sub(1) + height);
             }
             chat.scroll = chat.scroll.min(max_scroll);
             let end = rows.len() - chat.scroll;
@@ -546,8 +562,8 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     let whole = picture.row == 0 && offset + PICTURE_ROWS <= shown.len();
                     match pictures.get_mut(&picture.url) {
                         Some(protocol) if whole => {
-                            let width = PICTURE_WIDTH.min(inner.width.saturating_sub(2));
-                            let place = Rect::new(inner.x + 2, y, width, PICTURE_ROWS as u16);
+                            let width = PICTURE_WIDTH.min(inner.width.saturating_sub(picture.indent));
+                            let place = Rect::new(inner.x + picture.indent, y, width, PICTURE_ROWS as u16);
                             frame.render_stateful_widget(StatefulImage::default(), place, protocol);
                             if let Some(path) = &row.open {
                                 app.areas.files.push((place, path.clone()));
@@ -927,6 +943,8 @@ pub struct PictureRow {
     pub name: String,
     /// Which of its rows, from the top.
     pub row: usize,
+    /// How far from the left it is drawn.
+    pub indent: u16,
 }
 
 impl From<TextLine<'static>> for Row {
@@ -948,11 +966,30 @@ pub fn message_rows(
     icons: theme::Icons,
     ready: &dyn Fn(&str) -> bool,
     own: &str,
+    compact: bool,
+    new_since: Option<i64>,
 ) -> Vec<Row> {
+    let mut new_line = new_since;
     let mut rows = Vec::new();
     let mut last_day = None;
     let mut last_who: Option<(&str, bool, i64)> = None;
-    let body_width = width.saturating_sub(2).max(1);
+    // Compact: "16:31   mrak  text", the names in a column as wide as the widest here.
+    let nick_width = lines
+        .iter()
+        .filter(|l| !l.notice)
+        .map(|l| l.who.width().max(1))
+        .max()
+        .unwrap_or(1)
+        .min(NICK_COLUMN);
+    let gutter = if compact {
+        "00:00 ".len() + nick_width + 2
+    } else {
+        2
+    };
+    let pad = " ".repeat(gutter);
+    // Where a compact message's time and name go: its first row, in place of the pad.
+    let mut heads: Vec<(usize, Vec<Span<'static>>)> = Vec::new();
+    let body_width = width.saturating_sub(gutter).max(1);
     // Where each message's rows begin, to tell afterwards which rows are whose.
     let mut starts = Vec::with_capacity(lines.len());
     for line in lines {
@@ -977,6 +1014,28 @@ pub fn message_rows(
             last_day = day;
             last_who = None;
         }
+        // Above the first message unread on opening: from here on it is new.
+        if let Some(since) = new_line
+            && !line.notice
+            && !line.outgoing
+            && line.at >= since
+        {
+            let label = tr!(" new ", " новые ");
+            let side = width.saturating_sub(label.width()) / 2;
+            rows.push(
+                TextLine::from(Span::styled(
+                    format!(
+                        "{}{label}{}",
+                        "─".repeat(side),
+                        "─".repeat(width.saturating_sub(side + label.width()))
+                    ),
+                    Style::default().fg(theme::accent()),
+                ))
+                .into(),
+            );
+            new_line = None;
+            last_who = None;
+        }
         starts.push(rows.len());
         let clock = time.map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
         if line.notice {
@@ -995,7 +1054,25 @@ pub fn message_rows(
         let same_group = last_who.is_some_and(|(who, outgoing, at)| {
             who == line.who && outgoing == line.outgoing && line.at - at < 300
         });
-        if !same_group {
+        if !same_group && compact {
+            let who_style = if line.outgoing {
+                Style::default()
+                    .fg(theme::outgoing())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme::nick(&line.who)
+            };
+            let who = truncate(if line.who.is_empty() { "?" } else { &line.who }, nick_width);
+            heads.push((
+                rows.len(),
+                vec![
+                    Span::styled(format!("{clock} "), Style::default().fg(theme::dim())),
+                    Span::raw(" ".repeat(nick_width.saturating_sub(who.width()))),
+                    Span::styled(who, who_style),
+                    Span::raw("  "),
+                ],
+            ));
+        } else if !same_group {
             let who_style = if line.outgoing {
                 Style::default()
                     .fg(theme::outgoing())
@@ -1027,6 +1104,10 @@ pub fn message_rows(
                 _ => None,
             };
             if slot.image && path.is_some() && ready(&slot.url) {
+                // A picture's rows hold no text: its time and name on a row of their own.
+                if heads.last().is_some_and(|(at, _)| *at == rows.len()) {
+                    rows.push(TextLine::from(pad.clone()).into());
+                }
                 for row in 0..PICTURE_ROWS {
                     rows.push(Row {
                         text: TextLine::from(""),
@@ -1035,13 +1116,14 @@ pub fn message_rows(
                             url: slot.url.clone(),
                             name: slot.name.clone(),
                             row,
+                            indent: gutter as u16,
                         }),
                         who: None,
                         fetch: None,
                         line: None,
                     });
                 }
-                push_delivery(&mut rows, line, body_width, true);
+                push_delivery(&mut rows, line, body_width, gutter, true);
                 continue;
             }
             let (icon, state, colour) = match &slot.state {
@@ -1070,7 +1152,7 @@ pub fn message_rows(
                     theme::warn(),
                 ),
             };
-            let mut spans = vec![Span::raw("  ")];
+            let mut spans = vec![Span::raw(pad.clone())];
             if !line.encrypted {
                 spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
             }
@@ -1087,7 +1169,7 @@ pub fn message_rows(
                 fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
                 line: None,
             });
-            push_delivery(&mut rows, line, body_width, false);
+            push_delivery(&mut rows, line, body_width, gutter, false);
             continue;
         }
         let mut first = true;
@@ -1110,7 +1192,7 @@ pub fn message_rows(
             let lead = format!("* {who} ");
             let mut first = true;
             for part in wrap(&format!("{lead}{action}"), text_width) {
-                let mut spans = vec![Span::raw("  ")];
+                let mut spans = vec![Span::raw(pad.clone())];
                 if !line.encrypted {
                     let mark = if first {
                         marker.to_owned()
@@ -1133,7 +1215,7 @@ pub fn message_rows(
                 rows.push(TextLine::from(spans).into());
                 first = false;
             }
-            push_delivery(&mut rows, line, body_width, false);
+            push_delivery(&mut rows, line, body_width, gutter, false);
             continue;
         }
         // A reply: whom it answers, if that message is here, then its quote as a block.
@@ -1144,7 +1226,7 @@ pub fn message_rows(
         {
             rows.push(
                 TextLine::from(vec![
-                    Span::raw("  "),
+                    Span::raw(pad.clone()),
                     Span::styled(
                         format!("↩ {}", original.who),
                         Style::default().fg(theme::accent()),
@@ -1169,7 +1251,7 @@ pub fn message_rows(
         for q in &quote {
             for styled in styled_wrap(q, text_width.saturating_sub(2).max(1), quoted) {
                 let mut spans = vec![
-                    Span::raw("  "),
+                    Span::raw(pad.clone()),
                     Span::styled("▎ ", Style::default().fg(theme::accent())),
                 ];
                 spans.extend(styled);
@@ -1191,7 +1273,7 @@ pub fn message_rows(
                     styled_wrap(text, text_width.saturating_sub(2 * depth).max(1), quoted),
                 ),
                 crate::styling::Block::Pre(text) => (
-                    vec![Span::raw("  ")],
+                    vec![Span::raw(pad.clone())],
                     wrap(text, text_width.saturating_sub(2).max(1))
                         .into_iter()
                         .map(|t| vec![Span::styled(t, Style::default().fg(theme::accent()))])
@@ -1206,7 +1288,7 @@ pub fn message_rows(
                 ),
             };
             for styled in parts {
-                let mut spans = vec![Span::raw("  ")];
+                let mut spans = vec![Span::raw(pad.clone())];
                 if !line.encrypted && first {
                     spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
                 } else if !line.encrypted {
@@ -1232,7 +1314,7 @@ pub fn message_rows(
                 first = false;
             }
         }
-        push_delivery(&mut rows, line, body_width, false);
+        push_delivery(&mut rows, line, body_width, gutter, false);
         // Reactions (XEP-0444), each with how many sent it, in the order they came.
         if !line.reactions.is_empty() {
             let mut counts: Vec<(&str, usize)> = Vec::new();
@@ -1250,13 +1332,24 @@ pub fn message_rows(
             for part in wrap(&text, body_width.max(1)) {
                 rows.push(
                     TextLine::from(vec![
-                        Span::raw("  "),
+                        Span::raw(pad.clone()),
                         Span::styled(part, Style::default().fg(theme::dim())),
                     ])
                     .into(),
                 );
             }
         }
+    }
+    for (at, head) in heads {
+        let Some(row) = rows.get_mut(at) else { continue };
+        if row.text.spans.first().is_some_and(|s| s.content == pad) {
+            row.text.spans.remove(0);
+        }
+        let who = head[2].content.to_string();
+        for (i, span) in head.into_iter().enumerate() {
+            row.text.spans.insert(i, span);
+        }
+        row.who = Some((who, gutter as u16));
     }
     // Every row of a message knows which message it is.
     for (index, start) in starts.iter().enumerate() {
@@ -1295,17 +1388,17 @@ fn split_quote(text: &str) -> (Vec<&str>, &str) {
 
 /// How far one's message got, after its last word, or below where it does not fit (and
 /// always below a picture, whose rows hold no text).
-fn push_delivery(rows: &mut Vec<Row>, line: &Line, body_width: usize, below: bool) {
+fn push_delivery(rows: &mut Vec<Row>, line: &Line, body_width: usize, gutter: usize, below: bool) {
     let Some(delivery) = &line.delivery else { return };
     let (mark, style) = delivery_mark(delivery);
     let last = rows.last_mut().expect("a message has a row");
-    if !below && last.text.width() + mark.width() < body_width + 2 {
+    if !below && last.text.width() + mark.width() < body_width + gutter {
         last.text.spans.push(Span::styled(format!(" {mark}"), style));
         return;
     }
     // A long one (a failure's reason) wraps like the message.
     for part in wrap(&mark, body_width.max(1)) {
-        rows.push(TextLine::from(vec![Span::raw("  "), Span::styled(part, style)]).into());
+        rows.push(TextLine::from(vec![Span::raw(" ".repeat(gutter)), Span::styled(part, style)]).into());
     }
 }
 
@@ -1681,17 +1774,15 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                         picked_row = Some(rows.len());
                     }
                     person += 1;
-                    let name = member
-                        .node()
-                        .map(|n| n.to_string())
+                    // As the chat list names them: the roster's name, the one they gave
+                    // themselves, else the address's name part.
+                    let name = app
+                        .name_of(&(chat.account.clone(), member.clone()))
+                        .or_else(|| member.node().map(|n| n.to_string()))
                         .unwrap_or_else(|| member.to_string());
                     let line = TextLine::from(vec![
                         Span::styled("○ ", Style::default().fg(theme::dim())),
                         Span::styled(name, Style::default().fg(theme::dim())),
-                        Span::styled(
-                            format!(" {}", member.domain()),
-                            Style::default().fg(theme::border_colour()),
-                        ),
                     ]);
                     rows.push(if picked {
                         line.style(theme::selected())
@@ -1699,21 +1790,6 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                         line
                     });
                 }
-            }
-            // What can be done with the room, so nobody has to look for it.
-            rows.push(TextLine::default());
-            for command in [
-                tr!("/topic topic", "/topic тема"),
-                tr!("/name title", "/name название"),
-                tr!("/invite address", "/invite адрес"),
-                tr!("/nick nick", "/nick ник"),
-                "/commands",
-                "/close",
-            ] {
-                rows.push(TextLine::from(Span::styled(
-                    command,
-                    Style::default().fg(theme::accent()),
-                )));
             }
         }
         ChatKind::Server => {
@@ -3062,6 +3138,85 @@ mod tests {
         app.push(bob, line("привет", 1_700_000_000, true));
         app.push(bob, line("это без шифрования", 1_700_000_010, false));
         app
+    }
+
+    #[test]
+    fn a_line_marks_where_the_new_messages_begin_until_the_chat_is_left() {
+        let mut app = App::new(vec![jid("me@example.org")], Modifier::Ctrl, 26, 30);
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
+        app.select(carol);
+        let at = 1_700_000_000;
+        app.push(
+            bob,
+            Line::message(at, "bob".into(), "прочитано".into(), true, false),
+        );
+        app.chats[bob].unread = 0;
+        for (i, text) in ["первое новое", "второе новое"].into_iter().enumerate() {
+            app.push(
+                bob,
+                Line::message(at + 60 + i as i64, "bob".into(), text.into(), true, false),
+            );
+        }
+        app.select(bob);
+        let text = screen(&mut app, 120, 20);
+        let rows: Vec<&str> = text.lines().collect();
+        let new = rows.iter().position(|r| r.contains("─ новые ─")).expect(&text);
+        let read = rows.iter().position(|r| r.contains("прочитано")).unwrap();
+        let first = rows.iter().position(|r| r.contains("первое новое")).unwrap();
+        assert!(read < new && new < first, "{text}");
+        // Still there while one reads; gone once the chat is left and opened again.
+        assert!(screen(&mut app, 120, 20).contains("─ новые ─"));
+        app.select(carol);
+        app.select(bob);
+        assert!(!screen(&mut app, 120, 20).contains("─ новые ─"));
+    }
+
+    #[test]
+    fn compact_puts_time_and_name_on_the_messages_line() {
+        let mut app = App::new(vec![jid("me@example.org")], Modifier::Ctrl, 26, 30);
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        let at = 1_700_000_000;
+        app.push(bob, Line::message(at, "bob".into(), "привет".into(), true, false));
+        app.push(
+            bob,
+            Line::message(at + 10, "bob".into(), "ещё".into(), true, false),
+        );
+        let mut mine = Line::message(at + 20, "я".into(), "и тебе".into(), true, true);
+        mine.delivery = Some(Delivery::Sent);
+        app.push(bob, mine);
+        let clock = |t: i64| {
+            Local
+                .timestamp_opt(t, 0)
+                .single()
+                .unwrap()
+                .format("%H:%M")
+                .to_string()
+        };
+
+        let text = screen(&mut app, 120, 20);
+        assert!(
+            text.contains(&format!("bob  {}", clock(at))),
+            "above, by default\n{text}"
+        );
+
+        app.compact = true;
+        let text = screen(&mut app, 120, 20);
+        assert!(text.contains(&format!("{} bob  привет", clock(at))), "{text}");
+        // The same sender on: under the text, without time and name again.
+        assert!(text.contains(&format!("{}ещё", " ".repeat(11))), "{text}");
+        // Names in one column: the short one is moved right.
+        assert!(
+            text.contains(&format!("{}   я  и тебе ✓", clock(at + 20))),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!("bob  {}", clock(at))),
+            "no line of its own\n{text}"
+        );
     }
 
     #[test]
@@ -4796,9 +4951,14 @@ mod tests {
         chat.members = vec![jid("alice@home.org"), jid("carl@work.org"), me.clone()];
         let text = screen(&mut app, 120, 24);
         assert!(
-            text.contains("не в сети 1") && text.contains("○ carl work.org"),
+            text.contains("не в сети 1") && text.contains("○ carl") && !text.contains("work.org"),
             "{text}"
         );
+        // By the name the chat list has for them, as on the left.
+        app.names
+            .insert((me.clone(), jid("carl@work.org")), "Карл".into());
+        let text = screen(&mut app, 120, 24);
+        assert!(text.contains("○ Карл"), "{text}");
         assert_eq!(
             app.away_members(room),
             [jid("carl@work.org")],
@@ -5062,9 +5222,11 @@ mod tests {
             text.contains("релиз в пятницу") && text.contains("team@muc.home.org"),
             "topic and address: {text}"
         );
-        assert!(
-            text.contains("/topic тема") && text.contains("/nick ник"),
-            "{text}"
+        assert!(!text.contains("/topic тема"), "no list of commands: {text}");
+        assert_eq!(
+            text.matches("релиз в пятницу").count(),
+            1,
+            "the topic on the right, not in the header too: {text}"
         );
 
         app.focus = Focus::Input;

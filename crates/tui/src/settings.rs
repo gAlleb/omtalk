@@ -244,6 +244,15 @@ impl Settings {
                 tr!("Avatars", "Аватарки"),
                 Value::Bool(ui.avatars),
             ),
+            row(
+                "ui",
+                "compact",
+                tr!(
+                    "Time and name on the message's line",
+                    "Время и имя в строке сообщения"
+                ),
+                Value::Bool(ui.compact),
+            ),
             row("notify", "sound_on", tr!("Sound", "Звук"), when(&notify.sound_on)),
             row(
                 "notify",

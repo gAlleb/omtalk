@@ -62,6 +62,7 @@ mouse = true           # false — мышь у терминала (выделе�
 read_markers = true    # false — собеседник не видит, что вы прочитали
 typing = true          # false — собеседник не видит, что вы печатаете
 avatars = false        # true — аватарки собеседника и комнаты в правой панели
+compact = false        # true — время и имя в строке сообщения, как в IRC-клиентах
 language = "ru"        # язык интерфейса: en (по умолчанию) или ru
 
 [notify]               # у каждого: all, private, mention, private+mention или none
