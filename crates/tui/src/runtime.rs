@@ -1774,8 +1774,8 @@ async fn join(
     } = entry;
     let tell = |msg| drop(shared.tx.send(msg));
     // The nick: as asked, else the one the account's other clients use in this room (its
-    // bookmark, so they all count as one occupant), else the last one used here, else
-    // the account's name.
+    // bookmark, so they all count as one occupant), else the last one used here, else,
+    // as Gajim has it, the name one gave oneself (XEP-0172), else the address's name part.
     let fetched;
     let bookmarks = match bookmarks {
         Some(known) => Some(known),
@@ -1785,13 +1785,20 @@ async fn join(
         }
     };
     let bookmark = bookmarks.into_iter().flatten().find(|b| b.room == room);
-    let nick = nick
+    let known = nick
         .or_else(|| bookmark.and_then(|b| b.nick.clone()))
         .or_else(|| {
             let rooms = shared.store.rooms(account).unwrap_or_default();
             rooms.into_iter().find(|(r, _)| *r == room).map(|(_, nick)| nick)
-        })
-        .unwrap_or_else(|| account.node().map(|n| n.to_string()).unwrap_or_default());
+        });
+    let nick = match known {
+        Some(nick) => nick,
+        None => match xmpp.items(account, omtalk_xmpp::nick::NODE).await {
+            Ok(items) => omtalk_xmpp::nick::of(&items).flatten(),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| account.node().map(|n| n.to_string()).unwrap_or_default()),
+    };
     match xmpp.join(&room, &nick).await {
         // Kept under the nick asked for (a gateway gives its own again); shown under the
         // one the room gave, which its messages come back under.

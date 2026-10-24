@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A room is entered under the name you gave yourself** (`/nickname`) when it has no nick of its own (in its bookmark, or from last time), else under your address's name part, as Gajim does; `/nick` alone goes back to the same.
+
 ## 0.1.7 — 2026-10-24
 
 Names as Gajim has them: yours and your contacts', set and taken away from omtalk; and who is who in a room, as IRC marks it.

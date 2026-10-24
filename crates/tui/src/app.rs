@@ -2914,10 +2914,16 @@ impl App {
             ("/commands", _) => return self.open_chat_commands(),
             ("/nick", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
-                    // None given: the one a room gets by default, the address's name part.
+                    // None given: the one a room gets by default, as in Gajim: the name
+                    // one gave oneself, else the address's name part.
                     let nick = Some(line[name.len()..].trim())
                         .filter(|n| !n.is_empty())
                         .map(str::to_owned)
+                        .or_else(|| {
+                            self.nicknames
+                                .get(&(chat.account.clone(), chat.account.clone()))
+                                .cloned()
+                        })
                         .or_else(|| chat.account.node().map(|n| n.to_string()))
                         .unwrap_or_default();
                     Ok(vec![Action::Nick {
@@ -4857,6 +4863,13 @@ mod tests {
         let back = type_text(&mut app, "/nick");
         assert!(
             matches!(&back[..], [Action::Nick { nick, .. }] if nick == "me"),
+            "{back:?}"
+        );
+        // With a name one gave oneself, that is the default, as in Gajim.
+        app.nickname(&me, &me, Some("Стёпочка".into()));
+        let back = type_text(&mut app, "/nick");
+        assert!(
+            matches!(&back[..], [Action::Nick { nick, .. }] if nick == "Стёпочка"),
             "{back:?}"
         );
         // In a room, /name is still the room's title.
