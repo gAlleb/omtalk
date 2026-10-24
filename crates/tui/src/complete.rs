@@ -169,6 +169,14 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/reactions",
+        args: ["", ""],
+        about: [
+            "who reacted to the selected message, else the last with reactions",
+            "кто отреагировал на выбранное сообщение или последнее с реакциями",
+        ],
+    },
+    Command {
         name: "/edit",
         args: ["", ""],
         about: [
@@ -432,7 +440,14 @@ mod tests {
         assert_eq!(complete("/ser"), Some((0, vec!["/services ".into()])));
         assert_eq!(
             complete("/re").unwrap().1,
-            ["/refuse ", "/rename-folder ", "/reply ", "/react ", "/remove "]
+            [
+                "/refuse ",
+                "/rename-folder ",
+                "/reply ",
+                "/react ",
+                "/reactions ",
+                "/remove "
+            ]
         );
         assert_eq!(
             commands_for("/f").iter().map(|c| c.name).collect::<Vec<_>>(),

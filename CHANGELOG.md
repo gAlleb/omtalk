@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **See who reacted**: click the reactions below a message, or `/reactions` for the selected message (else the latest with reactions). A small scrollable window lists the names for each emoji: room nicks in rooms, contact names in direct chats. Esc or a click outside closes it.
+
 - **Read messages stay read after a restart, including IRC bridge messages with no live archive id.** The precise local read position is kept independently of server synchronization; an old server mark no longer makes messages read here unread again. New messages still count, and a newer known mark from another client advances the local position. Empty server mark ids are ignored.
 
 - **The mute bell responds where it is drawn**: its mouse hitbox now includes the spacing between the input border's buttons. The mute and unencrypted marks in the chat list have a separating cell so Nerd Font glyphs can use their normal width.

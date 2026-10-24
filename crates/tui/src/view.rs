@@ -87,6 +87,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     keys_window(frame, app, area);
     settings_window(frame, app, area);
     reaction_picker(frame, app, area);
+    reaction_details(frame, app, area);
     search_window(frame, app, area);
 }
 
@@ -572,6 +573,11 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     app.areas
                         .message_lines
                         .push((Rect::new(inner.x, y, inner.width, 1), line));
+                    if row.reactions {
+                        app.areas
+                            .reaction_rows
+                            .push((Rect::new(inner.x, y, inner.width, 1), line));
+                    }
                 }
                 app.areas
                     .message_rows
@@ -955,6 +961,7 @@ pub struct Row {
     pub fetch: Option<String>,
     /// Which message (its index among the chat's lines) this row belongs to.
     pub line: Option<usize>,
+    pub reactions: bool,
 }
 
 /// One of the rows a picture covers.
@@ -977,6 +984,7 @@ impl From<TextLine<'static>> for Row {
             who: None,
             fetch: None,
             line: None,
+            reactions: false,
         }
     }
 }
@@ -1166,6 +1174,7 @@ pub fn message_rows(
                         who: None,
                         fetch: None,
                         line: None,
+                        reactions: false,
                     });
                 }
                 push_delivery(&mut rows, line, room, body_width, gutter, true);
@@ -1214,6 +1223,7 @@ pub fn message_rows(
                 who: None,
                 fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
                 line: None,
+                reactions: false,
             });
             push_delivery(&mut rows, line, room, body_width, gutter, false);
             push_reactions(&mut rows, line, body_width, &pad);
@@ -1401,13 +1411,13 @@ fn push_reactions(rows: &mut Vec<Row>, line: &Line, body_width: usize, pad: &str
             .collect::<Vec<_>>()
             .join("  ");
         for part in wrap(&text, body_width.max(1)) {
-            rows.push(
-                TextLine::from(vec![
-                    Span::raw(pad.to_owned()),
-                    Span::styled(part, Style::default().fg(theme::dim())),
-                ])
-                .into(),
-            );
+            let mut row: Row = TextLine::from(vec![
+                Span::raw(pad.to_owned()),
+                Span::styled(part, Style::default().fg(theme::dim())),
+            ])
+            .into();
+            row.reactions = true;
+            rows.push(row);
         }
     }
 }
@@ -2229,6 +2239,57 @@ fn search_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         buttons.push((row, index));
     }
     app.areas.search_rows = buttons;
+}
+
+fn reaction_details(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(details) = app.reaction_details.as_mut() else {
+        return;
+    };
+    let width = screen.width.saturating_sub(4).min(72);
+    if width < 8 || screen.height < 5 {
+        return;
+    }
+    let mut rows = Vec::new();
+    for (emoji, people) in &details.rows {
+        let text = format!("{emoji} {} — {}", people.len(), people.join(", "));
+        for part in wrap(&text, width.saturating_sub(4) as usize) {
+            rows.push(TextLine::from(Span::styled(
+                part,
+                Style::default().fg(theme::text()),
+            )));
+        }
+    }
+    let height =
+        (rows.len().saturating_add(2).min(u16::MAX as usize) as u16).min(screen.height.saturating_sub(2));
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
+    let block = pane(tr!("Reactions", "Реакции"), true).title_bottom(
+        TextLine::from(Span::styled(
+            tr!(" ↑↓ scroll · Esc close ", " ↑↓ листать · Esc закрыть "),
+            Style::default().fg(theme::dim()),
+        ))
+        .alignment(Alignment::Right),
+    );
+    let inner = block.inner(area);
+    let body = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    details.scroll = details
+        .scroll
+        .min(rows.len().saturating_sub(body.height as usize));
+    clear(frame, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(rows.into_iter().skip(details.scroll).collect::<Vec<_>>()),
+        body,
+    );
+    app.areas.reaction_details = area;
 }
 
 /// The reactions a right click on a message offers, beside where it was clicked.
@@ -6035,6 +6096,130 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn clicking_an_attachments_reactions_shows_who_without_changing_them() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "Alice".into() },
+        );
+        app.select(room);
+        let mut picture = Line::message_sharing(
+            1_700_000_000,
+            "Alice".into(),
+            "https://example.org/cat.png".into(),
+            true,
+            true,
+            true,
+        );
+        picture.reactions.insert("Bob".into(), vec!["👍".into()]);
+        picture
+            .reactions
+            .insert("Carol".into(), vec!["👍".into(), "😂".into()]);
+        let original = picture.reactions.clone();
+        app.chats[room].lines.push(picture);
+        app.chats[room].lines.push(Line::message(
+            1_700_000_001,
+            "Dave".into(),
+            "later".into(),
+            true,
+            false,
+        ));
+        for compact in [false, true] {
+            app.compact = compact;
+            let text = screen(&mut app, 120, 30);
+            let (y, row) = text
+                .lines()
+                .enumerate()
+                .find(|(_, row)| row.contains("👍 2"))
+                .unwrap();
+            let x = row[..row.find("👍 2").unwrap()].width();
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x as u16,
+                row: y as u16,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert!(
+                app.on_mouse(click).is_empty(),
+                "viewing must not send a reaction or open the file"
+            );
+            let text = screen(&mut app, 120, 30);
+            assert!(text.contains("👍 2 — Bob, Carol"), "{text}");
+            assert!(text.contains("😂 1 — Carol"), "{text}");
+            assert_eq!(app.chats[room].lines[0].reactions, original);
+            assert!(app.input.is_empty());
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.reaction_details.is_none());
+        }
+        // The keyboard command finds the last message with reactions, not the later
+        // unreacted message. Inserting history does not change an open snapshot.
+        app.input = "/reactions".into();
+        app.cursor = app.input.chars().count();
+        assert!(
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_empty()
+        );
+        app.chats[room]
+            .lines
+            .insert(0, Line::message(1, "old".into(), "history".into(), true, false));
+        assert!(screen(&mut app, 120, 30).contains("Bob, Carol"));
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.reaction_details.is_none());
+    }
+
+    #[test]
+    fn reaction_details_use_contact_names_and_scroll_to_every_person() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let me = jid("me@example.org");
+        let bob = jid("bob@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &bob, ChatKind::Direct);
+        app.chats[chat].name = Some("Mama".into());
+        app.nicknames.insert((me.clone(), me.clone()), "Alice".into());
+        app.select(chat);
+        let mut line = Line::message(1, "bob".into(), "hello".into(), true, false);
+        line.reactions.insert(bob.to_string(), vec!["👍".into()]);
+        line.reactions.insert(me.to_string(), vec!["👍".into()]);
+        app.chats[chat].lines.push(line);
+        app.show_reactions_here();
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("Mama, Alice"), "{text}");
+        assert!(!text.contains("👍 2 — bob@example.org"));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "Alice".into() },
+        );
+        app.select(room);
+        let mut line = Line::message(1, "Bob".into(), "hello".into(), true, false);
+        for i in 0..50 {
+            line.reactions.insert(format!("Person{i:02}"), vec!["👍".into()]);
+        }
+        app.chats[room].lines.push(line);
+        app.show_reactions_here();
+        let text = screen(&mut app, 60, 12);
+        assert!(text.contains("Person00"));
+        assert!(!text.contains("Person49"));
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        let text = screen(&mut app, 60, 12);
+        assert!(text.contains("Person49"), "{text}");
+        // A name list can be inspected while a draft stays intact.
+        app.input = "draft".into();
+        app.cursor = 5;
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input, "draft");
     }
 
     #[test]

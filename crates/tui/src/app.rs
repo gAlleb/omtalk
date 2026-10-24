@@ -378,6 +378,8 @@ pub struct Areas {
     pub older: Option<Rect>,
     /// The reactions of the picker open over a message, each where it is drawn.
     pub reaction_buttons: Vec<(Rect, &'static str)>,
+    pub reaction_rows: Vec<(Rect, usize)>,
+    pub reaction_details: Rect,
     /// The search results on screen, each with its index.
     pub search_rows: Vec<(Rect, usize)>,
     pub left: Option<Rect>,
@@ -809,6 +811,13 @@ pub struct Picker {
     pub y: u16,
 }
 
+/// A snapshot of who reacted, kept stable if older history arrives underneath it.
+#[derive(Debug, Clone)]
+pub struct ReactionDetails {
+    pub rows: Vec<(String, Vec<String>)>,
+    pub scroll: usize,
+}
+
 /// What `/react` is given as a reaction: an emoji as it is, or a name for one
 /// (":+1:", "heart") as people write them.
 pub fn reaction_of(text: &str) -> String {
@@ -954,6 +963,7 @@ pub struct App {
     pub own_status: omtalk_xmpp::presence::OwnStatus,
     /// The reaction picker, if a right click opened one.
     pub picker: Option<Picker>,
+    pub reaction_details: Option<ReactionDetails>,
     /// `/search` results, while open.
     pub search: Option<Search>,
     /// When Ctrl+C was pressed once: a second one within [`QUIT_AGAIN`] quits.
@@ -1038,6 +1048,7 @@ impl App {
             quit: false,
             quit_asked: None,
             picker: None,
+            reaction_details: None,
             search: None,
             own_status: Default::default(),
             names: BTreeMap::new(),
@@ -1985,6 +1996,31 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(details) = self.reaction_details.as_mut() {
+            match key.code {
+                KeyCode::Up => {
+                    details.scroll = details.scroll.saturating_sub(1);
+                    return Vec::new();
+                }
+                KeyCode::Down => {
+                    details.scroll = details.scroll.saturating_add(1);
+                    return Vec::new();
+                }
+                KeyCode::Home => {
+                    details.scroll = 0;
+                    return Vec::new();
+                }
+                KeyCode::End => {
+                    details.scroll = usize::MAX;
+                    return Vec::new();
+                }
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.reaction_details = None;
+                    return Vec::new();
+                }
+                _ => self.reaction_details = None,
+            }
+        }
         // The search results take the arrows, Enter and Esc; another key closes them
         // and goes on as it would.
         if let Some(search) = self.search.as_mut() {
@@ -2351,6 +2387,72 @@ impl App {
             Some(line) => self.react_line(index, line, &reaction),
             None => self.say(tr!("nothing to react to", "не на что реагировать")),
         }
+    }
+
+    pub fn show_reactions_here(&mut self) -> Vec<Action> {
+        let Some(chat) = self.selected else {
+            return Vec::new();
+        };
+        let under = self.selection.and_then(|(a, _)| {
+            self.areas
+                .message_lines
+                .iter()
+                .find(|(r, _)| r.y == a.1)
+                .map(|(_, line)| *line)
+        });
+        let line = under.or_else(|| {
+            self.chats[chat]
+                .lines
+                .iter()
+                .rposition(|l| !l.reactions.is_empty())
+        });
+        match line {
+            Some(line) => self.show_reactions(chat, line),
+            None => self.say(tr!("no reactions yet", "реакций пока нет")),
+        }
+    }
+
+    pub fn show_reactions(&mut self, chat: usize, line: usize) -> Vec<Action> {
+        let Some(chat) = self.chats.get(chat) else {
+            return Vec::new();
+        };
+        let Some(line) = chat.lines.get(line) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<(String, Vec<String>)> = Vec::new();
+        for (by, reactions) in &line.reactions {
+            let name = if chat.is_room() {
+                by.clone()
+            } else if by == chat.jid.as_str() {
+                chat.title()
+            } else if let Ok(jid) = by.parse::<BareJid>() {
+                self.name_of(&(chat.account.clone(), jid.clone()))
+                    .unwrap_or_else(|| {
+                        if jid == chat.account {
+                            jid.node().map(|n| n.to_string()).unwrap_or_else(|| by.clone())
+                        } else {
+                            by.clone()
+                        }
+                    })
+            } else {
+                by.clone()
+            };
+            for emoji in reactions {
+                if let Some((_, people)) = rows.iter_mut().find(|(r, _)| r == emoji) {
+                    people.push(name.clone());
+                } else {
+                    rows.push((emoji.clone(), vec![name.clone()]));
+                }
+            }
+        }
+        if rows.is_empty() {
+            return self.say(tr!("no reactions yet", "реакций пока нет"));
+        }
+        self.picker = None;
+        self.selection = None;
+        self.selecting = false;
+        self.reaction_details = Some(ReactionDetails { rows, scroll: 0 });
+        Vec::new()
     }
 
     /// Reacts with `reaction` to message `line` of chat `index`; again, and it is taken
@@ -2940,6 +3042,7 @@ impl App {
                 self.status = trf!("status: {}", "статус: {}", status_words(&status));
                 return vec![Action::SetStatus(status)];
             }
+            ("/reactions", _) if args.is_empty() => return self.show_reactions_here(),
             ("/react", _) => {
                 let reaction = line["/react".len()..].trim();
                 return self.react_here(reaction);
@@ -4259,6 +4362,17 @@ impl App {
         if self.settings.is_some() {
             return self.settings_mouse(mouse);
         }
+        if let Some(details) = self.reaction_details.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => details.scroll = details.scroll.saturating_sub(1),
+                MouseEventKind::ScrollDown => details.scroll = details.scroll.saturating_add(1),
+                MouseEventKind::Down(_) if !inside(self.areas.reaction_details) => {
+                    self.reaction_details = None
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
         // The search results: a click picks one, the wheel goes through them, a click
         // elsewhere closes them.
         if self.search.is_some() {
@@ -4292,6 +4406,12 @@ impl App {
                 }
                 _ => Vec::new(),
             };
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(chat) = self.selected
+            && let Some((_, line)) = self.areas.reaction_rows.iter().find(|(r, _)| inside(*r))
+        {
+            return self.show_reactions(chat, *line);
         }
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))

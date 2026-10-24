@@ -174,6 +174,9 @@ on, again takes it off. `/react 👍` does the same for the message selected wit
 or the last one from someone, and knows names too (`/react :+1:`, `heart`, `joy`, `fire`…). Reactions show under the message,
 each with how many sent it. As in Conversations and Gajim they go unencrypted, also in an
 encrypted chat.
+Click the reaction row to see who put each emoji, or `/reactions` for the selected
+message (else the latest with reactions). Room nicks and contact names are shown;
+↑/↓ or the mouse wheel scroll, Esc or a click outside closes the list.
 
 A chat is closed with `/close`, prefix+`w` or a middle click on it in the list: it leaves
 the list, its history stays, and it comes back by itself when someone writes in it.
