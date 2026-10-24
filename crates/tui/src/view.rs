@@ -360,7 +360,7 @@ fn chat_row(
         lock.to_owned()
     };
     let lock = if chat.muted {
-        format!(" {lock}{}", icons.muted)
+        format!("{lock} {}", icons.muted)
     } else {
         lock
     };
@@ -1651,15 +1651,16 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     clear(frame, area);
     frame.render_widget(block, area);
     app.areas.omemo_button = Rect::new(area.x + 1, area.y, button.width() as u16, 1);
+    // Block inserts one cell between successive left-aligned titles.
     app.areas.attach_button = Rect::new(
-        area.x + 1 + button.width() as u16,
+        area.x + 1 + button.width() as u16 + 1,
         area.y,
         attach.width() as u16,
         1,
     );
 
     app.areas.mute_button = Rect::new(
-        area.x + 1 + button.width() as u16 + attach.width() as u16,
+        area.x + 1 + button.width() as u16 + attach.width() as u16 + 2,
         area.y,
         mute.width() as u16,
         1,
@@ -5977,12 +5978,16 @@ mod tests {
         app.select(chat);
         for icons in [theme::nerd(), theme::text_icons()] {
             app.icons = icons;
-            screen(&mut app, 120, 30);
-            let button = app.areas.mute_button;
+            let text = screen(&mut app, 120, 30);
+            // Click the glyph actually drawn, not the hitbox calculated by the code
+            // under test: separate Block titles insert a cell between buttons.
+            let button_y = app.areas.mute_button.y;
+            let row = text.lines().nth(button_y as usize).unwrap();
+            let at = row.find(icons.bell).unwrap();
             let click = MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: button.x + 1,
-                row: button.y,
+                column: row[..at].width() as u16,
+                row: button_y,
                 modifiers: KeyModifiers::NONE,
             };
             assert!(matches!(
@@ -5994,10 +5999,41 @@ mod tests {
             let shown = text.lines().nth(row.y as usize).unwrap();
             assert!(shown.contains(icons.muted), "{shown}");
             assert!(shown.contains("bob"));
-            app.on_mouse(click);
+            let button_row = text.lines().nth(button_y as usize).unwrap();
+            let at = button_row.find(icons.muted).unwrap();
+            app.on_mouse(MouseEvent {
+                column: button_row[..at].width() as u16,
+                ..click
+            });
             assert!(!app.chats[chat].muted);
             let text = screen(&mut app, 120, 30);
             assert!(!text.lines().nth(row.y as usize).unwrap().contains(icons.muted));
+        }
+    }
+
+    #[test]
+    fn muted_and_unencrypted_marks_leave_a_cell_between_their_glyphs() {
+        let mut chat = Chat::new(jid("me@example.org"), jid("bob@example.org"), ChatKind::Direct);
+        chat.omemo = false;
+        chat.muted = true;
+        for icons in [theme::nerd(), theme::text_icons()] {
+            for selected in [false, true] {
+                for typing in [false, true] {
+                    let backend = TestBackend::new(26, 1);
+                    let mut terminal = Terminal::new(backend).unwrap();
+                    terminal
+                        .draw(|f| {
+                            f.render_widget(chat_row(&chat, selected, 26, icons, "", false, typing), f.area())
+                        })
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let shown: String = (0..26).map(|x| buffer[(x, 0)].symbol()).collect();
+                    assert!(
+                        shown.contains(&format!("{} {}", icons.chat_unlocked.trim(), icons.muted)),
+                        "{shown}"
+                    );
+                }
+            }
         }
     }
 
