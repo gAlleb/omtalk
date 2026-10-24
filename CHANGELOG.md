@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Every message shows its own name and time**, in both normal and compact layouts. Consecutive messages from the same person no longer look like paragraphs of one message.
 - **A room is entered under the name you gave yourself** (`/nickname`) when it has no nick of its own (in its bookmark, or from last time), else under your address's name part, as Gajim does; `/nick` alone goes back to the same.
 
 ## 0.1.7 — 2026-10-24

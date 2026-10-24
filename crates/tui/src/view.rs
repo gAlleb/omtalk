@@ -935,8 +935,8 @@ fn empty_state(frame: &mut Frame, area: Rect) {
     );
 }
 
-/// The chat as rows of exactly `width` cells at most: day separators, a header where a
-/// new sender (or a pause) starts, wrapped text below it.
+/// The chat as rows of exactly `width` cells at most: day separators, a header for
+/// each message, wrapped text below it.
 /// One row of the conversation as drawn.
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -1019,7 +1019,6 @@ pub fn message_rows(
     let mut new_line = new_since;
     let mut rows = Vec::new();
     let mut last_day = None;
-    let mut last_who: Option<(&str, bool, i64)> = None;
     // Compact: "16:31   mrak  text", the names in a column as wide as the widest here.
     let nick_width = lines
         .iter()
@@ -1059,7 +1058,6 @@ pub fn message_rows(
                 );
             }
             last_day = day;
-            last_who = None;
         }
         // Above the first message unread on opening: from here on it is new.
         if let Some(since) = new_line
@@ -1081,7 +1079,6 @@ pub fn message_rows(
                 .into(),
             );
             new_line = None;
-            last_who = None;
         }
         starts.push(rows.len());
         let clock = time.map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
@@ -1095,14 +1092,10 @@ pub fn message_rows(
                     .into(),
                 );
             }
-            last_who = None;
             continue;
         }
-        let same_group = last_who.is_some_and(|(who, outgoing, at)| {
-            who == line.who && outgoing == line.outgoing && line.at - at < 300
-        });
         let who_shown = shown(line);
-        if !same_group && compact {
+        if compact {
             let who_style = if line.outgoing {
                 Style::default()
                     .fg(theme::outgoing())
@@ -1120,7 +1113,7 @@ pub fn message_rows(
                     Span::raw("  "),
                 ],
             ));
-        } else if !same_group {
+        } else {
             let who_style = if line.outgoing {
                 Style::default()
                     .fg(theme::outgoing())
@@ -1144,7 +1137,6 @@ pub fn message_rows(
             }
             rows.push(header);
         }
-        last_who = Some((&line.who, line.outgoing, line.at));
         let marker = icons.plain_mark;
         if let Some(slot) = &line.media {
             let path = match &slot.state {
@@ -3414,7 +3406,10 @@ mod tests {
         let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
         app.select(bob);
         let at = 1_700_000_000;
-        app.push(bob, Line::message(at, "bob".into(), "привет".into(), true, false));
+        app.push(
+            bob,
+            Line::message(at, "bob".into(), "привет\nвторой абзац".into(), true, false),
+        );
         app.push(
             bob,
             Line::message(at + 10, "bob".into(), "ещё".into(), true, false),
@@ -3436,12 +3431,22 @@ mod tests {
             text.contains(&format!("bob  {}", clock(at))),
             "above, by default\n{text}"
         );
+        assert_eq!(
+            text.matches(&format!("bob  {}", clock(at))).count(),
+            2,
+            "two separate messages, not one header per sender or per paragraph\n{text}"
+        );
 
         app.compact = true;
         let text = screen(&mut app, 120, 20);
         assert!(text.contains(&format!("{} bob  привет", clock(at))), "{text}");
-        // The same sender on: under the text, without time and name again.
-        assert!(text.contains(&format!("{}ещё", " ".repeat(11))), "{text}");
+        // Even a second message from the same sender has its own time and name.
+        assert!(text.contains(&format!("{} bob  ещё", clock(at + 10))), "{text}");
+        assert_eq!(text.matches(&format!("{} bob", clock(at))).count(), 2, "{text}");
+        assert!(
+            text.contains(&format!("{}второй абзац", " ".repeat(11))),
+            "{text}"
+        );
         // Names in one column: the short one is moved right.
         assert!(
             text.contains(&format!("{}  me  и тебе ✓", clock(at + 20))),
@@ -4551,7 +4556,13 @@ mod tests {
         app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, first.y));
         app.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end, second.y));
         let copied = app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end, second.y));
-        assert_eq!(copied, [Action::Copy("строка\nвторая".into())]);
+        let clock = Local
+            .timestamp_opt(1_700_000_010, 0)
+            .single()
+            .unwrap()
+            .format("%H:%M");
+        // The next message's header is visible between the selected text rows.
+        assert_eq!(copied, [Action::Copy(format!("строка\nbob  {clock}\nвторая"))]);
 
         // What is selected shows so.
         let backend = ratatui::backend::TestBackend::new(100, 20);
