@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Read messages stay read after a restart, including IRC bridge messages with no live archive id.** The precise local read position is kept independently of server synchronization; an old server mark no longer makes messages read here unread again. New messages still count, and a newer known mark from another client advances the local position. Empty server mark ids are ignored.
+
 - **The mute bell responds where it is drawn**: its mouse hitbox now includes the spacing between the input border's buttons. The mute and unencrypted marks in the chat list have a separating cell so Nerd Font glyphs can use their normal width.
 
 - **Mute any chat** with `/mute`, restore it with `/unmute`, or click the bell beside the input's paperclip. Direct chats, XMPP rooms and IRC channels through biboumi all work alike: no sound, desktop notification or terminal bell, even for mentions. The chat list marks muted chats; messages and unread counts continue, and the choice survives a restart.

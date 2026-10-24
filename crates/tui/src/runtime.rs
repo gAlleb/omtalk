@@ -362,11 +362,11 @@ enum Msg {
     },
     /// Text from a clipboard, for the input.
     Paste(String),
-    /// Where chats are read up to, as the server has it (XEP-0490), with how many came
-    /// after, if known here.
+    /// Server read positions (XEP-0490). Count only when applied to the UI:
+    /// the user may read further while this event waits in the queue.
     ReadMarks {
         account: BareJid,
-        marks: Vec<(BareJid, String, Option<usize>)>,
+        marks: Vec<(BareJid, String)>,
     },
     /// How far one's message `id` got.
     Delivery {
@@ -538,6 +538,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         config::IconSet::Text => crate::theme::text_icons(),
     };
     load_history(&mut app, &store, &jids);
+    for account in &jids {
+        restore_local_unread(&mut app, &store, account);
+    }
     app.folders = store.folders().map_err(|e| e.to_string())?;
     // A chat put in a folder stays in the list, also before anyone wrote in it.
     for folder in app.folders.clone() {
@@ -616,6 +619,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut folded = app.collapsed.clone();
     let mut opened = app.current().map(|c| format!("{}\t{}", c.account, c.jid));
     loop {
+        flush_local_reads(&mut app, &shared.store);
         terminal
             .draw(|frame| view::draw(frame, &mut app, &mut pictures))
             .map_err(|e| e.to_string())?;
@@ -933,6 +937,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             }
         }
         Msg::ReadMarks { account, marks } => {
+            flush_local_reads(app, &shared.store);
+            restore_local_unread(app, &shared.store, &account);
+            // The user may have read further since a background task counted this.
+            let marks = counted(&shared.store, &account, marks);
             for action in app.read_marks(&account, marks) {
                 tokio::spawn(perform(action, shared.clone()));
             }
@@ -1375,7 +1383,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
             } if node == receipts::MDS && *from == account => {
                 // Read on another device (or here, coming back): what came after is
                 // all that is unread.
-                let marks = counted(&shared.store, &account, receipts::read_marks(items));
+                let marks = receipts::read_marks(items);
                 tell(Msg::ReadMarks {
                     account: account.clone(),
                     marks,
@@ -1566,8 +1574,29 @@ async fn still_in_rooms(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shar
 /// How often the rooms are asked whether one is still in them.
 const ROOM_CHECK: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Read marks with how many messages others wrote after each, as the store knows: the
-/// time of the message marked, then the count after it. Unknown here, no count.
+/// Local progress survives a failed/missing server publication and a restart.
+fn flush_local_reads(app: &mut App, store: &Store) {
+    for ((account, chat), point) in std::mem::take(&mut app.local_reads) {
+        if let Err(problem) = store.read_locally(&account, &chat, &point) {
+            app.status = trf!(
+                "read position was not saved: {problem}",
+                "позиция прочитанного не сохранилась: {problem}"
+            );
+            app.local_reads.insert((account, chat), point);
+        }
+    }
+}
+
+fn restore_local_unread(app: &mut App, store: &Store, account: &BareJid) {
+    for chat in app.chats.iter_mut().filter(|c| &c.account == account) {
+        if let Ok(Some(unread)) = store.unread_after_mark(account, &chat.jid, None) {
+            chat.unread = unread;
+        }
+    }
+}
+
+/// Server marks with an unread count respecting the durable local frontier too.
+/// An unknown server ID stays unknown: it may be beyond the history kept here.
 fn counted(
     store: &Store,
     account: &BareJid,
@@ -1576,11 +1605,15 @@ fn counted(
     marks
         .into_iter()
         .map(|(chat, id)| {
+            let _ = store.read_remotely(account, &chat, &id);
+            // Unknown may mean read further on another device than our history goes.
+            // Local progress can restore the count, but must not make that ID "known"
+            // and allow publishing an older server marker over it.
             let after = store
                 .archive_time(account, &chat, &id)
                 .ok()
                 .flatten()
-                .and_then(|at| store.incoming_after(account, &chat, at).ok());
+                .and_then(|_| store.unread_after_mark(account, &chat, Some(&id)).ok().flatten());
             (chat, id, after)
         })
         .collect()
@@ -1759,12 +1792,18 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
     match xmpp.read_marks().await {
         Ok(marks) => tell(Msg::ReadMarks {
             account: account.clone(),
-            marks: counted(&shared.store, &account, marks),
+            marks,
         }),
-        Err(e) => tell(Msg::Status(trf!(
-            "what is read was not learnt from the server: {e}",
-            "что прочитано, с сервера не узнать: {e}"
-        ))),
+        Err(e) => {
+            tell(Msg::ReadMarks {
+                account: account.clone(),
+                marks: Vec::new(),
+            });
+            tell(Msg::Status(trf!(
+                "what is read was not learnt from the server: {e}",
+                "что прочитано, с сервера не узнать: {e}"
+            )));
+        }
     }
 }
 
@@ -3517,6 +3556,152 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_irc_chat_read_locally_stays_read_after_restart_without_live_archive_ids() {
+        use crate::app::{App, ChatKind};
+        use crate::config::Modifier;
+        use omtalk_store::{Store, StoredMessage};
+        use omtalk_xmpp::BareJid;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omtalk.db");
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let peer: BareJid = "#test%irc.example.org@irc.example.org".parse().unwrap();
+        let store = Store::open(&path).unwrap();
+        store.remember_room(&me, &peer, "me").unwrap();
+        for i in 1..=3 {
+            store
+                .save_message(
+                    &me,
+                    &StoredMessage {
+                        chat: peer.clone(),
+                        sender: "bob@example.org".parse().unwrap(),
+                        nick: Some("bob".into()),
+                        outgoing: false,
+                        encrypted: false,
+                        body: "hello".into(),
+                        at: i,
+                        id: Some(format!("m{i}")),
+                        archive_id: (i == 1).then(|| "archive-old".into()),
+                        delivery: None,
+                        shared_file: false,
+                        reply_to: None,
+                        untrusted: false,
+                        edited: false,
+                    },
+                )
+                .unwrap();
+        }
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&me);
+        super::load_history(&mut app, &store, std::slice::from_ref(&me));
+        let room = app.chat(&me, &peer, ChatKind::Room { nick: "me".into() });
+        app.select(server);
+        app.read_marks(
+            &me,
+            super::counted(&store, &me, vec![(peer.clone(), "archive-old".into())]),
+        );
+        assert_eq!(app.chats[room].unread, 2);
+        let delayed = vec![(peer.clone(), "archive-old".into())];
+        app.select(room);
+        assert_eq!(app.chats[room].unread, 0);
+        // CURRENT: the production event loop persists this before waiting again.
+        super::flush_local_reads(&mut app, &store);
+        app.select(server);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let shared = super::Shared {
+            accounts: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            avatars: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        super::apply(
+            &mut app,
+            super::Msg::ReadMarks {
+                account: me.clone(),
+                marks: delayed,
+            },
+            &shared,
+        );
+        assert_eq!(
+            app.chats[room].unread, 0,
+            "a queued background count must not unread a chat read since it was counted"
+        );
+        drop(shared);
+        drop(app);
+        drop(store);
+        // A fresh process, the same local DB, and an old server mark: the real IRC case.
+        let store = Store::open(&path).unwrap();
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&me);
+        super::load_history(&mut app, &store, std::slice::from_ref(&me));
+        let room = app.chat(&me, &peer, ChatKind::Room { nick: "me".into() });
+        app.select(server);
+        super::restore_local_unread(&mut app, &store, &me);
+        app.read_marks(
+            &me,
+            super::counted(&store, &me, vec![(peer.clone(), "archive-old".into())]),
+        );
+        assert_eq!(
+            app.chats[room].unread, 0,
+            "messages read here must stay read after restart, including messages with no room archive ID"
+        );
+        // A marker beyond the history here remains unknown: opening the chat must
+        // not publish an older ID over the phone's newer one.
+        app.read_marks(
+            &me,
+            super::counted(&store, &me, vec![(peer.clone(), "not-here-yet".into())]),
+        );
+        assert_eq!(app.chats[room].unread, 0);
+        assert!(!app.chats[room].read_mark_here);
+        let opened = app.select(room);
+        assert!(!opened.iter().any(|a| matches!(
+            a,
+            crate::app::Action::Displayed {
+                archive_id: Some(_),
+                ..
+            }
+        )));
+        app.select(server);
+        // A valid newer external mark wins, an older delayed one never moves it back.
+        store
+            .save_message(
+                &me,
+                &StoredMessage {
+                    chat: peer.clone(),
+                    sender: "bob@example.org".parse().unwrap(),
+                    nick: Some("bob".into()),
+                    outgoing: false,
+                    encrypted: false,
+                    body: "new".into(),
+                    at: 4,
+                    id: Some("m4".into()),
+                    archive_id: Some("archive-new".into()),
+                    delivery: None,
+                    shared_file: false,
+                    reply_to: None,
+                    untrusted: false,
+                    edited: false,
+                },
+            )
+            .unwrap();
+        super::restore_local_unread(&mut app, &store, &me);
+        assert_eq!(app.chats[room].unread, 1);
+        app.read_marks(
+            &me,
+            super::counted(&store, &me, vec![(peer.clone(), "archive-new".into())]),
+        );
+        assert_eq!(app.chats[room].unread, 0);
+        app.read_marks(
+            &me,
+            super::counted(&store, &me, vec![(peer, "archive-old".into())]),
+        );
+        assert_eq!(app.chats[room].unread, 0);
+    }
+
     #[test]
     fn chat_mutes_survive_a_restart_and_unmute_removes_the_saved_choice() {
         let dir = tempfile::tempdir().unwrap();

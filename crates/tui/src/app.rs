@@ -945,6 +945,9 @@ pub struct App {
     /// Chats where OMEMO was turned on or off by hand: kept, a chat opened takes it.
     pub omemo_choice: BTreeMap<(BareJid, BareJid), bool>,
     pub muted_chats: BTreeSet<(BareJid, BareJid)>,
+    /// Read frontiers to persist before waiting for another event, including messages
+    /// that a bridge sent without an archive stanza-id.
+    pub local_reads: BTreeMap<(BareJid, BareJid), omtalk_store::ReadPoint>,
     /// The names contacts gave themselves (XEP-0172), after the roster's.
     pub nicknames: BTreeMap<(BareJid, BareJid), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
@@ -1041,6 +1044,7 @@ impl App {
             nicknames: BTreeMap::new(),
             omemo_choice: BTreeMap::new(),
             muted_chats: BTreeSet::new(),
+            local_reads: BTreeMap::new(),
         }
     }
 
@@ -1619,6 +1623,17 @@ impl App {
             return Vec::new();
         }
         let chat = &mut self.chats[index];
+        if let Some(line) = chat.lines.iter().rev().find(|l| !l.notice) {
+            self.local_reads.insert(
+                (chat.account.clone(), chat.jid.clone()),
+                omtalk_store::ReadPoint {
+                    at: line.at,
+                    id: line.id.clone(),
+                    archive_id: line.archive_id.clone(),
+                    outgoing: line.outgoing,
+                },
+            );
+        }
         let marker = chat
             .markable
             .take()

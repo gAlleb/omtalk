@@ -44,7 +44,7 @@ pub fn read_marks(items: &[crate::PepItem]) -> Vec<(xmpp_parsers::jid::BareJid, 
                 .get_child("stanza-id", ns::SID)?
                 .attr(xml_ncname!("id"))?
                 .to_owned();
-            Some((chat, id))
+            (!id.is_empty()).then_some((chat, id))
         })
         .collect()
 }
@@ -241,6 +241,23 @@ pub fn displayed(to: Jid, id: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_displayed_ids_do_not_form_a_read_frontier() {
+        let item = |id: &str| crate::PepItem {
+            id: Some("#test%irc.example.org@irc.example.org".into()),
+            payload: Element::builder("displayed", MDS)
+                .append(
+                    Element::builder("stanza-id", ns::SID)
+                        .attr(xml_ncname!("id").into(), id)
+                        .attr(xml_ncname!("by").into(), "#test%irc.example.org@irc.example.org")
+                        .build(),
+                )
+                .build(),
+        };
+        assert!(read_marks(&[item("")]).is_empty());
+        assert_eq!(read_marks(&[item("valid")])[0].1, "valid");
+    }
 
     #[test]
     fn outgoing_chats_ask_for_receipts_and_marks_are_read_back() {

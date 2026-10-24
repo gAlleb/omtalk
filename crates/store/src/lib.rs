@@ -8,11 +8,13 @@ mod folders;
 mod history;
 mod kept;
 mod reactions;
+mod read;
 mod seen;
 
 pub use folders::Folder;
 pub use history::{ChatSummary, Delivery, StoredMessage};
 pub use reactions::StoredReactions;
+pub use read::ReadPoint;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

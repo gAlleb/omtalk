@@ -639,8 +639,22 @@ async fn what_one_client_read_the_others_learn() {
     assert_eq!(stanza_id.attr("id"), Some("archive-7"));
     assert_eq!(stanza_id.attr("by"), Some("u06@localhost"));
 
+    // IRC through a bridge uses the room JID too, not the account or a DM JID.
+    // The read item must coexist with direct chats and survive a new connection.
+    let irc: BareJid = "#channel%irc.example.org@bridge.localhost".parse().unwrap();
+    laptop.read_up_to(&irc, &irc, "room-archive-9").await.unwrap();
+    let items = phone.items(phone.jid(), receipts::MDS).await.unwrap();
+    let item = items
+        .iter()
+        .find(|i| i.id.as_deref() == Some(irc.as_str()))
+        .unwrap();
+    let stanza_id = item.payload.get_child("stanza-id", "urn:xmpp:sid:0").unwrap();
+    assert_eq!(stanza_id.attr("id"), Some("room-archive-9"));
+    assert_eq!(stanza_id.attr("by"), Some(irc.as_str()));
+
     // And a client coming in later learns it all at once, as Gajim does on logging in.
     let marks = phone.read_marks().await.unwrap();
+    assert!(marks.contains(&(irc, "room-archive-9".into())));
     assert!(
         marks.contains(&(chat.clone(), "archive-7".to_owned())),
         "{marks:?}"

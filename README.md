@@ -271,6 +271,10 @@ bell, even for mentions. A mark in the chat list shows muted chats (`[muted]` wi
 icons). Messages and unread counts continue. Mutes survive a restart and are local to
 this omtalk.
 
+What you read here is also remembered locally. A failed server synchronization or IRC
+bridge messages without a room archive id no longer make it unread again after a restart.
+A newer known read position from another client still advances it.
+
 ## Typing
 
 "Typing…" (XEP-0085): while the contact types, the bottom of the conversation shows

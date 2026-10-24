@@ -46,6 +46,9 @@ fn node_options(node: &str, access: Access) -> Vec<Field> {
         fields.push(Field::text_single("pubsub#persist_items", "true"));
         fields.push(Field::text_single("pubsub#max_items", "max"));
     }
+    if node == crate::receipts::MDS {
+        fields.push(Field::text_single("pubsub#send_last_published_item", "never"));
+    }
     fields
 }
 
