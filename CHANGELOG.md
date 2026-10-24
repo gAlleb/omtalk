@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Your messages in a room can be reacted to once echoed back**: their room-assigned id is retained, including when an upload finishes after the echo.
+
+- **Reactions show under pictures and files too**, before and after download, in both layouts; they were sent correctly but missing from the attachment rows.
+
 - **Every message shows its own name and time**, in both normal and compact layouts. Consecutive messages from the same person no longer look like paragraphs of one message.
 - **A room is entered under the name you gave yourself** (`/nickname`) when it has no nick of its own (in its bookmark, or from last time), else under your address's name part, as Gajim does; `/nick` alone goes back to the same.
 

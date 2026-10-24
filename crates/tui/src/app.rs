@@ -1806,6 +1806,9 @@ impl App {
                 .find(|l| l.outgoing && l.id.as_ref() == Some(id))
         {
             line.echoed = true;
+            if message.archive_id.is_some() {
+                line.archive_id = message.archive_id.clone();
+            }
             self.delivery(account, &id.clone(), Delivery::Sent);
             return Vec::new();
         }
@@ -1819,6 +1822,9 @@ impl App {
             })
         {
             line.echoed = true;
+            if message.archive_id.is_some() {
+                line.archive_id = message.archive_id.clone();
+            }
             if matches!(line.delivery, Some(Delivery::Sending | Delivery::Queued)) {
                 line.delivery = Some(Delivery::Sent);
             }
@@ -2633,7 +2639,7 @@ impl App {
                 .filter(|l| l.outgoing && l.id.as_deref() == Some(id))
             {
                 // One's own upload: a file shared, whatever its link looks like.
-                let mut fresh = Line::message_sharing(
+                let fresh = Line::message_sharing(
                     line.at,
                     line.who.clone(),
                     link.to_owned(),
@@ -2641,9 +2647,10 @@ impl App {
                     true,
                     true,
                 );
-                fresh.id = line.id.take();
-                fresh.delivery = line.delivery.take();
-                *line = fresh;
+                // An echo or reaction may already have arrived while uploading:
+                // replace only the attachment's content, keeping its message state.
+                line.text = fresh.text;
+                line.media = fresh.media;
             }
         }
     }
@@ -4990,6 +4997,49 @@ mod tests {
             now,
         );
         assert_eq!(app.chats[room].lines.iter().filter(|l| !l.notice).count(), 2);
+    }
+
+    #[test]
+    fn a_rooms_echo_makes_ones_message_reactable_and_upload_keeps_its_state() {
+        for gateway in [false, true] {
+            let mut app = app();
+            let me = jid("me@example.org");
+            let peer = jid("team@muc.example.org");
+            let room = app.chat(&me, &peer, ChatKind::Room { nick: "me".into() });
+            app.select(room);
+            type_text(&mut app, "https://example.org/cat.png");
+            let id = app.chats[room].lines.last().unwrap().id.clone().unwrap();
+            let back = Incoming {
+                peer,
+                sender: me.clone(),
+                nick: Some("me".into()),
+                device: None,
+                direction: Direction::Outgoing,
+                encrypted: false,
+                text: Some("https://example.org/cat.png".into()),
+                at: None,
+                not_for_this_device: false,
+                id: Some(if gateway { "gateway-id".into() } else { id.clone() }),
+                markable: false,
+                archive_id: Some("room-id".into()),
+                untrusted: false,
+                reply_to: None,
+                replaces: None,
+                shared_file: true,
+            };
+            app.on_incoming(&me, &back, chrono::Utc::now().timestamp());
+            let line = app.chats[room].lines.len() - 1;
+            let actions = app.react_line(room, line, "👍");
+            assert!(matches!(&actions[..], [Action::React { id, room: true, .. }] if id == "room-id"));
+            // The upload completion must not erase a room echo or reactions received first.
+            app.uploaded(&me, &id, "https://example.org/cat.png");
+            let own = &app.chats[room].lines[line];
+            assert_eq!(own.archive_id.as_deref(), Some("room-id"));
+            assert!(own.echoed);
+            assert_eq!(own.reactions.get("me").unwrap(), &["👍"]);
+            assert_eq!(own.id.as_deref(), Some(id.as_str()));
+            assert!(own.media.is_some());
+        }
     }
 
     #[test]

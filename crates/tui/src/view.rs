@@ -1164,6 +1164,7 @@ pub fn message_rows(
                     });
                 }
                 push_delivery(&mut rows, line, room, body_width, gutter, true);
+                push_reactions(&mut rows, line, body_width, &pad);
                 continue;
             }
             let (icon, state, colour) = match &slot.state {
@@ -1210,6 +1211,7 @@ pub fn message_rows(
                 line: None,
             });
             push_delivery(&mut rows, line, room, body_width, gutter, false);
+            push_reactions(&mut rows, line, body_width, &pad);
             continue;
         }
         let mut first = true;
@@ -1256,6 +1258,7 @@ pub fn message_rows(
                 first = false;
             }
             push_delivery(&mut rows, line, room, body_width, gutter, false);
+            push_reactions(&mut rows, line, body_width, &pad);
             continue;
         }
         // A reply: whom it answers, if that message is here, then its quote as a block.
@@ -1355,30 +1358,7 @@ pub fn message_rows(
             }
         }
         push_delivery(&mut rows, line, room, body_width, gutter, false);
-        // Reactions (XEP-0444), each with how many sent it, in the order they came.
-        if !line.reactions.is_empty() {
-            let mut counts: Vec<(&str, usize)> = Vec::new();
-            for reaction in line.reactions.values().flatten() {
-                match counts.iter_mut().find(|(r, _)| r == reaction) {
-                    Some((_, n)) => *n += 1,
-                    None => counts.push((reaction, 1)),
-                }
-            }
-            let text = counts
-                .iter()
-                .map(|(r, n)| format!("{r} {n}"))
-                .collect::<Vec<_>>()
-                .join("  ");
-            for part in wrap(&text, body_width.max(1)) {
-                rows.push(
-                    TextLine::from(vec![
-                        Span::raw(pad.clone()),
-                        Span::styled(part, Style::default().fg(theme::dim())),
-                    ])
-                    .into(),
-                );
-            }
-        }
+        push_reactions(&mut rows, line, body_width, &pad);
     }
     for (at, head) in heads {
         let Some(row) = rows.get_mut(at) else { continue };
@@ -1399,6 +1379,32 @@ pub fn message_rows(
         }
     }
     rows
+}
+
+fn push_reactions(rows: &mut Vec<Row>, line: &Line, body_width: usize, pad: &str) {
+    if !line.reactions.is_empty() {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for reaction in line.reactions.values().flatten() {
+            match counts.iter_mut().find(|(r, _)| r == reaction) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((reaction, 1)),
+            }
+        }
+        let text = counts
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        for part in wrap(&text, body_width.max(1)) {
+            rows.push(
+                TextLine::from(vec![
+                    Span::raw(pad.to_owned()),
+                    Span::styled(part, Style::default().fg(theme::dim())),
+                ])
+                .into(),
+            );
+        }
+    }
 }
 
 /// [`split_quote`] for the app: a reply does not quote a quote.
@@ -5949,6 +5955,66 @@ mod tests {
         app.chats[bob].lines.push(line);
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("👍 2  ❤ 1"), "one gets its count too: {text}");
+    }
+
+    #[test]
+    fn reactions_stay_under_each_attachment_before_and_after_its_picture_loads() {
+        use crate::app::MediaState;
+
+        for room in [false, true] {
+            for compact in [false, true] {
+                for (name, state, ready) in [
+                    ("cat.png", MediaState::Offered, false),
+                    ("cat.png", MediaState::Ready("/cache/cat.png".into()), false),
+                    ("cat.png", MediaState::Ready("/cache/cat.png".into()), true),
+                    ("notes.txt", MediaState::Ready("/cache/notes.txt".into()), false),
+                ] {
+                    let mut lines = Vec::new();
+                    for (who, reaction) in [("alice", "👍"), ("bob", "😂")] {
+                        let mut line = Line::message_sharing(
+                            1_700_000_000,
+                            who.into(),
+                            format!("https://example.org/{name}"),
+                            true,
+                            false,
+                            true,
+                        );
+                        line.media.as_mut().unwrap().state = state.clone();
+                        line.reactions.insert("carol".into(), vec![reaction.into()]);
+                        line.reactions.insert("dave".into(), vec![reaction.into()]);
+                        lines.push(line);
+                    }
+                    let rows = message_rows(
+                        &lines,
+                        80,
+                        theme::nerd(),
+                        &|_| ready,
+                        "me",
+                        Look {
+                            room,
+                            compact,
+                            ..Look::default()
+                        },
+                    );
+                    for (index, reaction) in [(0, "👍"), (1, "😂")] {
+                        let owned: Vec<_> = rows.iter().filter(|row| row.line == Some(index)).collect();
+                        let text = owned.last().unwrap().text.to_string();
+                        assert!(
+                            text.contains(&format!("{reaction} 2")),
+                            "reaction must follow its own attachment: {name}, {state:?}, ready={ready}, room={room}, compact={compact}: {text}"
+                        );
+                        assert_eq!(
+                            owned
+                                .iter()
+                                .filter(|row| row.text.to_string().contains(reaction))
+                                .count(),
+                            1
+                        );
+                    }
+                    assert_eq!(rows.iter().any(|row| row.picture.is_some()), ready);
+                }
+            }
+        }
     }
 
     #[test]
