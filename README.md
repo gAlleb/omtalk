@@ -5,6 +5,10 @@
 A terminal XMPP client with OMEMO that works in direct and group chats as reliably as
 Gajim.
 
+![A group chat in omtalk: folders on the left, a shared picture, the room's avatar and topic on the right](docs/screenshot-room.webp)
+
+![A direct chat in omtalk: read ticks, a reaction, the contact's avatar and OMEMO keys](docs/screenshot-chat.webp)
+
 ## Development setup
 
 Every tool version is pinned in the repository (`mise.toml`, `rust-toolchain.toml`,
