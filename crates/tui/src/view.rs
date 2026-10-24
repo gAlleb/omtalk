@@ -359,6 +359,11 @@ fn chat_row(
     } else {
         lock.to_owned()
     };
+    let lock = if chat.muted {
+        format!(" {lock}{}", icons.muted)
+    } else {
+        lock
+    };
     let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + lock.width() + 1);
     let title = truncate(&chat.title(), room_for_title);
     let gap = (width as usize).saturating_sub(icon.width() + title.width() + lock.width() + badge.width());
@@ -1604,6 +1609,19 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let button = format!(" {label} ");
     let attach = format!(" {} ", app.icons.attach);
+    let can_mute = app.current().is_some_and(|c| c.kind != ChatKind::Server);
+    let mute = if can_mute {
+        format!(
+            " {} ",
+            if app.current().is_some_and(|c| c.muted) {
+                app.icons.muted
+            } else {
+                app.icons.bell
+            }
+        )
+    } else {
+        String::new()
+    };
     // The hint as long as the border has room for beside the lock.
     let hint = [
         tr!(
@@ -1614,7 +1632,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         " ⏎ ",
     ]
     .into_iter()
-    .find(|h| button.width() + attach.width() + h.width() + 4 <= area.width as usize)
+    .find(|h| button.width() + attach.width() + mute.width() + h.width() + 4 <= area.width as usize)
     .unwrap_or("");
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1625,6 +1643,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(colour).add_modifier(Modifier::BOLD),
         ))
         .title(Span::styled(attach.clone(), Style::default().fg(theme::accent())))
+        .title(Span::styled(mute.clone(), Style::default().fg(theme::dim())))
         .title(
             TextLine::from(Span::styled(hint, Style::default().fg(theme::dim()))).alignment(Alignment::Right),
         );
@@ -1636,6 +1655,13 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         area.x + 1 + button.width() as u16,
         area.y,
         attach.width() as u16,
+        1,
+    );
+
+    app.areas.mute_button = Rect::new(
+        area.x + 1 + button.width() as u16 + attach.width() as u16,
+        area.y,
+        mute.width() as u16,
         1,
     );
 
@@ -5497,7 +5523,7 @@ mod tests {
 
         // /help: every command, the last ones too.
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        let text = screen(&mut app, 120, 40);
+        let text = screen(&mut app, 120, 44);
         assert!(text.contains("/create") && text.contains("/quit"), "{text}");
     }
 
@@ -5940,6 +5966,39 @@ mod tests {
                 .is_empty()
         );
         assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn a_chat_mutes_by_the_bell_button_and_shows_its_mark_in_the_chat_list() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(chat);
+        for icons in [theme::nerd(), theme::text_icons()] {
+            app.icons = icons;
+            screen(&mut app, 120, 30);
+            let button = app.areas.mute_button;
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: button.x + 1,
+                row: button.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert!(matches!(
+                &app.on_mouse(click)[..],
+                [Action::SetMuted { muted: true, .. }]
+            ));
+            let text = screen(&mut app, 120, 30);
+            let row = app.areas.chat_rows.iter().find(|(_, i)| *i == chat).unwrap().0;
+            let shown = text.lines().nth(row.y as usize).unwrap();
+            assert!(shown.contains(icons.muted), "{shown}");
+            assert!(shown.contains("bob"));
+            app.on_mouse(click);
+            assert!(!app.chats[chat].muted);
+            let text = screen(&mut app, 120, 30);
+            assert!(!text.lines().nth(row.y as usize).unwrap().contains(icons.muted));
+        }
     }
 
     #[test]

@@ -153,6 +153,8 @@ pub struct Icons {
     pub folder: &'static str,
     /// The button that sends a file, on the input box.
     pub attach: &'static str,
+    pub bell: &'static str,
+    pub muted: &'static str,
 }
 
 /// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal, U+F07B folder, U+F0C6 paperclip.
@@ -170,6 +172,8 @@ pub fn nerd() -> Icons {
         command: "\u{f120}",
         folder: "\u{f07b}",
         attach: "\u{f0c6}",
+        bell: "\u{f0f3}",
+        muted: "\u{f1f6}",
     }
 }
 
@@ -186,5 +190,7 @@ pub fn text_icons() -> Icons {
         command: "$",
         folder: "/",
         attach: tr!("[file]", "[файл]"),
+        bell: tr!("[notify]", "[увед.]"),
+        muted: tr!("[muted]", "[тихо]"),
     }
 }

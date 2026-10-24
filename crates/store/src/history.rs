@@ -163,6 +163,26 @@ impl Store {
                 message.edited,
             ],
         )?;
+        if let (Some(id), Some(archive_id)) = (&message.id, &message.archive_id) {
+            self.set_archive_id(account, &message.chat, id, message.outgoing, archive_id)?;
+        }
+        Ok(())
+    }
+
+    /// Adds the room/archive's id to an already saved message, without changing its text.
+    /// An encrypted own echo need not have a readable body to tell us this id.
+    pub fn set_archive_id(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        id: &str,
+        outgoing: bool,
+        archive_id: &str,
+    ) -> Result<(), Error> {
+        self.db.lock().unwrap().execute(
+            "UPDATE messages SET archive_id = ?5 WHERE account = ?1 AND chat = ?2 AND id = ?3 AND outgoing = ?4 AND archive_id IS NULL",
+            params![account.as_str(), chat.as_str(), id, outgoing, archive_id],
+        )?;
         Ok(())
     }
 
@@ -512,6 +532,52 @@ mod tests {
             bodies,
             ["привет", "без id", "без id"],
             "one with an id once; without, as they come"
+        );
+    }
+
+    #[test]
+    fn a_rooms_id_enriches_an_own_message_even_when_its_echo_has_no_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omtalk.db");
+        let me = jid("me@example.org");
+        let room = jid("team@muc.example.org");
+        let own = StoredMessage {
+            sender: me.clone(),
+            outgoing: true,
+            id: Some("own-1".into()),
+            ..message(room.as_str(), "https://example.org/cat.png", 1)
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            store.save_message(&me, &own).unwrap();
+            store.set_archive_id(&me, &room, "own-1", true, "room-1").unwrap();
+            // The later send confirmation must not erase the echo's archive id.
+            store.save_message(&me, &own).unwrap();
+            // Nor may another account, chat or direction assign it.
+            store
+                .set_archive_id(&jid("other@example.org"), &room, "own-1", true, "wrong")
+                .unwrap();
+            store
+                .set_archive_id(&me, &jid("else@muc.example.org"), "own-1", true, "wrong")
+                .unwrap();
+            store.set_archive_id(&me, &room, "own-1", false, "wrong").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let kept = store.recent_messages(&me, &room, 10).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].body, own.body);
+        assert_eq!(kept[0].archive_id.as_deref(), Some("room-1"));
+        // A duplicate read from MAM also enriches an older row that lacked its id.
+        let mut second = own.clone();
+        second.id = Some("own-2".into());
+        store.save_message(&me, &second).unwrap();
+        second.archive_id = Some("room-2".into());
+        store.save_message(&me, &second).unwrap();
+        assert_eq!(
+            store.recent_messages(&me, &room, 10).unwrap()[1]
+                .archive_id
+                .as_deref(),
+            Some("room-2")
         );
     }
 

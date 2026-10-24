@@ -34,6 +34,22 @@ pub const COMMANDS: &[Command] = &[
         about: ["join a room", "войти в комнату"],
     },
     Command {
+        name: "/mute",
+        args: ["", ""],
+        about: [
+            "mute all notifications from this chat",
+            "выключить все уведомления этого чата",
+        ],
+    },
+    Command {
+        name: "/unmute",
+        args: ["", ""],
+        about: [
+            "restore notifications from this chat",
+            "вернуть уведомления этого чата",
+        ],
+    },
+    Command {
         name: "/leave",
         args: ["", ""],
         about: ["leave the current room", "выйти из текущей комнаты"],

@@ -60,7 +60,7 @@ pub struct Incoming {
     pub direction: Direction,
     /// `false` for plain text: show it, marked as unencrypted.
     pub encrypted: bool,
-    /// `None` for a message without content (a handshake answer or a heartbeat).
+    /// `None` for metadata without content (a handshake, heartbeat, or own encrypted echo).
     pub text: Option<String>,
     /// When the server got it (Unix seconds), for a message read from an archive;
     /// `None` for one that arrives live, which is now.
@@ -356,7 +356,26 @@ impl Omemo {
         // This device's own message, reflected by a room or kept in an archive: it holds
         // no key for the device that wrote it.
         if envelope.sender == *self.account.jid() && encrypted.header.sid == self.device_id {
-            return Ok(None);
+            // Its plaintext is already local, but the room's echo still acknowledges
+            // the message and supplies the id used for reactions and read markers.
+            return Ok(Some(Incoming {
+                peer: envelope.peer,
+                sender: envelope.sender,
+                nick: envelope.nick,
+                device: Some(self.device_id),
+                direction: envelope.direction,
+                encrypted: true,
+                text: None,
+                at: None,
+                not_for_this_device: false,
+                id: envelope.meta.id,
+                markable: envelope.meta.markable,
+                archive_id: None,
+                untrusted: false,
+                reply_to: envelope.meta.reply_to,
+                replaces: envelope.meta.replaces,
+                shared_file: envelope.meta.shared_file,
+            }));
         }
         let (sender, device) = (envelope.sender.clone(), encrypted.header.sid);
         let parts = Received {

@@ -168,6 +168,8 @@ pub struct Chat {
     pub unread: usize,
     /// Messages typed here go out encrypted. On unless the user turns it off.
     pub omemo: bool,
+    /// No sound, desktop notification or terminal bell from this chat.
+    pub muted: bool,
     /// Rows scrolled up from the newest.
     pub scroll: usize,
     /// Older messages asked for (scrolled to the top), not here yet.
@@ -248,6 +250,7 @@ impl Chat {
             lines: Vec::new(),
             unread: 0,
             omemo: true,
+            muted: false,
             scroll: 0,
             older_loading: false,
             older_done: false,
@@ -382,6 +385,7 @@ pub struct Areas {
     pub messages: Rect,
     pub input: Rect,
     pub omemo_button: Rect,
+    pub mute_button: Rect,
     /// The paperclip: send a file.
     pub attach_button: Rect,
     pub hide_left: Option<Rect>,
@@ -478,6 +482,12 @@ pub enum Action {
         account: BareJid,
         chat: BareJid,
         on: bool,
+    },
+    /// Notification mute, local to this client, to be kept.
+    SetMuted {
+        account: BareJid,
+        chat: BareJid,
+        muted: bool,
     },
     /// The messages of `chat` holding `words`.
     Search {
@@ -934,6 +944,7 @@ pub struct App {
     pub names: BTreeMap<(BareJid, BareJid), String>,
     /// Chats where OMEMO was turned on or off by hand: kept, a chat opened takes it.
     pub omemo_choice: BTreeMap<(BareJid, BareJid), bool>,
+    pub muted_chats: BTreeSet<(BareJid, BareJid)>,
     /// The names contacts gave themselves (XEP-0172), after the roster's.
     pub nicknames: BTreeMap<(BareJid, BareJid), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
@@ -1029,6 +1040,7 @@ impl App {
             names: BTreeMap::new(),
             nicknames: BTreeMap::new(),
             omemo_choice: BTreeMap::new(),
+            muted_chats: BTreeSet::new(),
         }
     }
 
@@ -1107,6 +1119,7 @@ impl App {
         if let Some(&on) = self.omemo_choice.get(&(account.clone(), jid.clone())) {
             chat.omemo = on;
         }
+        chat.muted = self.muted_chats.contains(&(account.clone(), jid.clone()));
         if chat.kind == ChatKind::Direct {
             chat.name = self.name_of(&(account.clone(), jid.clone()));
         }
@@ -1248,6 +1261,12 @@ impl App {
             .chats
             .iter()
             .position(|c| &c.account == account && c.jid == message.peer);
+        if self
+            .muted_chats
+            .contains(&(account.clone(), message.peer.clone()))
+        {
+            return Default::default();
+        }
         if self.focused && chat.is_some() && chat == self.selected {
             return Default::default();
         }
@@ -1777,6 +1796,25 @@ impl App {
     /// A message arrived (or one's own came back): shown, and its read marker owed. What
     /// to do about it comes back: the marker, while the chat is in sight.
     pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) -> Vec<Action> {
+        // An encrypted own echo has no key for this sending device: match it before
+        // rejecting unreadable content. The room's copy is the existing local message.
+        if message.direction == Direction::Outgoing
+            && let Some(id) = &message.id
+            && let Some(line) = self
+                .chats
+                .iter_mut()
+                .find(|c| &c.account == account && c.jid == message.peer)
+                .into_iter()
+                .flat_map(|c| &mut c.lines)
+                .find(|l| l.outgoing && l.id.as_ref() == Some(id))
+        {
+            line.echoed = true;
+            if message.archive_id.is_some() {
+                line.archive_id = message.archive_id.clone();
+            }
+            self.delivery(account, &id.clone(), Delivery::Sent);
+            return Vec::new();
+        }
         if message.not_for_this_device {
             self.not_for_this_device(account, message, at);
             return Vec::new();
@@ -1795,22 +1833,6 @@ impl App {
             .unwrap_or_else(|| message.sender.node().map(|n| n.to_string()).unwrap_or_default());
         if let Some(typing) = self.typing_in.get_mut(&(account.clone(), message.peer.clone())) {
             typing.remove(&who);
-        }
-        // A room sends one's message back: the line sent from here is that message,
-        // which has now arrived.
-        if message.direction == Direction::Outgoing
-            && let Some(id) = &message.id
-            && let Some(line) = self.chats[index]
-                .lines
-                .iter_mut()
-                .find(|l| l.outgoing && l.id.as_ref() == Some(id))
-        {
-            line.echoed = true;
-            if message.archive_id.is_some() {
-                line.archive_id = message.archive_id.clone();
-            }
-            self.delivery(account, &id.clone(), Delivery::Sent);
-            return Vec::new();
         }
         // A gateway (biboumi) sends it back under an id of its own: the same text, sent
         // from here a moment ago and not back yet, is that message.
@@ -3044,6 +3066,8 @@ impl App {
                 )
                 .to_owned()),
             },
+            ("/mute", _) if args.is_empty() => return self.set_muted(true),
+            ("/unmute", _) if args.is_empty() => return self.set_muted(false),
             ("/close", _) => match self.selected {
                 Some(index) => return self.close_chat(index),
                 None => Err(tr!("no chat open", "нет открытого чата").to_owned()),
@@ -3784,6 +3808,32 @@ impl App {
         }]
     }
 
+    pub fn set_muted(&mut self, muted: bool) -> Vec<Action> {
+        let Some(chat) = self.current_mut().filter(|c| c.kind != ChatKind::Server) else {
+            return self.say(tr!(
+                "open a chat to mute or unmute",
+                "откройте чат, чтобы включить или выключить уведомления"
+            ));
+        };
+        chat.muted = muted;
+        let (account, jid) = (chat.account.clone(), chat.jid.clone());
+        let key = (account.clone(), jid.clone());
+        if muted {
+            self.muted_chats.insert(key);
+        } else {
+            self.muted_chats.remove(&key);
+        }
+        self.status = tr!("notifications muted", "уведомления выключены").into();
+        if !muted {
+            self.status = tr!("notifications unmuted", "уведомления включены").into();
+        }
+        vec![Action::SetMuted {
+            account,
+            chat: jid,
+            muted,
+        }]
+    }
+
     /// The folder holding a chat, if any.
     fn folder_of(&self, index: usize) -> Option<usize> {
         let chat = &self.chats[index];
@@ -4346,6 +4396,8 @@ impl App {
                     return vec![Action::Open(path.clone())];
                 } else if inside(self.areas.omemo_button) {
                     return self.toggle_omemo();
+                } else if inside(self.areas.mute_button) {
+                    return self.set_muted(!self.current().is_some_and(|c| c.muted));
                 } else if inside(self.areas.attach_button) {
                     // The path is typed (Tab helps), or a file dropped on the terminal.
                     self.input = "/upload ".into();
@@ -5001,7 +5053,7 @@ mod tests {
 
     #[test]
     fn a_rooms_echo_makes_ones_message_reactable_and_upload_keeps_its_state() {
-        for gateway in [false, true] {
+        for (gateway, no_key) in [(false, false), (true, false), (false, true)] {
             let mut app = app();
             let me = jid("me@example.org");
             let peer = jid("team@muc.example.org");
@@ -5015,10 +5067,10 @@ mod tests {
                 nick: Some("me".into()),
                 device: None,
                 direction: Direction::Outgoing,
-                encrypted: false,
-                text: Some("https://example.org/cat.png".into()),
+                encrypted: no_key,
+                text: (!no_key).then(|| "https://example.org/cat.png".into()),
                 at: None,
-                not_for_this_device: false,
+                not_for_this_device: no_key,
                 id: Some(if gateway { "gateway-id".into() } else { id.clone() }),
                 markable: false,
                 archive_id: Some("room-id".into()),
@@ -5085,6 +5137,75 @@ mod tests {
             !app.chats[room].older_done,
             "the rest is to be had by scrolling up"
         );
+    }
+
+    #[test]
+    fn mute_silences_every_signal_but_keeps_messages_and_is_scoped_to_the_account() {
+        for peer in [
+            "bob@example.org",
+            "team@muc.example.org",
+            "#chat%irc.example.org@irc.example.org",
+        ] {
+            let mut app = app();
+            let me = jid("me@example.org");
+            let other = jid("other@example.org");
+            let peer = jid(peer);
+            let room = peer.as_str() != "bob@example.org";
+            let kind = if room {
+                ChatKind::Room { nick: "me".into() }
+            } else {
+                ChatKind::Direct
+            };
+            let index = app.chat(&me, &peer, kind.clone());
+            let elsewhere = app.chat(&other, &peer, kind);
+            app.select(index);
+            app.focused = false;
+            let message = Incoming {
+                peer: peer.clone(),
+                sender: jid("bob@example.org"),
+                nick: room.then(|| "bob".into()),
+                device: None,
+                direction: Direction::Incoming,
+                encrypted: false,
+                text: Some("me, hello".into()),
+                at: None,
+                not_for_this_device: false,
+                id: Some("m1".into()),
+                markable: false,
+                archive_id: Some("a1".into()),
+                untrusted: false,
+                reply_to: None,
+                replaces: None,
+                shared_file: false,
+            };
+            let normal = app.alert_for(&me, &message);
+            assert!(normal.sound && normal.desktop && normal.bell);
+            let actions = type_text(&mut app, "/mute");
+            assert!(matches!(&actions[..], [Action::SetMuted { muted: true, .. }]));
+            assert_eq!(app.alert_for(&me, &message), Default::default());
+            assert!(!app.chats[elsewhere].muted);
+            assert_eq!(app.alert_for(&other, &message), normal);
+            app.on_incoming(&me, &message, 100);
+            assert_eq!(app.chats[index].unread, 1);
+            assert_eq!(app.chats[index].lines.last().unwrap().text, "me, hello");
+            // Closing and recreating a chat must not clear its mute.
+            app.remove_chat(index);
+            assert_eq!(app.alert_for(&me, &message), Default::default());
+            let index = app.chat(
+                &me,
+                &peer,
+                if room {
+                    ChatKind::Room { nick: "me".into() }
+                } else {
+                    ChatKind::Direct
+                },
+            );
+            assert!(app.chats[index].muted);
+            app.select(index);
+            type_text(&mut app, "/unmute");
+            assert!(!app.chats[index].muted);
+            assert_eq!(app.alert_for(&me, &message), normal);
+        }
     }
 
     #[test]

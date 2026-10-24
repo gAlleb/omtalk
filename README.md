@@ -264,6 +264,13 @@ sound and notifications. The terminal reports focus by itself (foot, kitty, Alac
 tmux this needs `set -g focus-events on`, and without it omtalk treats the window as always
 active.
 
+`/mute` silences every notification from the open chat; `/unmute` restores them.
+Clicking the bell beside the input's paperclip does the same. Direct chats, XMPP rooms
+and IRC channels through biboumi work alike: no sound, desktop notification or terminal
+bell, even for mentions. A mark in the chat list shows muted chats (`[muted]` with text
+icons). Messages and unread counts continue. Mutes survive a restart and are local to
+this omtalk.
+
 ## Typing
 
 "Typing…" (XEP-0085): while the contact types, the bottom of the conversation shows

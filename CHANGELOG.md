@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Mute any chat** with `/mute`, restore it with `/unmute`, or click the bell beside the input's paperclip. Direct chats, XMPP rooms and IRC channels through biboumi all work alike: no sound, desktop notification or terminal bell, even for mentions. The chat list marks muted chats; messages and unread counts continue, and the choice survives a restart.
+- **Reactions to your own encrypted room messages work too**: their echoed copy has no key for the sending device, so its room-assigned id is now taken before skipping its unreadable body. That id is also kept in the history instead of lost on a duplicate save.
+
 - **Your messages in a room can be reacted to once echoed back**: their room-assigned id is retained, including when an upload finishes after the echo.
 
 - **Reactions show under pictures and files too**, before and after download, in both layouts; they were sent correctly but missing from the attachment rows.

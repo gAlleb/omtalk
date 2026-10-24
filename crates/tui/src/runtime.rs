@@ -519,6 +519,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             app.omemo_choice.insert((account, chat), on == "1");
         }
     }
+    restore_mutes(&store, &mut app);
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
     app.send_typing = ui.typing;
@@ -696,6 +697,16 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         for action in actions {
             if action == Action::Quit {
                 break;
+            }
+            if let Action::SetMuted { account, chat, muted } = &action {
+                // Write in action order, before quit or another toggle can overtake it.
+                if let Err(problem) = save_mute(&shared.store, account, chat, *muted) {
+                    app.status = trf!(
+                        "mute setting was not saved: {problem}",
+                        "мьют не сохранился: {problem}"
+                    );
+                }
+                continue;
             }
             if let Action::Setting { section, key, value } = action {
                 // What the runtime itself keeps is used from now on; the file is written aside.
@@ -1471,6 +1482,15 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
 /// Keeps a message in the store (a correction in the message it corrects); when it was.
 fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
     let at = message.at.unwrap_or_else(now);
+    if let (Some(id), Some(archive_id)) = (&message.id, &message.archive_id) {
+        let _ = shared.store.set_archive_id(
+            account,
+            &message.peer,
+            id,
+            message.direction == Direction::Outgoing,
+            archive_id,
+        );
+    }
     // The device wrote: when, for the keys window ("писало вчера 14:05").
     if let Some(device) = message.device
         && message.text.is_some()
@@ -2198,7 +2218,7 @@ async fn perform(action: Action, shared: Shared) {
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
     match action {
         // Written by the loop, which keeps what the runtime uses.
-        Action::Setting { .. } => {}
+        Action::Setting { .. } | Action::SetMuted { .. } => {}
         Action::Send {
             account,
             to,
@@ -2230,6 +2250,24 @@ async fn perform(action: Action, shared: Shared) {
                 })
             };
             if encrypted {
+                // This device's room echo has no decryptable body. Keep its known text
+                // before sending, so that echo can attach the room id even before ACK.
+                if room {
+                    save_own(
+                        &shared,
+                        &account,
+                        &to,
+                        &text,
+                        &id,
+                        Own {
+                            encrypted: true,
+                            delivery: None,
+                            shared_file: false,
+                            reply_to: reply_to.clone(),
+                            replaces: replace.clone(),
+                        },
+                    );
+                }
                 let sent = if room {
                     omemo.send_group_with(&to, &text, &id, extra).await
                 } else {
@@ -2706,6 +2744,22 @@ async fn perform(action: Action, shared: Shared) {
                 let _ = tokio::fs::copy(&path, &cached).await;
             }
             fetch_if_media(&link, true, &shared);
+            if encrypted && room {
+                save_own(
+                    &shared,
+                    &account,
+                    &to,
+                    &link,
+                    &id,
+                    Own {
+                        encrypted: true,
+                        delivery: None,
+                        shared_file: true,
+                        reply_to: None,
+                        replaces: None,
+                    },
+                );
+            }
             let sent = if encrypted {
                 let report = if room {
                     omemo.send_group_with_id(&to, &link, &id).await
@@ -3241,6 +3295,29 @@ fn folded_from_kept(kept: &str) -> std::collections::BTreeSet<crate::app::Group>
         .collect()
 }
 
+/// Local notification mutes, by "account/chat".
+const KEPT_MUTED: &str = "muted/";
+
+fn save_mute(
+    store: &Store,
+    account: &BareJid,
+    chat: &BareJid,
+    muted: bool,
+) -> Result<(), omtalk_store::Error> {
+    store.keep(&format!("{KEPT_MUTED}{account}/{chat}"), muted.then_some("1"))
+}
+
+fn restore_mutes(store: &Store, app: &mut App) {
+    for (key, value) in store.kept_under(KEPT_MUTED).unwrap_or_default() {
+        if value == "1"
+            && let Some((account, chat)) = key.split_once('/')
+            && let (Ok(account), Ok(chat)) = (account.parse::<BareJid>(), chat.parse::<BareJid>())
+        {
+            app.muted_chats.insert((account, chat));
+        }
+    }
+}
+
 /// Where a chat's OMEMO on or off is kept: this, then "account/chat".
 const KEPT_OMEMO: &str = "omemo/";
 
@@ -3440,6 +3517,29 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chat_mutes_survive_a_restart_and_unmute_removes_the_saved_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omtalk.db");
+        let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
+        let peer: omtalk_xmpp::BareJid = "team@muc.example.org".parse().unwrap();
+        {
+            let store = omtalk_store::Store::open(&path).unwrap();
+            super::save_mute(&store, &me, &peer, true).unwrap();
+        }
+        let store = omtalk_store::Store::open(&path).unwrap();
+        let mut app = crate::app::App::new(vec![me.clone()], crate::config::Modifier::Ctrl, 26, 30);
+        super::restore_mutes(&store, &mut app);
+        let index = app.chat(&me, &peer, crate::app::ChatKind::Room { nick: "me".into() });
+        assert!(app.chats[index].muted);
+        super::save_mute(&store, &me, &peer, false).unwrap();
+        drop(store);
+        let store = omtalk_store::Store::open(&path).unwrap();
+        let mut app = crate::app::App::new(vec![me], crate::config::Modifier::Ctrl, 26, 30);
+        super::restore_mutes(&store, &mut app);
+        assert!(app.muted_chats.is_empty());
+    }
+
     #[test]
     fn folded_groups_are_kept_and_read_back() {
         use crate::app::Group;

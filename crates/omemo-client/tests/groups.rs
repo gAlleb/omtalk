@@ -46,6 +46,19 @@ async fn members_on_all_their_devices_read_group_messages() {
 
     let report = alice_phone.omemo.send_group(&room, "всем привет").await.unwrap();
     assert!(report.failed.is_empty(), "{:?}", report.failed);
+    // The sending device is intentionally not a recipient of its own OMEMO payload.
+    // Its echo still carries both IDs: the TUI must attach the room ID before trying
+    // to read a body, otherwise reactions to one's own messages are impossible.
+    let own_echo = alice_phone
+        .next_where(|m| m.peer == room && m.direction == Direction::Outgoing)
+        .await;
+    assert!(
+        !own_echo.not_for_this_device,
+        "an own echo is metadata, not an unreadable old message"
+    );
+    assert!(own_echo.text.is_none());
+    assert!(own_echo.id.is_some());
+    assert!(own_echo.archive_id.is_some());
     let dave_device = (dave.jid.clone(), dave.omemo.device_id());
     assert!(
         report.devices.contains(&dave_device),
