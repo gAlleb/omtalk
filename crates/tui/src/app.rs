@@ -185,6 +185,9 @@ pub struct Chat {
     pub occupants: BTreeMap<String, Option<BareJid>>,
     /// Their status where it is not plain online: away, do not disturb…
     pub occupant_status: BTreeMap<String, omtalk_xmpp::presence::OwnStatus>,
+    /// Their standing in the room, as IRC marks it: ~ owner, @ admin (an IRC op through
+    /// biboumi), % moderator, + member (voiced). None for the rest.
+    pub occupant_mark: BTreeMap<String, &'static str>,
     /// A room's members (owners, admins, members), present or not; read when it opens.
     pub members: Vec<BareJid>,
     /// A room's own name, if it has one.
@@ -204,7 +207,39 @@ pub struct Chat {
     pub read_mark_here: bool,
 }
 
+/// The marks of standing, highest first.
+const MARKS: [&str; 4] = ["~", "@", "%", "+"];
+
+/// How a room's affiliation and role read in IRC's terms; biboumi passes IRC's modes so
+/// (op as admin, halfop as moderator, voice as member).
+pub fn standing_mark(
+    affiliation: &omtalk_xmpp::Affiliation,
+    role: &omtalk_xmpp::Role,
+) -> Option<&'static str> {
+    use omtalk_xmpp::{Affiliation, Role};
+    match (affiliation, role) {
+        (Affiliation::Owner, _) => Some("~"),
+        (Affiliation::Admin, _) => Some("@"),
+        (_, Role::Moderator) => Some("%"),
+        (Affiliation::Member, _) => Some("+"),
+        _ => None,
+    }
+}
+
 impl Chat {
+    /// The nicks here, those with standing first (owners, admins, moderators, members),
+    /// each group by name.
+    pub fn occupants_ranked(&self) -> Vec<&String> {
+        let mut nicks: Vec<&String> = self.occupants.keys().collect();
+        nicks.sort_by_key(|nick| {
+            self.occupant_mark
+                .get(*nick)
+                .and_then(|m| MARKS.iter().position(|x| x == m))
+                .unwrap_or(MARKS.len())
+        });
+        nicks
+    }
+
     pub fn new(account: BareJid, jid: BareJid, kind: ChatKind) -> Self {
         Self {
             account,
@@ -221,6 +256,7 @@ impl Chat {
             new_since: None,
             occupants: BTreeMap::new(),
             occupant_status: BTreeMap::new(),
+            occupant_mark: BTreeMap::new(),
             members: Vec::new(),
             name: None,
             topic: None,
@@ -1343,6 +1379,9 @@ impl App {
         if let Some(status) = chat.occupant_status.remove(old) {
             chat.occupant_status.insert(new.to_owned(), status);
         }
+        if let Some(mark) = chat.occupant_mark.remove(old) {
+            chat.occupant_mark.insert(new.to_owned(), mark);
+        }
         let own = matches!(&chat.kind, ChatKind::Room { nick } if nick == old);
         if own {
             chat.kind = ChatKind::Room { nick: new.to_owned() };
@@ -2107,7 +2146,11 @@ impl App {
         let Some(index) = self.selected.filter(|&i| self.chats[i].is_room()) else {
             return Vec::new();
         };
-        let here = self.chats[index].occupants.keys().cloned().map(Person::Here);
+        let here = self.chats[index]
+            .occupants_ranked()
+            .into_iter()
+            .cloned()
+            .map(Person::Here);
         here.chain(self.away_members(index).into_iter().map(Person::Away))
             .collect()
     }

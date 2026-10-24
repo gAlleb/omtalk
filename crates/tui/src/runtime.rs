@@ -247,6 +247,8 @@ enum Msg {
         new_nick: Option<String>,
         /// Their status, as the room passes it on.
         status: omtalk_xmpp::presence::OwnStatus,
+        /// Their standing there, as IRC marks it.
+        mark: Option<&'static str>,
     },
     /// A shared file was fetched (or not).
     Media {
@@ -1160,6 +1162,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             present,
             new_nick,
             status,
+            mark,
         } => {
             // A nick changed: the same person, a new name, said in the room.
             if let Some(new) = new_nick
@@ -1189,9 +1192,14 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     } else {
                         chat.occupant_status.insert(nick.clone(), status);
                     }
+                    match mark {
+                        Some(mark) => chat.occupant_mark.insert(nick.clone(), mark),
+                        None => chat.occupant_mark.remove(&nick),
+                    };
                     chat.occupants.insert(nick, real);
                 } else {
                     chat.occupant_status.remove(&nick);
+                    chat.occupant_mark.remove(&nick);
                     chat.occupants.remove(&nick);
                 }
             }
@@ -1430,6 +1438,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         real: occupant.real_jid,
                         present: occupant.present,
                         new_nick: occupant.new_nick,
+                        mark: crate::app::standing_mark(&occupant.affiliation, &occupant.role),
                         status: occupant.status,
                     });
                 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A room's participants show their standing**, as IRC clients mark it: `~` owner, `@` admin (an IRC op through biboumi), `%` moderator (halfop), `+` member (voice); they are listed first, in that order. In the right pane only, not in the chat.
+
 ## 0.1.6 — 2026-10-24
 
 What is read and what is delivered is now the same in omtalk, Gajim and Monal, after a restart too.

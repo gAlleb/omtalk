@@ -1718,7 +1718,8 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
             rows.push(TextLine::default());
             // The participant picked with the keys, counted as the pane lists them.
             let mut person = 0;
-            for (nick, real) in &chat.occupants {
+            for nick in chat.occupants_ranked() {
+                let real = &chat.occupants[nick];
                 let y = inner.y + rows.len() as u16;
                 nicks.push((Rect::new(inner.x, y, inner.width, 1), nick.clone()));
                 let picked = picking && person == app.people_cursor;
@@ -1733,10 +1734,12 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 } else {
                     theme::ok()
                 };
-                let mut spans = vec![
-                    Span::styled("● ", Style::default().fg(dot)),
-                    Span::styled(nick.clone(), theme::nick(nick)),
-                ];
+                let mut spans = vec![Span::styled("● ", Style::default().fg(dot))];
+                // Op, voice and the like, as IRC clients mark them.
+                if let Some(mark) = chat.occupant_mark.get(nick) {
+                    spans.push(Span::styled(*mark, Style::default().fg(theme::accent())));
+                }
+                spans.push(Span::styled(nick.clone(), theme::nick(nick)));
                 if let Some(real) = real
                     && real.node().is_some_and(|n| n.as_str() != nick)
                 {
@@ -3138,6 +3141,67 @@ mod tests {
         app.push(bob, line("привет", 1_700_000_000, true));
         app.push(bob, line("это без шифрования", 1_700_000_010, false));
         app
+    }
+
+    #[test]
+    fn a_rooms_ops_and_voiced_are_marked_and_listed_first() {
+        use omtalk_xmpp::{Affiliation, Role};
+        // As biboumi passes IRC's modes: op as admin, halfop as moderator, voice as member.
+        let mark = crate::app::standing_mark;
+        assert_eq!(mark(&Affiliation::Owner, &Role::Moderator), Some("~"));
+        assert_eq!(mark(&Affiliation::Admin, &Role::Moderator), Some("@"));
+        assert_eq!(mark(&Affiliation::Member, &Role::Moderator), Some("%"));
+        assert_eq!(mark(&Affiliation::Member, &Role::Participant), Some("+"));
+        assert_eq!(mark(&Affiliation::None, &Role::Participant), None);
+
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 34);
+        let room = app.chat(
+            &me,
+            &jid("#rust%irc.libera.chat@irc.home.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        let chat = &mut app.chats[room];
+        for (nick, standing) in [
+            ("anna", None),
+            ("zed", None),
+            ("voiced", Some("+")),
+            ("half", Some("%")),
+            ("op", Some("@")),
+            ("boss", Some("~")),
+        ] {
+            chat.occupants.insert(nick.into(), None);
+            if let Some(standing) = standing {
+                chat.occupant_mark.insert(nick.into(), standing);
+            }
+        }
+        let text = screen(&mut app, 120, 30);
+        let order: Vec<usize> = ["● ~boss", "● @op", "● %half", "● +voiced", "● anna", "● zed"]
+            .iter()
+            .map(|row| text.find(row).unwrap_or_else(|| panic!("{row}\n{text}")))
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
+        // Picked with the keys in the same order as shown.
+        assert!(
+            matches!(&app.room_people()[..2], [crate::app::Person::Here(a), crate::app::Person::Here(b)] if a == "boss" && b == "op")
+        );
+        // Not in the chat itself.
+        app.push(
+            room,
+            Line::message(1_700_000_000, "op".into(), "привет".into(), false, false),
+        );
+        let clock = Local
+            .timestamp_opt(1_700_000_000, 0)
+            .single()
+            .unwrap()
+            .format("%H:%M")
+            .to_string();
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains(&format!("op  {clock}")) && !text.contains(&format!("@op  {clock}")),
+            "only on the right\n{text}"
+        );
     }
 
     #[test]
