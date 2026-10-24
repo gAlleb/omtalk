@@ -1370,10 +1370,11 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                     marks,
                 });
             }
-            // The name someone gave themselves (XEP-0172).
+            // The name someone gave themselves (XEP-0172); one's own too, which one's
+            // messages in direct chats go by.
             Event::Pep {
                 from, node, items, ..
-            } if node == omtalk_xmpp::nick::NODE && *from != account => {
+            } if node == omtalk_xmpp::nick::NODE => {
                 if let Some(nick) = omtalk_xmpp::nick::of(items) {
                     tell(Msg::Nickname {
                         account: account.clone(),
@@ -1620,6 +1621,21 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             chat: None,
             text: format!("OMEMO: {e}"),
         }),
+    }
+    // One's own name (XEP-0172), which one's messages in direct chats go by; none
+    // published is none.
+    match xmpp.items(&account, omtalk_xmpp::nick::NODE).await {
+        Ok(items) => tell(Msg::Nickname {
+            account: account.clone(),
+            jid: account.clone(),
+            nick: omtalk_xmpp::nick::of(&items).flatten(),
+        }),
+        Err(omtalk_xmpp::Error::Stanza(_)) => tell(Msg::Nickname {
+            account: account.clone(),
+            jid: account.clone(),
+            nick: None,
+        }),
+        Err(_) => {}
     }
     // The contacts' names, for the chats with them.
     if let Ok(contacts) = xmpp.roster().await {
@@ -2583,7 +2599,15 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::SetNickname { account, nick } => {
             let Some((xmpp, _)) = get(&account) else { return };
-            let text = match (xmpp.set_nickname(nick.as_deref()).await, &nick) {
+            let set = xmpp.set_nickname(nick.as_deref()).await;
+            if set.is_ok() {
+                tell(Msg::Nickname {
+                    account: account.clone(),
+                    jid: account.clone(),
+                    nick: nick.clone(),
+                });
+            }
+            let text = match (set, &nick) {
                 (Ok(()), Some(nick)) => trf!(
                     "your contacts now see you as {nick}",
                     "контакты теперь видят вас как {nick}"

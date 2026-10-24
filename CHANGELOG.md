@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **In a direct chat your messages go by the name you gave yourself** (`/nickname`, read from the server), else your address's name part, as Gajim has it; "me" stays only in the chat with yourself.
 - **In a room your messages go by your nick there**, from omtalk as from your other clients (Gajim, Monal), which the room names so; they were "me" from here and the nick from elsewhere. Those from your other clients get the ✓ too: the room sent them round, so they are in. As Gajim does.
 - **In a direct chat the contact writes under the name the chat list has for them** (the one in your roster, or the one they gave themselves), in the chat and in search results; it was the address's name part ("tanya" in the chat with "Mama").
 - **All three names can be set and taken away**: `/nickname Name` is the name you give yourself for everyone (XEP-0172), `/name Name` in a direct chat the name you give the contact (in your roster, for all your clients), `/nick` in a room your nick there. Each without a name takes it away; `/nick` alone goes back to the default nick.

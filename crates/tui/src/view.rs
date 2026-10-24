@@ -498,6 +498,16 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 icons.plain_mark = icons.plain_mark_open_chat;
             }
             let peer = (chat.kind == ChatKind::Direct).then(|| chat.title());
+            let own_name = match &chat.kind {
+                ChatKind::Room { nick } if !nick.is_empty() => Some(nick.clone()),
+                ChatKind::Direct if chat.jid != chat.account => Some(
+                    app.nicknames
+                        .get(&(chat.account.clone(), chat.account.clone()))
+                        .cloned()
+                        .unwrap_or_else(|| own.clone()),
+                ),
+                _ => None,
+            };
             let mut rows = message_rows(
                 &chat.lines,
                 width,
@@ -508,10 +518,8 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     compact: app.compact,
                     new_since: chat.new_since,
                     peer: peer.as_deref(),
-                    own_nick: match &chat.kind {
-                        ChatKind::Room { nick } if !nick.is_empty() => Some(nick.as_str()),
-                        _ => None,
-                    },
+                    own_name: own_name.as_deref(),
+                    room: chat.is_room(),
                 },
             );
             // Above the oldest message, while older ones may be had: a click (or
@@ -977,9 +985,12 @@ pub struct Look<'a> {
     pub new_since: Option<i64>,
     /// A direct chat's other side, by the chat list's name.
     pub peer: Option<&'a str>,
-    /// In a room, one's own nick there: one's messages from here go by it too, as those
-    /// from one's other clients do (the room names them so).
-    pub own_nick: Option<&'a str>,
+    /// What one's own messages go by, as in Gajim: in a room one's nick there (those
+    /// from one's other clients come so), in a direct chat the name one gave oneself
+    /// (XEP-0172) or the address's name part. `None` keeps "me" (the chat with oneself).
+    pub own_name: Option<&'a str>,
+    /// A room: one's messages there are in once the room sends them round.
+    pub room: bool,
 }
 
 pub fn message_rows(
@@ -994,14 +1005,15 @@ pub fn message_rows(
         compact,
         new_since,
         peer,
-        own_nick,
+        own_name,
+        room,
     } = look;
     // In a direct chat the other side goes by the name the chat list has for them (the
     // roster's, the one they gave themselves), not by what the message came with.
-    let shown = |l: &Line| match (peer, own_nick) {
+    let shown = |l: &Line| match (peer, own_name) {
         (Some(peer), _) if !l.outgoing => peer.to_owned(),
-        // Sent from here, "me": in a room, the nick everyone there sees.
-        (_, Some(nick)) if l.outgoing && ["me", "я"].contains(&l.who.as_str()) => nick.to_owned(),
+        // One's own, "me" when kept: by the name others see.
+        (_, Some(name)) if l.outgoing && ["me", "я"].contains(&l.who.as_str()) => name.to_owned(),
         _ => l.who.clone(),
     };
     let mut new_line = new_since;
@@ -1159,7 +1171,7 @@ pub fn message_rows(
                         line: None,
                     });
                 }
-                push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, true);
+                push_delivery(&mut rows, line, room, body_width, gutter, true);
                 continue;
             }
             let (icon, state, colour) = match &slot.state {
@@ -1205,7 +1217,7 @@ pub fn message_rows(
                 fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
                 line: None,
             });
-            push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, false);
+            push_delivery(&mut rows, line, room, body_width, gutter, false);
             continue;
         }
         let mut first = true;
@@ -1251,7 +1263,7 @@ pub fn message_rows(
                 rows.push(TextLine::from(spans).into());
                 first = false;
             }
-            push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, false);
+            push_delivery(&mut rows, line, room, body_width, gutter, false);
             continue;
         }
         // A reply: whom it answers, if that message is here, then its quote as a block.
@@ -1350,7 +1362,7 @@ pub fn message_rows(
                 first = false;
             }
         }
-        push_delivery(&mut rows, line, own_nick.is_some(), body_width, gutter, false);
+        push_delivery(&mut rows, line, room, body_width, gutter, false);
         // Reactions (XEP-0444), each with how many sent it, in the order they came.
         if !line.reactions.is_empty() {
             let mut counts: Vec<(&str, usize)> = Vec::new();
@@ -3226,14 +3238,33 @@ mod tests {
         assert!(!chat.contains("я  "), "{text}");
         // Both marked as in the room, the one from Monal too.
         assert!(chat.contains("из Monal ✓"), "{text}");
-        // A direct chat keeps "я".
+    }
+
+    #[test]
+    fn in_a_direct_chat_ones_messages_go_by_ones_nickname_or_address_as_in_gajim() {
+        let me = jid("s@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let at = 1_700_000_000;
+        let clock = Local
+            .timestamp_opt(at, 0)
+            .single()
+            .unwrap()
+            .format("%H:%M")
+            .to_string();
         let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
         app.select(bob);
-        app.push(
-            bob,
-            Line::message(1_700_000_000, "я".into(), "привет".into(), true, true),
-        );
-        assert!(screen(&mut app, 120, 20).contains("я  "));
+        app.push(bob, Line::message(at, "я".into(), "привет".into(), true, true));
+        // No name of one's own: the address's name part.
+        assert!(screen(&mut app, 120, 20).contains(&format!("s  {clock}")));
+        // The name one gave oneself (/nickname), from the server.
+        app.nickname(&me, &me, Some("Стёпочка".into()));
+        assert!(screen(&mut app, 120, 20).contains(&format!("Стёпочка  {clock}")));
+        // The chat with oneself: "я".
+        let notes = app.chat(&me, &me, ChatKind::Direct);
+        app.select(notes);
+        app.push(notes, Line::message(at, "я".into(), "заметка".into(), true, true));
+        let text = screen(&mut app, 120, 20);
+        assert!(text.contains(&format!("я  {clock}")), "{text}");
     }
 
     #[test]
@@ -3413,7 +3444,7 @@ mod tests {
         assert!(text.contains(&format!("{}ещё", " ".repeat(11))), "{text}");
         // Names in one column: the short one is moved right.
         assert!(
-            text.contains(&format!("{}   я  и тебе ✓", clock(at + 20))),
+            text.contains(&format!("{}  me  и тебе ✓", clock(at + 20))),
             "{text}"
         );
         assert!(
