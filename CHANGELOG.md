@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Unencrypted messages and pictures sent to yourself merge with their own echo instead of appearing twice; live delivery now agrees with archive history about their outgoing direction.
 - Loaded pictures retain the unencrypted mark, for both sent and received attachments in both layouts.
 - An offline message received again from MAM is shown and counted once. This fixes duplicate unencrypted pictures on login; sending the same picture again remains a separate message.
 - Optional image-link previews: enable “Preview image links” in `/settings` or `[ui] image_links = true`. Standalone HTTPS image links appear inline, including in local history, and follow `auto_download`. Off by default; uploaded attachments are unaffected.

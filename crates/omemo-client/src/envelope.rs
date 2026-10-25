@@ -73,11 +73,18 @@ pub(crate) fn open(own: &BareJid, mut message: Message) -> Option<Envelope> {
     }
 
     let sender = message.from.as_ref()?.to_bare();
+    // A direct message sent to oneself is reflected from the own full JID. It is
+    // still outgoing, just like its MAM copy and a sent carbon from another device.
+    let direction = if &sender == own {
+        Direction::Outgoing
+    } else {
+        Direction::Incoming
+    };
     content_of(message).map(|(content, meta)| Envelope {
         peer: sender.clone(),
         sender,
         nick: None,
-        direction: Direction::Incoming,
+        direction,
         content,
         meta,
     })
@@ -259,6 +266,34 @@ pub(crate) fn archive_id(archive: &BareJid, message: &Message) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_chat_live_and_archived_copies_have_the_same_outgoing_direction() {
+        for file in [false, true] {
+            let mut message = Message::chat(Some(own().into()))
+                .with_body(Lang::default(), "https://upload.example.org/cat.png".into());
+            message.from = Some("me@example.org/phone".parse().unwrap());
+            omtalk_xmpp::receipts::mark_outgoing(&mut message, "self-message");
+            if file {
+                message.payloads.push(
+                    Element::builder("x", "jabber:x:oob")
+                        .append(
+                            Element::builder("url", "jabber:x:oob")
+                                .append("https://upload.example.org/cat.png")
+                                .build(),
+                        )
+                        .build(),
+                );
+            }
+            let live = open(&own(), message.clone()).unwrap();
+            let archived = open_archived(&own(), message).unwrap();
+            assert_eq!(live.direction, Direction::Outgoing);
+            assert_eq!(live.direction, archived.direction);
+            assert_eq!(live.peer, own());
+            assert_eq!(live.meta.id.as_deref(), Some("self-message"));
+            assert_eq!(live.meta.shared_file, file);
+        }
+    }
 
     #[test]
     fn a_link_is_a_shared_file_only_where_out_of_band_data_names_it() {

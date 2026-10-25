@@ -3698,6 +3698,170 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "insecure-tcp")]
+    async fn login_plain(
+        user: &str,
+    ) -> (
+        super::Accounts,
+        tokio::sync::mpsc::UnboundedReceiver<super::AccountEvent>,
+        super::Account,
+    ) {
+        use super::*;
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let mut cfg = AccountConfig::new(format!("{user}@localhost").parse().unwrap(), "test");
+        cfg.server = Server::Plaintext {
+            addr: "127.0.0.1:15222".into(),
+        };
+        let (mut accounts, mut events) = Accounts::new();
+        let account = accounts.add(cfg).await;
+        timeout(Duration::from_secs(10), async {
+            while !matches!(events.recv().await.unwrap().event, Event::Online { .. }) {}
+        })
+        .await
+        .expect("local Prosody online");
+        (accounts, events, account)
+    }
+
+    #[cfg(feature = "insecure-tcp")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plain_messages_to_self_echo_into_the_original_line_and_history() {
+        use super::*;
+        use crate::config::Modifier;
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let (_accounts, mut events, account) = login_plain("u76").await;
+        let me = account.jid().clone();
+        let omemo = Omemo::new(
+            account.clone(),
+            omtalk_omemo::State::new(OwnKeys::generate(0).unwrap()),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("history.db")).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &me, ChatKind::Direct);
+        app.select(chat);
+        let unique = receipts::new_id();
+        let mut received = Vec::new();
+        for picture in [false, true] {
+            let id = receipts::new_id();
+            let text = if picture {
+                format!("https://upload.example.org/{unique}.png")
+            } else {
+                format!("note to self {unique}")
+            };
+            app.sending(chat, &text, false, &id, now());
+            if picture {
+                app.uploaded(&me, &id, &text);
+            }
+            save_own(
+                &shared,
+                &me,
+                &me,
+                &text,
+                &id,
+                Own {
+                    encrypted: false,
+                    delivery: Some(omtalk_store::Delivery::Sent),
+                    shared_file: picture,
+                    reply_to: None,
+                    replaces: None,
+                },
+            );
+            let mut sent = Message::chat(Some(me.clone().into())).with_body(Lang::default(), text.clone());
+            receipts::mark_outgoing(&mut sent, &id);
+            if picture {
+                sent.payloads.push(
+                    xmpp_parsers::minidom::Element::builder("x", "jabber:x:oob")
+                        .append(
+                            xmpp_parsers::minidom::Element::builder("url", "jabber:x:oob")
+                                .append(text.as_str())
+                                .build(),
+                        )
+                        .build(),
+                );
+            }
+            account.send(sent).await.unwrap();
+            let message = timeout(Duration::from_secs(10), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if let Some(message) = omemo.handle(&event.event).await.unwrap()
+                        && message.id.as_deref() == Some(id.as_str())
+                    {
+                        break message;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            eprintln!(
+                "self echo: {:?}, id={:?}, archive={:?}",
+                message.direction, message.id, message.archive_id
+            );
+            received.push(message.clone());
+            let at = keep(&shared, &me, &message);
+            apply(
+                &mut app,
+                Msg::Incoming {
+                    account: me.clone(),
+                    message,
+                    at,
+                },
+                &shared,
+            );
+        }
+        let history = omemo.catch_up().await.unwrap();
+        account.stop().await;
+        assert_eq!(
+            app.chats[chat].lines.len(),
+            2,
+            "one text and one upload, each echoed only once"
+        );
+        assert_eq!(app.chats[chat].unread, 0, "self echoes cannot create unread");
+        assert!(
+            received
+                .iter()
+                .all(|m| m.direction == omtalk_omemo::Direction::Outgoing)
+        );
+        for message in history
+            .messages
+            .into_iter()
+            .filter(|m| m.text.as_ref().is_some_and(|t| t.contains(&unique)))
+        {
+            let at = keep(&shared, &me, &message);
+            apply(
+                &mut app,
+                Msg::Incoming {
+                    account: me.clone(),
+                    message,
+                    at,
+                },
+                &shared,
+            );
+        }
+        assert_eq!(app.chats[chat].lines.len(), 2, "archive copies must merge too");
+        assert!(app.chats[chat].lines.iter().all(|l| l.outgoing && !l.encrypted));
+        assert!(app.chats[chat].lines[1].media.is_some());
+        let mut restarted = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        load_history(&mut restarted, &store, &[me.clone()]);
+        let chat = restarted.chats.iter().find(|c| c.jid == me).unwrap();
+        assert_eq!(chat.lines.len(), 2);
+        assert!(chat.lines.iter().all(|l| l.outgoing));
+    }
+
     // Run with `cargo test -p omtalk --features insecure-tcp offline_plain_picture -- --nocapture`
     // against `mise run prosody`; no external upload service or real account is used.
     #[cfg(feature = "insecure-tcp")]
@@ -3707,23 +3871,9 @@ mod tests {
         use crate::config::Modifier;
         use std::time::Duration;
         use tokio::time::timeout;
-        async fn login(user: &str) -> (Accounts, mpsc::UnboundedReceiver<AccountEvent>, Account) {
-            let mut cfg = AccountConfig::new(format!("{user}@localhost").parse().unwrap(), "test");
-            cfg.server = Server::Plaintext {
-                addr: "127.0.0.1:15222".into(),
-            };
-            let (mut accounts, mut events) = Accounts::new();
-            let account = accounts.add(cfg).await;
-            timeout(Duration::from_secs(10), async {
-                while !matches!(events.recv().await.unwrap().event, Event::Online { .. }) {}
-            })
-            .await
-            .expect("local Prosody online");
-            (accounts, events, account)
-        }
-        let (_old, _, old) = login("u78").await;
+        let (_old, _, old) = login_plain("u78").await;
         old.stop().await;
-        let (_sender_accounts, _, sender) = login("u77").await;
+        let (_sender_accounts, _, sender) = login_plain("u77").await;
         let recipient: BareJid = "u78@localhost".parse().unwrap();
         let link = format!("https://upload.example.org/{}.png", receipts::new_id());
         let mut sent = Message::chat(Some(recipient.clone().into())).with_body(Lang::default(), link.clone());
@@ -3738,7 +3888,7 @@ mod tests {
         );
         receipts::mark_outgoing(&mut sent, &receipts::new_id());
         sender.send(sent).await.unwrap();
-        let (_receiver_accounts, mut events, receiver) = login("u78").await;
+        let (_receiver_accounts, mut events, receiver) = login_plain("u78").await;
         let omemo = Omemo::new(
             receiver.clone(),
             omtalk_omemo::State::new(OwnKeys::generate(0).unwrap()),
