@@ -406,6 +406,7 @@ struct Shared {
     viewer: String,
     /// Fetch shared files as they come; else on a click.
     auto_download: bool,
+    image_links: bool,
     /// Avatars are fetched (the settings window switches it).
     avatars: Arc<std::sync::atomic::AtomicBool>,
     /// Avatars being fetched now, by hash or by whose: one fetch each.
@@ -456,6 +457,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         cache: config::cache_dir().join("media"),
         viewer: options.config.ui.viewer.clone(),
         auto_download: options.config.ui.auto_download,
+        image_links: options.config.ui.image_links,
         avatars: Arc::new(options.config.ui.avatars.into()),
         avatar_loads: Arc::default(),
         store: store.clone(),
@@ -582,19 +584,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             }
         }
     }
-    // Shared files in the history: from the cache, or fetched again.
-    let mut urls: Vec<String> = app
-        .chats
-        .iter()
-        .flat_map(|c| c.lines.iter())
-        .filter_map(|l| l.media.as_ref().map(|m| m.link.clone()))
-        .collect();
-    urls.sort();
-    urls.dedup();
-    // As for a message coming: what is here shows, the rest is fetched only if files
-    // are fetched by themselves (auto_download).
-    for link in urls {
-        fetch_if_media(&link, true, &shared);
+    for chat in &mut app.chats {
+        prepare_media(&mut chat.lines, &shared);
     }
     tokio::spawn(pump(events, shared.clone()));
     // The chat open when omtalk was left, else the first account's server channel.
@@ -739,6 +730,12 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 // What the runtime itself keeps is used from now on; the file is written aside.
                 match (key, &value) {
                     ("auto_download", Written::Bool(on)) => shared.auto_download = *on,
+                    ("image_links", Written::Bool(on)) => {
+                        shared.image_links = *on;
+                        for chat in &mut app.chats {
+                            prepare_media(&mut chat.lines, &shared);
+                        }
+                    }
                     ("viewer", Written::Text(text)) => shared.viewer = text.clone(),
                     ("avatars", Written::Bool(on)) => {
                         shared.avatars.store(*on, std::sync::atomic::Ordering::Relaxed)
@@ -975,7 +972,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 tokio::spawn(perform(action, shared.clone()));
             }
         }
-        Msg::Restored { account, chat, lines } => {
+        Msg::Restored {
+            account,
+            chat,
+            mut lines,
+        } => {
+            prepare_media(&mut lines, shared);
             let index = app.chat(&account, &chat, ChatKind::Direct);
             let newer = std::mem::take(&mut app.chats[index].lines);
             app.chats[index].lines = lines;
@@ -1032,14 +1034,22 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             chat,
             lines,
             at,
-        } => app.jumped(&account, &chat, lines, at),
+        } => {
+            let mut lines = lines;
+            prepare_media(&mut lines, shared);
+            app.jumped(&account, &chat, lines, at);
+        }
         Msg::Older {
             account,
             chat,
             lines,
             before,
             done,
-        } => app.older(&account, &chat, lines, before, done),
+        } => {
+            let mut lines = lines;
+            prepare_media(&mut lines, shared);
+            app.older(&account, &chat, lines, before, done);
+        }
         Msg::RoomName { account, room, name } => {
             // Kept for the next start, which shows it before anything is asked.
             let _ = shared
@@ -3446,11 +3456,32 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, id: 
     );
 }
 
+/// History and preference changes use the same recognition/download policy as live messages.
+fn prepare_media(lines: &mut [Line], shared: &Shared) {
+    let mut links = Vec::new();
+    for line in lines {
+        line.set_image_links(shared.image_links);
+        if let Some(media) = &line.media {
+            links.push(media.link.clone());
+        }
+    }
+    links.sort();
+    links.dedup();
+    for link in links {
+        fetch_if_media(&link, true, shared);
+    }
+}
+
 fn fetch_if_media(text: &str, shared_file: bool, shared: &Shared) {
     let media = if shared_file {
         omtalk_media::Media::shared(text)
     } else {
-        omtalk_media::Media::from_text(text)
+        omtalk_media::Media::from_text(text).or_else(|| {
+            shared
+                .image_links
+                .then(|| omtalk_media::Media::image_link(text))
+                .flatten()
+        })
     };
     let Some(media) = media else {
         return;
@@ -3594,6 +3625,79 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn image_link_history_respects_manual_downloads_and_uploaded_files() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: true,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: Store::open(&dir.path().join("history.db")).unwrap(),
+            tx,
+        };
+        let mut lines = vec![
+            Line::message(
+                1,
+                "bob".into(),
+                "https://example.org/cat.jpg".into(),
+                false,
+                false,
+            ),
+            Line::message(
+                2,
+                "bob".into(),
+                "https://example.org/report.pdf".into(),
+                false,
+                false,
+            ),
+            Line::message_sharing(
+                3,
+                "bob".into(),
+                "https://upload.example.org/photo.png".into(),
+                false,
+                false,
+                true,
+            ),
+        ];
+        prepare_media(&mut lines, &shared);
+        assert!(lines[0].media.is_some());
+        assert!(lines[1].media.is_none(), "arbitrary links must not become files");
+        let mut offered = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Msg::Media {
+                    url,
+                    state: MediaState::Offered,
+                } => offered.push(url),
+                _ => panic!("manual download must offer files without starting a fetch"),
+            }
+        }
+        assert_eq!(offered.len(), 2);
+        assert!(offered.contains(&"https://example.org/cat.jpg".into()));
+        assert!(offered.contains(&"https://upload.example.org/photo.png".into()));
+        shared.image_links = false;
+        prepare_media(&mut lines, &shared);
+        assert!(lines[0].media.is_none());
+        assert!(
+            lines[2].media.is_some(),
+            "uploads remain attachments with previews off"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(Msg::Media { url, state: MediaState::Offered }) if url == "https://upload.example.org/photo.png")
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "disabled ordinary links never start a download"
+        );
+    }
+
     // Run with `cargo test -p omtalk --features insecure-tcp offline_plain_picture -- --nocapture`
     // against `mise run prosody`; no external upload service or real account is used.
     #[cfg(feature = "insecure-tcp")]
@@ -3677,6 +3781,7 @@ mod tests {
             cache: dir.path().join("cache"),
             viewer: String::new(),
             auto_download: false,
+            image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
             store: store.clone(),
@@ -3794,6 +3899,7 @@ mod tests {
             cache: dir.path().join("cache"),
             viewer: String::new(),
             auto_download: false,
+            image_links: false,
             avatars: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
             store: store.clone(),

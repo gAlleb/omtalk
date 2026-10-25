@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Loaded pictures retain the unencrypted mark, for both sent and received attachments in both layouts.
+- An offline message received again from MAM is shown and counted once. This fixes duplicate unencrypted pictures on login; sending the same picture again remains a separate message.
+- Optional image-link previews: enable “Preview image links” in `/settings` or `[ui] image_links = true`. Standalone HTTPS image links appear inline, including in local history, and follow `auto_download`. Off by default; uploaded attachments are unaffected.
+
 ## 0.1.8 — 2026-10-25
 
 - **The cause of the startup read-mark timeout is fixed in the XMPP library.** An own-account IQ queued before login was tracked under no address; after login the server's successful reply was matched under the account address and discarded. The tracker now knows the account before any IQ can be queued. A regression test publishes before login to real local Prosody and verifies both acknowledgement and stored state.

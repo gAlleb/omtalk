@@ -186,6 +186,12 @@ to download. Cached files appear immediately. Clicking a file opens it with `vie
 (`xdg-open` by default). Pictures use Kitty graphics where available, with a character
 preview in Alacritty.
 
+Ordinary HTTPS image links can also be shown inline: enable “Preview image links”
+in `/settings`, or set `[ui] image_links = true`. Off by default. The message must
+contain only a link ending in `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, or `.bmp`.
+Previews also apply to local history; `auto_download = false` keeps downloads manual.
+This preference does not change the display of files sent as attachments.
+
 ### History and search
 
 Scroll above the oldest visible message, or click “↑ earlier”, to load 50 older
@@ -340,6 +346,7 @@ icons = "nerd"         # nerd (Nerd Font glyphs) or text
 left = 26              # width of the chat list
 right = 30             # width of the right pane
 viewer = "xdg-open"    # what opens a file you click
+image_links = false    # true: preview standalone HTTPS image links
 auto_download = true   # false: download received files only on a click
 mouse = true           # false: the mouse belongs to the terminal (tmux-style selection); prefix+m toggles
 read_markers = true    # false: the other side does not see that you read their messages

@@ -15,6 +15,7 @@
 //! left = 26             # width of the chat list
 //! right = 30            # width of the participants pane
 //! auto_download = true  # false: shared files wait for a click ("скачать")
+//! image_links = false   # true: preview standalone HTTPS image links
 //! avatars = false       # true: people's and rooms' pictures in the right pane
 //! compact = false       # true: time and name on the message's own line, not above it
 //! language = "en"       # the interface's language: en or ru
@@ -171,6 +172,8 @@ pub struct Ui {
     pub bell: bool,
     /// Fetch shared files and pictures as they come; `false`: on a click.
     pub auto_download: bool,
+    /// Show standalone HTTPS image links as pictures, even without an upload marker.
+    pub image_links: bool,
     /// Show people's and rooms' avatars (and fetch them).
     pub avatars: bool,
     /// Time and name on the first line of a message, as IRC clients have it, not on a
@@ -194,6 +197,7 @@ impl Default for Ui {
             typing: true,
             bell: true,
             auto_download: true,
+            image_links: false,
             avatars: false,
             compact: false,
             language: crate::lang::Language::English,

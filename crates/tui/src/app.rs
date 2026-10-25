@@ -76,6 +76,8 @@ pub struct Line {
     pub delivery: Option<Delivery>,
     /// A shared file the message is, if it is one.
     pub media: Option<MediaSlot>,
+    /// Explicit upload marker, kept apart from optional previews of ordinary links.
+    pub shared_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +102,31 @@ pub enum MediaState {
     Failed(String),
 }
 
+impl MediaSlot {
+    fn new(link: &str, media: omtalk_media::Media) -> Self {
+        Self {
+            url: media.url().to_owned(),
+            link: link.trim().to_owned(),
+            name: media.name(),
+            image: media.is_image(),
+            state: MediaState::Loading,
+        }
+    }
+}
+
 impl Line {
+    /// Changing preview preferences must not hide real uploads or reset loaded images.
+    pub fn set_image_links(&mut self, enabled: bool) {
+        if self.shared_file || omtalk_media::Media::from_text(&self.text).is_some() {
+            return;
+        }
+        if !enabled {
+            self.media = None;
+        } else if self.media.is_none() {
+            self.media = omtalk_media::Media::image_link(&self.text).map(|m| MediaSlot::new(&self.text, m));
+        }
+    }
+
     /// A message line, with its media slot filled in if the text is an encrypted file.
     pub fn message(at: i64, who: String, text: String, encrypted: bool, outgoing: bool) -> Self {
         Self::message_sharing(at, who, text, encrypted, outgoing, false)
@@ -121,13 +147,7 @@ impl Line {
         } else {
             omtalk_media::Media::from_text(&text)
         };
-        let media = media.map(|media| MediaSlot {
-            url: media.url().to_owned(),
-            link: text.trim().to_owned(),
-            name: media.name(),
-            image: media.is_image(),
-            state: MediaState::Loading,
-        });
+        let media = media.map(|media| MediaSlot::new(&text, media));
         Self {
             at,
             who,
@@ -142,6 +162,7 @@ impl Line {
             reply_to: None,
             archive_id: None,
             media,
+            shared_file,
             id: None,
             delivery: None,
         }
@@ -1540,6 +1561,7 @@ impl App {
     pub fn sending(&mut self, index: usize, text: &str, encrypted: bool, id: &str, at: i64) {
         let mut line = Line::message(at, tr!("me", "я").into(), text.to_owned(), encrypted, true);
         line.id = Some(id.to_owned());
+        line.set_image_links(self.config_ui.image_links);
         // Answered: what was new is read.
         self.chats[index].new_since = None;
         line.delivery = Some(Delivery::Sending);
@@ -1930,6 +1952,7 @@ impl App {
             message.direction == Direction::Outgoing,
             message.shared_file,
         );
+        line.set_image_links(self.config_ui.image_links);
         line.untrusted = message.untrusted;
         line.reply_to = message.reply_to.clone();
         line.archive_id = message.archive_id.clone();
@@ -2017,6 +2040,7 @@ impl App {
                     reply_to: None,
                     archive_id: None,
                     media: None,
+                    shared_file: false,
                     id: None,
                     delivery: None,
                 },
@@ -2829,6 +2853,7 @@ impl App {
                 // replace only the attachment's content, keeping its message state.
                 line.text = fresh.text;
                 line.media = fresh.media;
+                line.shared_file = true;
             }
         }
     }
@@ -3724,6 +3749,13 @@ impl App {
             }
             ("auto_download", Value::Bool(on)) => {
                 self.config_ui.auto_download = *on;
+                Ok(())
+            }
+            ("image_links", Value::Bool(on)) => {
+                self.config_ui.image_links = *on;
+                for line in self.chats.iter_mut().flat_map(|chat| &mut chat.lines) {
+                    line.set_image_links(*on);
+                }
                 Ok(())
             }
             ("language", value) => {
@@ -4730,6 +4762,75 @@ pub fn action_of(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_link_previews_are_optional_and_do_not_hide_real_uploads() {
+        use crate::settings::{Value, Written};
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.sending(bob, "https://example.org/cat.png", true, "link", 1);
+        assert!(
+            app.chats[bob].lines[0].media.is_none(),
+            "off by default, even in an encrypted message"
+        );
+        let mut upload = Line::message_sharing(
+            1,
+            "bob".into(),
+            "https://up.example.org/cat.png".into(),
+            false,
+            false,
+            true,
+        );
+        upload.media.as_mut().unwrap().state = MediaState::Ready("/cache/cat.png".into());
+        app.chats[bob].lines.push(upload);
+        app.open_settings();
+        let row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|s| s.key == "image_links")
+            .unwrap();
+        app.settings.as_mut().unwrap().rows[row].value = Value::Bool(true);
+        let actions = app.apply_setting(row);
+        assert!(app.config_ui.image_links);
+        assert!(app.chats[bob].lines[0].media.as_ref().unwrap().image);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for action in actions {
+            if let Action::Setting { section, key, value } = action {
+                assert_eq!(value, Written::Bool(true));
+                crate::settings::write(&path, section, key, &value).unwrap();
+            }
+        }
+        assert!(
+            crate::config::load(&path).unwrap().ui.image_links,
+            "preference survives restart"
+        );
+        // A new outgoing link is recognized immediately, and existing downloads stay ready.
+        app.sending(bob, "https://example.org/other.JPG", false, "other", 2);
+        assert!(app.chats[bob].lines.last().unwrap().media.is_some());
+        app.settings.as_mut().unwrap().rows[row].value = Value::Bool(false);
+        app.apply_setting(row);
+        assert!(app.chats[bob].lines[0].media.is_none());
+        assert!(app.chats[bob].lines.last().unwrap().media.is_none());
+        assert!(
+            matches!(
+                app.chats[bob].lines[1].media.as_ref().unwrap().state,
+                MediaState::Ready(_)
+            ),
+            "real uploads survive toggling previews"
+        );
+        let encrypted = format!("aesgcm://example.org/cat.png#{}", "ab".repeat(44));
+        let mut file = Line::message(1, "bob".into(), encrypted, true, false);
+        file.set_image_links(false);
+        assert!(
+            file.media.is_some(),
+            "encrypted files are independent of ordinary link previews"
+        );
+    }
+
     use super::*;
     use crossterm::event::KeyEventState;
 

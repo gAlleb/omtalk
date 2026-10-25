@@ -234,6 +234,12 @@ impl Settings {
             ),
             row(
                 "ui",
+                "image_links",
+                tr!("Preview image links", "Картинки по ссылкам"),
+                Value::Bool(ui.image_links),
+            ),
+            row(
+                "ui",
                 "viewer",
                 tr!("Open files with", "Чем открывать файлы"),
                 Value::Text(ui.viewer.clone()),

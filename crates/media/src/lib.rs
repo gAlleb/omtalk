@@ -49,6 +49,12 @@ impl Media {
         Self::parse(text)
     }
 
+    /// An ordinary HTTPS link whose file name identifies a supported image. Opt-in
+    /// previews use this, without turning arbitrary links into downloadable files.
+    pub fn image_link(text: &str) -> Option<Self> {
+        Self::parse(text).filter(|media| matches!(media, Self::Plain { .. }) && media.is_image())
+    }
+
     fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         if text.contains(char::is_whitespace) {
@@ -351,6 +357,24 @@ fn hex(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_previews_recognize_only_standalone_https_image_links() {
+        for ext in ["png", "jpg", "jpeg", "GIF", "WebP", "bmp"] {
+            let link = format!("https://example.org/picture.{ext}");
+            assert!(Media::image_link(&link).is_some(), "{link}");
+        }
+        for text in [
+            "https://example.org/file.pdf",
+            "https://example.org/page/",
+            "look https://example.org/cat.jpg",
+            "http://example.org/cat.png",
+            "https://example.org",
+            "not a URL",
+        ] {
+            assert!(Media::image_link(text).is_none(), "{text}");
+        }
+    }
 
     #[test]
     fn any_encrypted_file_is_a_file_and_a_plain_link_only_when_shared() {
