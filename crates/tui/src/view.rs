@@ -361,7 +361,7 @@ fn chat_row(
         lock.to_owned()
     };
     let lock = if chat.muted {
-        format!("{lock} {}", icons.muted)
+        format!("{lock} {} ", icons.muted)
     } else {
         lock
     };
@@ -6069,6 +6069,46 @@ mod tests {
             assert!(!app.chats[chat].muted);
             let text = screen(&mut app, 120, 30);
             assert!(!text.lines().nth(row.y as usize).unwrap().contains(icons.muted));
+        }
+    }
+
+    #[test]
+    fn mute_glyph_leaves_two_clear_cells_before_the_unread_badge() {
+        let mut chat = Chat::new(
+            jid("me@example.org"),
+            jid("#long-channel%irc.example.org@bridge.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        chat.omemo = false;
+        chat.muted = true;
+        chat.unread = 1;
+        for width in [18, 26] {
+            let backend = TestBackend::new(width, 1);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    f.render_widget(
+                        chat_row(&chat, false, width, theme::nerd(), "", false, false),
+                        f.area(),
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let bell = (0..width)
+                .find(|&x| buffer[(x, 0)].symbol() == theme::nerd().muted)
+                .unwrap();
+            let badge_digit = (0..width).find(|&x| buffer[(x, 0)].symbol() == "1").unwrap();
+            let badge_start = badge_digit - 1;
+            assert!(
+                badge_start >= bell + 3,
+                "the wide font glyph must not overlap the badge background"
+            );
+            assert_eq!(buffer[(badge_digit, 0)].fg, theme::accent());
+            assert!(
+                buffer[(badge_digit, 0)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            );
         }
     }
 
