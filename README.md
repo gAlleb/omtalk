@@ -2,49 +2,327 @@
 
 **English** · [Русский](README.ru.md)
 
-A terminal XMPP client with OMEMO that works in direct and group chats as reliably as
-Gajim.
+A terminal XMPP client for direct and group chats, with OMEMO encryption, multiple
+accounts, and keyboard and mouse controls.
+
+## Features
+
+- OMEMO in direct chats and private groups, with device fingerprints and trust management.
+- Multiple accounts, chat folders, room bookmarks, and IRC through a biboumi bridge.
+- Replies, edits, reactions with a list of who reacted, and message styling.
+- Encrypted file sharing, pictures, searchable local history, and server archive catch-up.
+- Read-state synchronization across devices, per-chat mute, and configurable notifications.
+- Terminal palette colours, optional avatars, and English and Russian interfaces.
+
+## Contents
+
+- [Install and first run](#install-and-first-run)
+- [Controls](#controls)
+- [Messaging](#messaging)
+- [Accounts and rooms](#accounts-and-rooms)
+- [Encryption and devices](#encryption-and-devices)
+- [Settings and notifications](#settings-and-notifications)
+- [Command reference](#command-reference)
+- [Development and testing](#development-and-testing)
+- [License](#license)
 
 ![A group chat in omtalk: folders on the left, a shared picture, the room's avatar and topic on the right](docs/screenshot-room.webp)
 
 ![A direct chat in omtalk: read ticks, a reaction, the contact's avatar and OMEMO keys](docs/screenshot-chat.webp)
 
-## Development setup
+## Install and first run
 
-Every tool version is pinned in the repository (`mise.toml`, `rust-toolchain.toml`,
-`tests/oracle/uv.lock`):
+### Linux binaries
+
+Download `omtalk-x86_64` or `omtalk-aarch64` for your architecture from
+[Releases](https://github.com/gAlleb/omtalk/releases). The binaries are static; no shared
+libraries are needed to start the client. For example, on x86_64:
 
 ```sh
-git clone https://github.com/gAlleb/omtalk.git && cd omtalk
-mise trust && mise install
-mise run test
+chmod +x omtalk-x86_64
+./omtalk-x86_64 you@example.org
 ```
 
-`mise run test` also starts a test Prosody in Docker (`tests/prosody`). It listens on
-`127.0.0.1:15222` only and starts with empty data every time. The accounts `alice`…`frank`
-and `u01`…`u60` `@localhost` all have the password `test`. `admin@localhost` is a server
-administrator, for testing ad-hoc commands. The upload service is `upload.localhost`, with
-HTTP on `127.0.0.1:15280`.
+Enter your account's password when prompted. Once connected, `/msg friend@example.org`
+opens a direct chat; `/join room@conference.example.org` joins a room. Type `/` for
+commands, or press Ctrl+X and release it for the shortcut menu.
 
-## Running
+A Nerd Font is used for icons by default; set `icons = "text"` in `[ui]` if your font
+does not have those glyphs. Clipboard, desktop notification and file-opening commands
+are described below.
 
-Binaries to hand out: `mise run dist` puts static `omtalk-x86_64` and `omtalk-aarch64`
-into `dist/`. They run on any Linux, with no libraries needed. ARM only (Raspberry Pi 4/5
-and the like): `mise run build-arm`. You get one static file,
-`target/aarch64-unknown-linux-musl/release/omtalk`, which runs on any aarch64 Linux with
-no libraries. The C compiler for this build is the zig from `mise.toml`; nothing is
-installed system-wide.
+### Saved accounts
+
+To start without an address, create `~/.config/omtalk/config.toml`:
+
+```toml
+[[account]]
+jid = "you@example.org"
+# password_command = "pass show xmpp/you"
+```
+
+Run the binary without arguments to load the configured accounts. Repeat `[[account]]`
+for each account. Without `password_command`, omtalk asks for the password at startup.
+The interface defaults to English; `[ui] language = "ru"` or the Language setting
+switches it to Russian.
+
+### Build from source
+
+The repository pins its tools in `mise.toml` and `rust-toolchain.toml`:
 
 ```sh
+git clone https://github.com/gAlleb/omtalk.git
+cd omtalk
+mise trust
+mise install
 cargo build --release -p omtalk
-target/release/omtalk you@example.org      # one account
-target/release/omtalk                      # accounts from ~/.config/omtalk/config.toml
+target/release/omtalk you@example.org
 ```
 
-Several omtalks run side by side with different accounts. An account in the database
-(`~/.local/share/omtalk/omtalk.db`) is one OMEMO device, so it is open in one omtalk at a
-time: two copies would knock each other offline. A second client of the same account on
-the same machine is a device of its own: `omtalk --db ~/.local/share/omtalk/second.db`.
+`mise run dist` builds static x86_64 and aarch64 binaries and `SHA256SUMS` in `dist/`.
+`mise run build-arm` builds only `target/aarch64-unknown-linux-musl/release/omtalk`
+(for Raspberry Pi 4/5 and other aarch64 Linux machines). Cross-compilation uses the
+pinned zig compiler without installing a system-wide cross toolchain.
+
+## Controls
+
+### Panes and shortcuts
+
+Three columns show chats, the conversation, and room participants or the contact's
+devices. Click to select a chat, drag pane borders to resize them, and use `‹`/`›` to
+hide a pane. The mouse wheel scrolls. `Tab` switches focus; `PgUp`/`PgDn` scroll the
+conversation. Typing in another pane moves focus to the input line and enters the text.
+Lists use arrows and `Home`/`End`.
+
+The default prefix is **Ctrl+X**: press, release, then a key. A menu appears after the
+prefix. Below, “prefix” means this sequence, not holding Ctrl+X down.
+
+| Key after prefix | Action |
+|---|---|
+| `↑` / `↓` | Previous / next chat |
+| `b` / `r` | Toggle left / right pane |
+| `←` / `→` | Narrow / widen the chat list |
+| `z` | Show only the current account; repeat to show all |
+| `o` | Toggle OMEMO for the chat |
+| `a` | Reply to the last incoming message |
+| `e` | Open OMEMO keys |
+| `s` / `c` | Service browser / current chat's commands |
+| `p` | Settings |
+| `m` | Give the mouse to the terminal / take it back |
+| `w` | Close the chat |
+| `q` | Quit; Ctrl+C twice also quits |
+
+`leader` changes the prefix; `modifier` enables shortcuts while holding Ctrl, Alt or
+Super, except combinations needed by the input line. Both are in `[ui]`.
+In a room, `Tab` after the input line focuses participants: arrows select someone,
+`Enter` opens a direct chat, and `Esc` returns to input.
+
+### Input and completion
+
+The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, or to the end;
+Ctrl+Y pastes what was cut; Ctrl+A/E move to the start/end; Ctrl+←/→ or Alt+B/F move by
+words. `↑`/`↓` recall messages and commands sent since startup; in multiline text they
+move between lines first. Alt+Enter (or Shift+Enter where supported) starts a new line.
+Pasted multiline text is sent as one message, with indentation kept; the input grows
+up to eight lines.
+
+Typing `/` or `/help` shows commands with descriptions. `Tab` completes commands,
+room nicks, addresses, rooms, folders, and upload paths; repeat to cycle choices,
+Shift+Tab to go back. A nick completed at the start of a line gets `: ` appended.
+With an empty input, `Tab` switches focus.
+
+### Mouse and clipboard
+
+Drag across messages to select and copy only their text, without borders or adjacent
+panes. On Wayland this uses `wl-copy` for both clipboard and primary selection;
+otherwise it sends OSC 52 to the terminal. The middle button pastes primary;
+Ctrl+V pastes the clipboard through `wl-paste`, including pictures for upload.
+
+Prefix+`m` (or `mouse = false`) gives mouse handling to the terminal for its own
+selection and paste. Shift with the mouse temporarily does the same. In tmux, OSC 52
+passthrough needs `set -g allow-passthrough on`.
+
+## Messaging
+
+### Replies, edits and styling
+
+Double-click a message, use `/reply`, or prefix+`a` to reply. If part of the message
+is selected with the mouse, that part is quoted. The input shows the reply target;
+`Esc` cancels. Replies carry an XEP-0461 reference and a plain-text quote beginning
+with the author's nick, so other clients can show the context too.
+
+`/edit` puts your last message in the chat into the input line. `Enter` sends the
+correction, `Esc` cancels. Corrected messages change in place and are marked “edited”
+(XEP-0308).
+
+Message styling (XEP-0393) supports `*strong*`, `_emphasis_`, `~strike~`, inline
+`` `code` ``, fenced code blocks, and `>` quotes. Markup remains visible but dimmed;
+copying preserves the original text. Code is not styled internally.
+`/me waves` is shown as `* nick waves` (XEP-0245).
+
+### Reactions
+
+Right-click a message to choose 👍 💖 😂 😮 😢 🙏; select the emoji again to remove it.
+`/react 👍` targets the selected message, or the latest incoming one. Names such as
+`:+1:`, `heart`, `joy`, and `fire` also work. Reactions (XEP-0444) appear below messages,
+including attachments, with a count for each emoji. **Reactions are sent unencrypted,
+even in encrypted chats.**
+
+Click the reaction row to see who reacted. `/reactions` opens the same list for the
+selected message, or the latest message with reactions. It shows room nicks or contact
+names; arrows or the wheel scroll, `Esc` or a click outside closes it.
+
+### Files and pictures
+
+Send a file with `/upload path` (with path completion), the paperclip, or by dropping a
+file onto the terminal and confirming the prepared command with `Enter`. Clipboard
+pictures can be sent with Ctrl+V. Uploads use the server's HTTP upload service
+(XEP-0363); in encrypted chats the file is encrypted first and sent as an `aesgcm://`
+link (XEP-0454). Progress appears during upload, followed by delivery ticks. Your own
+picture appears immediately without downloading it again.
+
+Received files download automatically unless `[ui] auto_download = false`; then click
+to download. Cached files appear immediately. Clicking a file opens it with `viewer`
+(`xdg-open` by default). Pictures use Kitty graphics where available, with a character
+preview in Alacritty.
+
+### History and search
+
+Scroll above the oldest visible message, or click “↑ earlier”, to load 50 older
+messages from the local database, then the server's archive (MAM). After a long absence,
+missed room messages are processed and stored in order, while the view keeps only the
+latest few hundred; progress appears at the bottom.
+
+**Local history is stored decrypted**, including messages received with OMEMO.
+`/search words` searches this device's history of the current chat, ignoring case.
+Arrows and `Enter` (or a click) jump to a result; `Esc` closes search.
+Messages encrypted before this device existed cannot be decrypted from the archive;
+they are counted rather than displayed as readable text.
+
+### Presence and delivery
+
+A direct chat's green `@` means the contact is online. Its header and right pane show
+clients, presence and status text. `/away [text]`, `/dnd [text]`, and `/online [text]`
+set your status for all accounts; it survives a restart and is sent again on reconnect
+and room entry. Room participants' statuses appear in the right pane.
+
+| Mark | Meaning |
+|---|---|
+| `⋯` | Sending or waiting for connection |
+| `✓` | Accepted by the server; in a room, echoed back by the room |
+| `✓✓` | Delivered to the contact's client (XEP-0184) |
+| Highlighted `✓✓` | Read (XEP-0333) |
+| `✗` | Not sent; a reason is shown |
+
+Typing indicators (XEP-0085) appear in the conversation and as `…` in the chat list.
+Your own typing becomes “paused” after ten seconds without input. Set `typing = false`
+to stop reporting it.
+
+## Accounts and rooms
+
+### Accounts, contacts and folders
+
+The chat list groups chats by account. Click an account heading or press `←` on it to
+collapse it; its unread count stays visible. Prefix+`z` toggles the current account
+alone. Commands use the account on the target contact's server, otherwise the last
+selected account (underlined).
+
+`/msg address` opens a direct chat; `/add address [name]` adds a contact. `/accept` and
+`/refuse` take an address to answer subscription requests. `/name Name` in a direct
+chat sets your private roster name for that contact, shared with your other clients;
+`/name` clears it. `/nickname Name` publishes your own name; without a name it clears it.
+
+Folders are local to omtalk and belong to an account. `/folder NAME` moves the current
+chat into a folder, creating it if needed; `/folder` takes it out. Dragging chats onto
+folders or back onto the account does the same. Empty folders disappear. Use
+`/folder-up`, `/folder-down`, or drag folder headings to reorder. `/rename-folder OLD NEW`
+renames one; names with spaces use `/rename-folder old folder → new folder`.
+
+Each account's server channel shows connection events, archive catch-up, errors,
+subscription requests, server messages, and your own clients coming and going. Its right
+pane shows the account and online clients. Only commands can be entered there. Errors
+fade from the bottom line after ten seconds but remain in this channel.
+
+### Joining and managing rooms
+
+`/join room@service [nick]` joins a room. Without a nick it uses the account's room
+bookmark (XEP-0402), so clients can share the same nick. New rooms are bookmarked
+automatically. `/create name [Title]` creates and joins a persistent, members-only room
+with visible member addresses, suitable for OMEMO. An explicit `name@service` also works.
+`/invite address` adds a member and sends a direct invitation (XEP-0249). Incoming
+invitations appear in the server channel with a ready `/join` command.
+
+`/topic text` changes the topic; `/name Title` changes the room title (owner only).
+`/nick nick` changes your room nick; `/nick` restores the default (your published
+nickname, otherwise the local part of your address). Other participants' nick changes
+appear in the conversation.
+
+The right pane shows the topic, room address, present participants, and offline members
+when the room exposes that list. Click a nick or participant to open a direct chat.
+Roles use IRC-style marks (`~`, `@`, `%`, `+`) and are listed first.
+
+`/close`, prefix+`w`, or middle-click closes a chat locally but keeps its history;
+a direct chat reappears when a new message arrives. For a room, `/close` leaves it
+and prevents automatic entry here, without changing other clients. `/leave` also turns
+off autojoin in its shared bookmark. `/join` opens the room again.
+
+### Services and IRC bridges
+
+`/services [address]` browses server services and ad-hoc commands (XEP-0050).
+Forms support text, passwords, checkboxes, single and multiple choices, and result
+tables (XEP-0004). `Enter` opens or advances, `←`/`Backspace` goes back, `Tab` moves
+between fields, `Space` selects, and `Esc` cancels the command on the server and closes
+it. Rows, fields and buttons also work with the mouse. Server administrators can use
+the commands their server provides for users, passwords, modules and statistics.
+
+`/commands` or prefix+`c` opens commands for the current room, a contact's online client,
+or your server when opened from its server channel. IRC is accessed through an XMPP
+bridge such as biboumi, using addresses like `#chan%irc.server@biboumi.example.org`.
+In a biboumi channel's command browser, `←` leads to IRC server settings: port, TLS,
+password, nick and persistent connections. Long result tables scroll with arrows.
+
+## Encryption and devices
+
+Click the lock above the input or use prefix+`o` to toggle OMEMO for the chat.
+Group encryption needs a members-only room with visible member addresses; omtalk
+includes offline members' devices when encrypting.
+
+`/keys [address]`, prefix+`e`, or a click on the devices in a direct chat opens the
+contact's and your own devices, with fingerprints and trust state:
+
+| Mark / key | Meaning / action |
+|---|---|
+| `●` | Blind trust |
+| `✓` | Verified |
+| `✗` | Distrusted or undecided |
+| `v` | Mark the selected device verified |
+| `d` | Distrust it |
+| `b` | Return it to blind trust |
+| `x` twice | Remove an old device of your own |
+
+Compare fingerprints with the contact through a trusted channel before verifying.
+After the first verification, new devices for that contact wait for your decision and
+receive no messages (blind trust before verification). Messages from unverified or
+distrusted devices are marked `⚠`. Each device shows when it last wrote.
+
+The database, `~/.local/share/omtalk/omtalk.db`, holds keys, sessions, trust and history.
+Each account in it represents one OMEMO device. Different accounts can run side by side;
+a second process using the same account and database is refused. To run another device
+of the same account on this machine, use a separate database:
+
+```sh
+omtalk --db ~/.local/share/omtalk/second.db you@example.org
+```
+
+## Settings and notifications
+
+### Configuration
+
+`/settings` or prefix+`p` edits `[ui]` and `[notify]`. Arrows select a setting;
+`Enter` or a click changes it, `←`/`→` cycle values. Changes take effect immediately
+and are saved to `config.toml`, preserving comments. Accounts and `[theme]` are edited
+in the file. The following example expands the minimal account configuration above;
+all sections other than the accounts are optional.
 
 ```toml
 # ~/.config/omtalk/config.toml
@@ -62,7 +340,7 @@ icons = "nerd"         # nerd (Nerd Font glyphs) or text
 left = 26              # width of the chat list
 right = 30             # width of the right pane
 viewer = "xdg-open"    # what opens a file you click
-auto_download = true   # false: received files only on a click ("скачать")
+auto_download = true   # false: download received files only on a click
 mouse = true           # false: the mouse belongs to the terminal (tmux-style selection); prefix+m toggles
 read_markers = true    # false: the other side does not see that you read their messages
 typing = true          # false: the other side does not see that you are typing
@@ -83,292 +361,115 @@ accent = "#7aa2f7"     # a name (blue, bright-red, gray), #rrggbb or a number 0�
 # nicks = ["red", "green", "#ff8800"]                         # nick colours, used in turn
 ```
 
-The interface speaks English; `language = "ru"` in `[ui]` (or «Language / Язык» in the
-settings) switches it to Russian, at once.
+### Notifications, mute and read state
 
-## Settings
+Sound, desktop notifications (`notify-send`), and the terminal bell (`\a`) are configured
+independently. Each accepts `all`, `private` (direct messages), `mention` (your nick
+mentioned in a room), `private+mention`, or `none`. Sound runs the configured command; the example uses `canberra-gtk-play`. No signal is
+sent for archive catch-up or while you are looking at the chat.
 
-`[ui]` and `[notify]` can also be changed inside omtalk: `/settings` or prefix+`p`. The
-arrow keys select, `Enter` or a click changes, `←`/`→` step through the values. A change
-takes effect at once and is written to `config.toml`; the comments in it are kept. Colours
-(`[theme]`) and accounts are edited in the file only.
+`/mute`, or the bell beside the paperclip, silences **all** notifications for the current
+chat, including mentions. `/unmute` restores them. Direct chats, XMPP rooms and biboumi
+channels behave alike. The chat list shows a mute icon (`[muted]` in text mode).
+Messages and unread counts continue; mutes survive restarts and are local to this omtalk.
 
-## Layout and keys
+An unfocused window does not mark messages read, even in the open chat. When focused,
+omtalk sends read markers to the contact (unless `read_markers = false`) and synchronizes
+read positions with your other clients (XEP-0490). Local read positions are also kept
+across restarts, including IRC messages without archive IDs. Synchronization advances
+them when a newer known position arrives; temporary network failures are retried.
 
-Three columns: chats, the conversation, and the room's participants or the contact's
-devices. With several accounts, the chats on the left are grouped by account. A click on
-an account heading (or `←` in the chat list) folds its chats; a folded account shows
-its unread count. Prefix+`z` keeps only the current account open; again, it opens them all.
-Commands go from the account on the contact's server, otherwise from the last one picked
-(it is underlined). A click on a nick in a room, or on a participant, opens a direct chat
-with them.
+In tmux, enable focus reporting so omtalk can distinguish an active window:
 
-Your own folders, inside each account (omtalk only; rooms can go in them too): the list on
-the left is a tree of account → folders → chats. `/folder NAME` puts the current chat into
-a folder of its account (creating it if needed); `/folder` with no name takes it out. You
-can also drag a chat with the mouse onto a folder heading, or back onto the account. A
-folder folds like an account. An empty folder
-disappears. `/folder-up` and `/folder-down` move the open chat's folder, or drag a folder's heading on to
-another. `/rename-folder OLD NEW` (for names with spaces: `old folder → new`).
+```tmux
+set -g focus-events on
+```
 
-Colours come from the terminal palette (pywal and similar tools recolour omtalk along with
-everything else), and `[theme]` can give any role a colour of your own.
+Without focus reporting, the window is treated as active. To keep sound and desktop
+notifications but disable tmux's bell signal, set `bell_on = "none"`.
 
-Mouse: click a chat, drag pane borders, `‹`/`›` hide the panes, a click on the lock by the
-input line turns OMEMO on and off for the chat, the wheel scrolls.
+### Appearance and avatars
 
-Keys: the `leader` prefix (Ctrl+X), release, then a letter. A list pops up after the
-prefix: `o` OMEMO, `b`/`r` left and right panes, `↑`/`↓` chats, `←`/`→` width of the chat
-list, `s` services, `p` settings, `z` current account only, `q` quit (or Ctrl+C twice). The same letters work
-with `modifier` held, except those the input line needs. `Tab` switches focus,
-`PgUp`/`PgDn` scroll. Typing anywhere else types into the input line (the focus goes
-there): every letter is typed, the panes move with `↑`/`↓`, `Home`/`End` and the mouse.
-In a room, `Tab` after the input line goes to the participants on
-the right: `↑`/`↓` pick someone, `Enter` opens a direct chat with them, `Esc`
-goes back to the input line.
+Colours follow the terminal palette, including pywal changes. `[theme]` overrides
+individual roles. `compact = true` puts the time and name on the message's first line.
 
-The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, to the end; Ctrl+Y
-pastes what was cut; Ctrl+A/E go to the start and end; Ctrl+←/→ and Alt+B/F move by words.
-Alt+Enter (or Shift+Enter, where the terminal tells it apart) starts a new line in the
-message. `↑`/`↓` go through what you sent since omtalk started (messages and commands), as
-in a shell; in a text of several lines they move between its lines first. Pasted text with several lines goes as one message, indentation kept; the input
-line grows up to 8 lines. Errors are shown in full in the bottom line and fade after 10 s;
-they stay in full in the account's server channel.
+Avatars are off by default; enable them in settings or with `avatars = true`. The right
+pane shows the contact's or room's avatar: Kitty graphics in kitty, half blocks in
+Alacritty. Contact avatars come from PEP (XEP-0084), falling back to vCard
+(XEP-0054/0153); room avatars come from vCard. The cache is `~/.cache/omtalk/avatars`.
+Desktop notifications show the contact's avatar, or a room avatar with the sender's
+small avatar in the corner when the room exposes their identity.
 
-## Commands
+## Command reference
 
-Typing `/` shows the list of commands above the input line, with descriptions (`/help`
-does the same). `Tab` completes a command, a nick in a room (at the start of a line, with
-`: `), an address after `/msg`, `/add` and so on, a room after `/join`, a folder after
-`/folder`. `Tab` again goes through the choices, `Shift+Tab` back. In an empty line `Tab`
-switches focus.
+Square brackets mean optional arguments. Commands act on the current chat unless an
+address is given or the description says otherwise.
 
-Commands: `/msg`, `/join`, `/leave`, `/add`, `/remove`, `/accept`, `/refuse`, `/devices`,
-`/services [address]`, `/folder`, `/rename-folder`, `/create`, `/invite`, `/topic`,
-`/name`, `/nick`, `/nickname`, `/reply`, `/react`, `/edit`, `/search`, `/away`, `/dnd`, `/online`, `/me`, `/keys`, `/upload`, `/commands`, `/settings`, `/close`, `/help`, `/quit`.
+| Area | Command | Action |
+|---|---|---|
+| Contacts | `/msg ADDRESS [TEXT]` | Open a direct chat, optionally send text |
+| Contacts | `/add ADDRESS [NAME]` | Add a contact |
+| Contacts | `/remove [ADDRESS]` | Remove the given contact, or the current direct-chat contact |
+| Contacts | `/accept ADDRESS`, `/refuse ADDRESS` | Answer a subscription request |
+| Names | `/name [NAME]` | Set/clear a contact's name; in a room, set its title (title required) |
+| Names | `/nickname [NAME]` | Set/clear your published nickname for the active account |
+| Rooms | `/join ADDRESS [NICK]` | Join a room |
+| Rooms | `/create NAME [TITLE]` | Create a room; NAME may be an address |
+| Rooms | `/invite ADDRESS` | Add and invite a member to the current room |
+| Rooms | `/topic [TEXT]` | Show/change the room topic |
+| Rooms | `/nick [NICK]` | Change/reset your room nick |
+| Rooms | `/leave` | Leave and disable autojoin in the shared bookmark |
+| Chats | `/close` | Close the chat locally |
+| Folders | `/folder [NAME]` | Move the chat into/out of a folder |
+| Folders | `/rename-folder OLD NEW` | Rename a folder; use `OLD → NEW` for names with spaces |
+| Folders | `/folder-up`, `/folder-down` | Move the current chat's folder up/down |
+| Messages | `/reply` | Reply to the selected message, otherwise the latest incoming one |
+| Messages | `/edit` | Edit your last message in the chat |
+| Messages | `/react EMOJI`, `/reactions` | Toggle a reaction / see who reacted |
+| Messages | `/me TEXT` | Send an action |
+| Messages | `/upload PATH` | Upload a file |
+| History | `/search WORDS` | Search the current chat's local history |
+| Presence | `/away [TEXT]`, `/dnd [TEXT]`, `/online [TEXT]` | Set status for all accounts |
+| Devices | `/devices` | Refresh the current direct chat's device list |
+| Devices | `/keys [ADDRESS]` | Open device fingerprints and trust controls |
+| Notifications | `/mute`, `/unmute` | Silence/restore all notifications for the chat |
+| Services | `/services [ADDRESS]` | Browse services |
+| Services | `/commands` | Open commands for the current chat |
+| Application | `/settings`, `/help`, `/quit` | Settings, command help, exit |
 
-Corrections (XEP-0308), as in Gajim and Conversations: `/edit` puts your last message of
-the chat into the input line; Enter sends the corrected text, Esc drops it. A corrected
-message, yours or someone else's, changes in place and is marked "edited".
+## Development and testing
 
-After a long absence a room's missed messages are all read and kept (OMEMO has to read
-them in order), but the room shows only its newest few hundred; the bottom line says how
-far the reading has got.
+### Local tests
 
-Older history: scroll up past the oldest message shown (or click "↑ earlier" above it)
-and the 50 before it come: first from what this device keeps, then from the server's
-archive (MAM). What was encrypted before this device existed cannot be read there and is
-only counted, as in every OMEMO client.
+With the tools installed as above and Docker available:
 
-Search: `/search words` looks through the open chat's history kept here, whatever the
-case, encrypted messages too (they are kept decrypted). The results show over the chat;
-`↑`/`↓` and Enter (or a click) show the chat from that message on, Esc closes.
+```sh
+mise run test
+```
 
-Your status: `/away [words]`, `/dnd [words]`, `/online [words]`, for all accounts at
-once, kept after a restart. Contacts and the rooms you are in see it; omtalk asks the rooms
-now and then whether you are still in them and enters again if not; it is said again after a reconnect and on
-entering a room, and shows by the account at the bottom. A room's participants show theirs.
+This prepares the python-omemo oracle from `tests/oracle/uv.lock`, starts a disposable
+Prosody in Docker, and runs `cargo test --workspace`. The test server listens only on
+`127.0.0.1:15222` and starts with empty data each time. Accounts `alice`…`frank` and
+`u01`…`u80` at `localhost` use password `test`. `admin@localhost` is an administrator
+for ad-hoc command tests. Upload service: `upload.localhost`, HTTP at `127.0.0.1:15280`.
 
-Reactions (XEP-0444): a right click on a message offers 👍 💖 😂 😮 😢 🙏; a click puts one
-on, again takes it off. `/react 👍` does the same for the message selected with the mouse,
-or the last one from someone, and knows names too (`/react :+1:`, `heart`, `joy`, `fire`…). Reactions show under the message,
-each with how many sent it. As in Conversations and Gajim they go unencrypted, also in an
-encrypted chat.
-Click the reaction row to see who put each emoji, or `/reactions` for the selected
-message (else the latest with reactions). Room nicks and contact names are shown;
-↑/↓ or the mouse wheel scroll, Esc or a click outside closes the list.
+### Testing against other clients
 
-A chat is closed with `/close`, prefix+`w` or a middle click on it in the list: it leaves
-the list, its history stays, and it comes back by itself when someone writes in it.
-A room: `/close` closes it here only (omtalk leaves it and does not enter it after a
-restart, your other clients still do); `/leave` leaves it for good, turning off "enter by
-itself" in its bookmark for all your clients. `/join` opens it again.
-
-`/join` without a nick takes the nick from the account's bookmarks (XEP-0402), as Gajim and
-other clients do, so all clients of one account count as one participant in the room. A
-new room is added to the bookmarks automatically.
-
-## Message styling
-
-Messages are styled as in Conversations, Gajim, Monal and Dino (XEP-0393): `*strong*`,
-`_emphasis_`, `~strike~`, `` `code` ``, a block of preformatted text between ```` ``` ````
-lines, and `>` quotes anywhere in a message. The directives stay visible, dimmed, so
-copied text is what was written; nothing is styled inside code.
-
-`/me waves` goes as written and is shown as `* nick waves`, as in IRC and Gajim
-(XEP-0245).
-
-## Files and pictures
-
-Sending: `/upload path` (Tab completes the path), the paperclip by the input line, a file
-dropped onto the terminal window (a ready command appears; press Enter), or Ctrl+V with a
-picture in the clipboard. The file goes to your server's upload service (XEP-0363). In an
-encrypted chat it is encrypted first, and the other side gets an `aesgcm://` link
-(XEP-0454), as from Gajim, Conversations and Monal. The line shows the upload percentage,
-then the usual ✓ and ✓✓. Your own picture is shown at once, without downloading it again.
-
-Received files and pictures are downloaded automatically; with `auto_download = false` in
-`[ui]` only on a click (the file says «скачать», "download"). Files already downloaded are
-shown at once.
-
-## Replies and quotes
-
-Replies (XEP-0461), as in Conversations, Gajim and Monal: double-click a message,
-prefix+`a` (a reply to the last incoming message), or `/reply`. The part of a message selected with the mouse is what gets quoted. While you
-write the reply, the input line shows what it answers; Esc cancels. The quote goes as
-`> ` lines at the start of the text (visible in any client) along with a mark saying which
-message it answers. The first line of the quote is the author's nick (`> bob:`), so it is
-clear whose words they are even in clients without replies. omtalk shows the quote as a
-block with a bar on the left and the name of the person answered.
-
-## OMEMO keys
-
-As in Gajim: `/keys [address]`, prefix+`e`, or a click on the devices to the right of a
-direct chat. You see the contact's devices and your own, with fingerprints and status: `●`
-blind trust, `✓` verified, `✗` distrusted or undecided. Compare a fingerprint with what the
-contact's client shows, then mark the device verified (`v`). After the first verification,
-new devices of that contact wait for your decision and get no messages ("blind trust
-before verification", as in Gajim and Conversations). `d` distrusts, `b` goes back to blind
-trust, `x` removes an old device of your own from the list (press twice). A message from
-an unverified or distrusted device is marked `⚠`. Beside each device: when it last wrote
-(«писало вчера 14:05», "wrote yesterday 14:05"), so a device silent for months stands out.
-
-## Mouse and clipboard
-
-Drag across messages to select and copy: only the message text, without borders or
-neighbouring panes, straight into both the clipboard and primary selection (through
-`wl-copy`, or without Wayland through an OSC 52 request to the terminal; in tmux that
-needs `allow-passthrough on`). The middle button pastes primary, Ctrl+V in the input line
-pastes the clipboard (through `wl-paste`). Prefix+`m` (or `mouse = false` in `[ui]`) hands
-the mouse to the terminal: then tmux and the terminal select and paste on their own, as in
-WeeChat without the mouse; prefix+`m` takes it back. Shift with the mouse always works:
-the terminal takes the mouse for that moment.
-
-## Server channel
-
-Each account has a server channel at the top of the list: logins and reconnects, your own
-OMEMO device with its fingerprint, the result of catching up from the archive, joined
-rooms, your other clients coming and going, errors, subscription requests, and messages
-from the server itself. The right pane shows the account and which of its clients are
-online. Only commands can be typed there.
-
-## Notifications
-
-While the window is not in focus, messages are not marked as read (neither for the sender
-nor for your other clients) until you come back, and they count as unread even in the open
-chat.
-
-Three signals, each set separately in `[notify]`: a sound (any command), a desktop
-notification (`notify-send`) and the terminal bell (`\a`). For each one, which messages:
-direct ones (`private`), your nick named in a room (`mention`), both, all (`all`) or none
-(`none`). No signal while you are looking at that chat. History loaded from the server's
-archive gives no signal. In tmux you can turn the bell off (`bell_on = "none"`) and keep the
-sound and notifications. The terminal reports focus by itself (foot, kitty, Alacritty); in
-tmux this needs `set -g focus-events on`, and without it omtalk treats the window as always
-active.
-
-`/mute` silences every notification from the open chat; `/unmute` restores them.
-Clicking the bell beside the input's paperclip does the same. Direct chats, XMPP rooms
-and IRC channels through biboumi work alike: no sound, desktop notification or terminal
-bell, even for mentions. A mark in the chat list shows muted chats (`[muted]` with text
-icons). Messages and unread counts continue. Mutes survive a restart and are local to
-this omtalk.
-
-What you read here is also remembered locally. A failed server synchronization or IRC
-bridge messages without a room archive id no longer make it unread again after a restart.
-A newer known read position from another client still advances it.
-Read-state publication waits for login and retries temporary network failures; an error names the chat.
-
-## Typing
-
-"Typing…" (XEP-0085): while the contact types, the bottom of the conversation shows
-«bob печатает…» ("bob is typing…"), and the chat list shows `…` by the chat. omtalk reports
-its own typing too: started is "composing", 10 s without keys is "paused", sent is the end.
-`typing = false` in `[ui]` turns it off.
-
-## Rooms
-
-`/create name [Title]` creates a closed room on your server's room service (members only,
-with visible addresses, as OMEMO needs, persistent) and joins it. `/invite address` makes
-someone a member and invites them (a direct invitation, XEP-0249, as in Gajim and
-Conversations). An invitation sent to you appears in the server channel with a ready
-`/join` command.
-
-A room shows its title on the left and in the header, with its topic next to it; a topic
-change shows in the chat. `/topic text` changes the topic, `/name Title` the title (owner
-only). `/nick nick` changes your nick in the room, `/nick` alone brings back the default
-one (your address before `@`); other people's nick changes show in the chat («alice теперь
-алиса», "alice is now алиса"), and the person stays the same in the list.
-
-Three names, besides the address: your nick in each room (`/nick`), the name you give
-yourself for everyone (`/nickname Name`, XEP-0172: seen by contacts who have no name of
-their own for you), and the name you give a contact, seen only by you (`/name Name` in the
-chat with them, kept in your roster for all your clients). Each without a name takes it
-away.
-
-The right pane of a room shows the topic and the room's address at the top, then who is in
-the room now, then «не в сети» ("offline"): members (owners, admins, members) who are not
-in the room. A click on them opens a direct chat. Open rooms may not show their member
-lists; then that section is missing. Owners, admins, moderators and members are marked as
-IRC marks them (`~`, `@`, `%`, `+`) and listed first.
-
-## Presence and delivery
-
-Who is online and on what: a direct chat's `@` icon is green while the contact is online.
-The chat header and the right pane show which clients they use (Gajim, Monal,
-Conversations, omtalk…), their state and status message. The client is recognised by its
-caps (XEP-0115).
-
-Your own messages show how far they got: `⋯` sending, `✓` on the server (in a room: the
-room sent it back), `✓✓` delivered to the contact's client (XEP-0184), highlighted `✓✓`
-read (XEP-0333), `✗` not sent, with the reason. omtalk sends receipts itself. omtalk marks
-the open chat as read: for the contact (`read_markers = false` in `[ui]` turns this off) and
-for your other clients (XEP-0490). Gajim, Monal and Conversations then clear their unread
-counts, and what you read in them clears it in omtalk.
-
-## Avatars
-
-As in Gajim: `avatars = true`, or «Аватарки» in the settings; off by default. The contact's
-or room's avatar is shown at the top of the right pane. It comes from where other clients
-get it: PEP (XEP-0084, changes arrive by themselves), otherwise the vCard
-(XEP-0054/0153); a room's comes from its vCard. Downloaded avatars are kept in
-`~/.cache/omtalk/avatars` under their SHA-1. Avatars are round: in kitty a real picture,
-in Alacritty a circle of half blocks. Desktop notifications carry them too: the person's
-from a direct chat, the room's with the writer's small in its corner from a room (when the
-room tells who wrote).
-
-## Services
-
-Like "Discover Services" and "Execute Command" in Gajim. The window shows what the server
-(or any address) offers: services, their nodes and ad-hoc commands (XEP-0050). A command
-opens a form (XEP-0004): text, password (hidden), checkbox, choice from a list, several
-values. Keys: `Enter` opens or goes to the next step, `←`/`Backspace` goes back, `Tab`
-goes to the next field, `Space` toggles a checkbox or choice, `Esc` cancels the command on
-the server and closes. Rows, fields and buttons work with the mouse. An administrator of
-their own server can manage it from here: users, passwords, modules, statistics.
-
-A chat's own commands, as Gajim's "Execute command": `/commands` or prefix+`c`. A room's
-(a bridge's channel too), a contact's client's while it is online, the own server's from
-the server channel. In a biboumi channel (`#chan%irc.server@biboumi…`) `←` goes on to the
-IRC server's commands: port, TLS, password, nick, keeping the channel joined. A result
-with several items (XEP-0004 `<reported>`) is a table; the arrows scroll a long one.
-
-## Testing against other clients: omtalk-cli
-
-A line-based OMEMO client for live testing with Gajim, Monal, Conversations and Dino:
+`omtalk-cli` is a line-based client for live OMEMO checks with Gajim, Monal,
+Conversations and Dino:
 
 ```sh
 cargo build --release -p omtalk-cli
 target/release/omtalk-cli you@example.org
 ```
 
-The password comes from `OMTALK_PASSWORD` or is asked for. Data lives in
-`~/.local/share/omtalk/omtalk.db` (`--db` changes the path), so every run is the same
-device. The server is found through the domain's SRV records; `--host HOST [--port PORT]`
-sets STARTTLS by hand, `--direct-tls HOST:PORT` direct TLS. Commands: `/msg`, `/join`,
-`/say`, `/devices` (fingerprints shown as in Gajim), `/help`, `/quit`.
+It reads `OMTALK_PASSWORD` or prompts for a password. It shares the default database
+and device identity with the TUI; use `--db` for a separate test device.
+Server discovery uses SRV. `--host HOST [--port PORT]` selects STARTTLS manually;
+`--direct-tls HOST:PORT` selects direct TLS. Commands include `/msg`, `/join`, `/say`,
+`/devices`, `/help`, and `/quit`.
 
-## Structure
+### Workspace structure
 
 | Directory | What is there |
 |---|---|
