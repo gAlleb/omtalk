@@ -26,6 +26,7 @@ unicode-width = "0.2.2"
 xmpp-parsers = "0.23.0"
 
 [dev-dependencies]
+tokio = { version = "1.54.1", features = ["test-util"] }
 tempfile = "3.27.0"
 
 [features]

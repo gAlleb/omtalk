@@ -277,6 +277,7 @@ this omtalk.
 What you read here is also remembered locally. A failed server synchronization or IRC
 bridge messages without a room archive id no longer make it unread again after a restart.
 A newer known read position from another client still advances it.
+Read-state publication waits for login and retries temporary network failures; an error names the chat.
 
 ## Typing
 

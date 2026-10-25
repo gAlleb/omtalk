@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Read-state synchronization waits for login and retries temporary failures.** Pending positions are coalesced per chat and published in order; one chat waiting for retry does not block another. Errors name the chat and say when a retry is scheduled, instead of losing the update after a timeout.
+
 - The mute glyph has extra space before the unread badge, so wide Nerd Font glyphs do not paint over its background.
 
 - **See who reacted**: click the reactions below a message, or `/reactions` for the selected message (else the latest with reactions). A small scrollable window lists the names for each emoji: room nicks in rooms, contact names in direct chats. Esc or a click outside closes it.

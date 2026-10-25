@@ -399,6 +399,7 @@ enum Msg {
 #[derive(Clone)]
 struct Shared {
     accounts: HashMap<BareJid, (Account, Arc<Omemo>)>,
+    read_sync: HashMap<BareJid, crate::read_sync::ReadSync>,
     /// Where fetched files are kept.
     cache: PathBuf,
     /// The program that shows a file outside the terminal.
@@ -451,6 +452,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut shared = Shared {
         accounts: HashMap::new(),
+        read_sync: HashMap::new(),
         cache: config::cache_dir().join("media"),
         viewer: options.config.ui.viewer.clone(),
         auto_download: options.config.ui.auto_download,
@@ -471,6 +473,27 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         // One's status as left last time, said by the login.
         account.keep_status(kept_status.clone());
         let omemo = Arc::new(Omemo::persisting(account.clone(), state, store.omemo(&jid)));
+        let writer = account.clone();
+        let errors = shared.tx.clone();
+        let read_sync = crate::read_sync::ReadSync::spawn(
+            move |mark| {
+                let writer = writer.clone();
+                async move { writer.read_up_to(&mark.chat, &mark.by, &mark.id).await }
+            },
+            move |mark, error, retry| {
+                let next = if retry {
+                    tr!("; will retry", "; повторим")
+                } else {
+                    ""
+                };
+                let _ = errors.send(Msg::Status(trf!(
+                    "read state for {} was not synchronized: {error}{next}",
+                    "прочитанное в {} не синхронизировано: {error}{next}",
+                    mark.chat
+                )));
+            },
+        );
+        shared.read_sync.insert(jid.clone(), read_sync);
         shared.accounts.insert(jid.clone(), (account, omemo));
         jids.push(jid);
     }
@@ -1233,6 +1256,13 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
             continue;
         };
         let tell = |msg| drop(shared.tx.send(msg));
+        if let Some(sync) = shared.read_sync.get(&account) {
+            match &event {
+                Event::Online { .. } | Event::Reachable => sync.online(true),
+                Event::Disconnected { .. } | Event::AuthFailed { .. } => sync.online(false),
+                _ => {}
+            }
+        }
         match &event {
             Event::Online { resumed, jid } => {
                 tell(Msg::Bound {
@@ -2449,18 +2479,19 @@ async fn perform(action: Action, shared: Shared) {
             archive_id,
         } => {
             let Some((xmpp, _)) = get(&account) else { return };
-            if let Some(id) = marker {
-                let _ = xmpp.send(receipts::displayed(to.clone().into(), &id)).await;
-            }
             // In a room the room's archive names the message; in a chat, one's own.
             if let Some(id) = archive_id {
                 let by = if room { to.clone() } else { account.clone() };
-                if let Err(e) = xmpp.read_up_to(&to, &by, &id).await {
-                    tell(Msg::Status(trf!(
-                        "the read mark for your other devices: {e}",
-                        "отметка «прочитано» для других устройств: {e}"
-                    )));
+                if let Some(sync) = shared.read_sync.get(&account) {
+                    sync.queue(crate::read_sync::ReadMark {
+                        chat: to.clone(),
+                        by,
+                        id,
+                    });
                 }
+            }
+            if let Some(id) = marker {
+                let _ = xmpp.send(receipts::displayed(to.clone().into(), &id)).await;
             }
         }
         Action::Older {
@@ -3610,6 +3641,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let shared = super::Shared {
             accounts: Default::default(),
+            read_sync: Default::default(),
             cache: dir.path().join("cache"),
             viewer: String::new(),
             auto_download: false,

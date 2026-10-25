@@ -12,6 +12,7 @@ mod complete;
 mod config;
 mod keys;
 mod notify;
+mod read_sync;
 mod runtime;
 mod services;
 mod settings;
