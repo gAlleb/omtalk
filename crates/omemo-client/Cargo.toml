@@ -1,14 +1,14 @@
 [package]
 name = "omtalk-omemo"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 futures = "0.3.34"
-omemo = { version = "0.1.7", path = "../omemo" }
-omemo-xml = { version = "0.1.7", path = "../omemo-xml" }
-omtalk-xmpp = { version = "0.1.7", path = "../xmpp" }
+omemo = { version = "0.1.8", path = "../omemo" }
+omemo-xml = { version = "0.1.8", path = "../omemo-xml" }
+omtalk-xmpp = { version = "0.1.8", path = "../xmpp" }
 thiserror = "2.0.21"
 tokio = { version = "1.54.0", features = ["sync"] }
 xmpp-parsers = "0.23.0"

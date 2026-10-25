@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.8 — 2026-10-25
 
 - **The cause of the startup read-mark timeout is fixed in the XMPP library.** An own-account IQ queued before login was tracked under no address; after login the server's successful reply was matched under the account address and discarded. The tracker now knows the account before any IQ can be queued. A regression test publishes before login to real local Prosody and verifies both acknowledgement and stored state.
 

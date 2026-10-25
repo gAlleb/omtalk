@@ -1,14 +1,14 @@
 [package]
 name = "omtalk-cli"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-omemo = { version = "0.1.7", path = "../omemo" }
-omtalk-omemo = { version = "0.1.7", path = "../omemo-client" }
-omtalk-store = { version = "0.1.7", path = "../store" }
-omtalk-xmpp = { version = "0.1.7", path = "../xmpp" }
+omemo = { version = "0.1.8", path = "../omemo" }
+omtalk-omemo = { version = "0.1.8", path = "../omemo-client" }
+omtalk-store = { version = "0.1.8", path = "../store" }
+omtalk-xmpp = { version = "0.1.8", path = "../xmpp" }
 rpassword = "7.5.4"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "signal"] }
 

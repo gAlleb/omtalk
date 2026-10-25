@@ -1,15 +1,15 @@
 [package]
 name = "omtalk-testkit"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-omemo = { version = "0.1.7", path = "../omemo" }
-omemo-xml = { version = "0.1.7", path = "../omemo-xml" }
-omtalk-omemo = { version = "0.1.7", path = "../omemo-client" }
-omtalk-store = { version = "0.1.7", path = "../store" }
-omtalk-xmpp = { version = "0.1.7", path = "../xmpp", features = ["insecure-tcp"] }
+omemo = { version = "0.1.8", path = "../omemo" }
+omemo-xml = { version = "0.1.8", path = "../omemo-xml" }
+omtalk-omemo = { version = "0.1.8", path = "../omemo-client" }
+omtalk-store = { version = "0.1.8", path = "../store" }
+omtalk-xmpp = { version = "0.1.8", path = "../xmpp", features = ["insecure-tcp"] }
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "time", "sync"] }
 xmpp-parsers = "0.23.0"
