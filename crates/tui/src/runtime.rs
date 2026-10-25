@@ -862,6 +862,13 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
         Msg::Incoming { account, message, at } => {
+            // The database already keeps repeated MAM/offline copies once. The view
+            // must merge them too, before an alert or another unread is generated.
+            if message.direction == omtalk_omemo::Direction::Incoming
+                && app.merge_duplicate(&account, &message)
+            {
+                return;
+            }
             // A correction changes the message it names, where it is: no alert.
             if app.correct(&account, &message) {
                 return;
@@ -3587,6 +3594,148 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    // Run with `cargo test -p omtalk --features insecure-tcp offline_plain_picture -- --nocapture`
+    // against `mise run prosody`; no external upload service or real account is used.
+    #[cfg(feature = "insecure-tcp")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_plain_picture_is_shown_once_when_offline_delivery_overlaps_mam() {
+        use super::*;
+        use crate::config::Modifier;
+        use std::time::Duration;
+        use tokio::time::timeout;
+        async fn login(user: &str) -> (Accounts, mpsc::UnboundedReceiver<AccountEvent>, Account) {
+            let mut cfg = AccountConfig::new(format!("{user}@localhost").parse().unwrap(), "test");
+            cfg.server = Server::Plaintext {
+                addr: "127.0.0.1:15222".into(),
+            };
+            let (mut accounts, mut events) = Accounts::new();
+            let account = accounts.add(cfg).await;
+            timeout(Duration::from_secs(10), async {
+                while !matches!(events.recv().await.unwrap().event, Event::Online { .. }) {}
+            })
+            .await
+            .expect("local Prosody online");
+            (accounts, events, account)
+        }
+        let (_old, _, old) = login("u78").await;
+        old.stop().await;
+        let (_sender_accounts, _, sender) = login("u77").await;
+        let recipient: BareJid = "u78@localhost".parse().unwrap();
+        let link = format!("https://upload.example.org/{}.png", receipts::new_id());
+        let mut sent = Message::chat(Some(recipient.clone().into())).with_body(Lang::default(), link.clone());
+        sent.payloads.push(
+            xmpp_parsers::minidom::Element::builder("x", "jabber:x:oob")
+                .append(
+                    xmpp_parsers::minidom::Element::builder("url", "jabber:x:oob")
+                        .append(link.as_str())
+                        .build(),
+                )
+                .build(),
+        );
+        receipts::mark_outgoing(&mut sent, &receipts::new_id());
+        sender.send(sent).await.unwrap();
+        let (_receiver_accounts, mut events, receiver) = login("u78").await;
+        let omemo = Omemo::new(
+            receiver.clone(),
+            omtalk_omemo::State::new(OwnKeys::generate(0).unwrap()),
+        );
+        let caught = omemo.catch_up().await.unwrap();
+        let mut messages: Vec<_> = caught
+            .messages
+            .into_iter()
+            .filter(|m| m.text.as_deref() == Some(&link))
+            .collect();
+        let archived = messages.len();
+        // Login has already queued offline stanzas while MAM was being queried.
+        while let Ok(Some(event)) = timeout(Duration::from_millis(500), events.recv()).await {
+            if let Some(message) = omemo.handle(&event.event).await.unwrap()
+                && message.text.as_deref() == Some(&link)
+            {
+                messages.push(message);
+            }
+        }
+        sender.stop().await;
+        receiver.stop().await;
+        assert_eq!(archived, 1, "the uploaded link must be in MAM");
+        assert!(
+            messages.len() >= 2,
+            "must reproduce both offline delivery and MAM: {messages:?}"
+        );
+        eprintln!(
+            "offline/MAM copies: {:?}",
+            messages
+                .iter()
+                .map(|m| (&m.id, &m.archive_id, m.at))
+                .collect::<Vec<_>>()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("history.db")).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        // Both arrival orders must converge to the same line, including its archive ID.
+        for reverse in [false, true] {
+            let mut app = App::new(vec![recipient.clone()], Modifier::Ctrl, 26, 30);
+            let server = app.server_chat(&recipient);
+            app.select(server);
+            let mut copies = messages.clone();
+            if reverse {
+                copies.reverse();
+            }
+            for message in copies {
+                app.on_incoming(&recipient, &message, now());
+            }
+            let index = app.chats.iter().position(|c| c.jid == *sender.jid()).unwrap();
+            assert_eq!(app.chats[index].lines.len(), 1);
+            assert_eq!(app.chats[index].unread, 1);
+            assert!(app.chats[index].lines[0].archive_id.is_some());
+            // Sending the identical URL again is a separate message, never a body dedup.
+            let mut another = messages[0].clone();
+            another.id = Some(receipts::new_id());
+            another.archive_id = Some(receipts::new_id());
+            app.on_incoming(&recipient, &another, now());
+            assert_eq!(app.chats[index].lines.len(), 2);
+            assert_eq!(app.chats[index].unread, 2);
+        }
+        let mut app = App::new(vec![recipient.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&recipient);
+        app.select(server);
+        for message in messages {
+            keep(&shared, &recipient, &message);
+            apply(
+                &mut app,
+                Msg::Incoming {
+                    account: recipient.clone(),
+                    message,
+                    at: now(),
+                },
+                &shared,
+            );
+        }
+        let chat = app.chats.iter().find(|c| c.jid == *sender.jid()).unwrap();
+        assert_eq!(
+            chat.lines.len(),
+            1,
+            "one incoming upload, irrespective of transport copies"
+        );
+        assert_eq!(chat.unread, 1, "a duplicate must not increase unread");
+        assert!(!chat.lines[0].encrypted);
+        assert!(chat.lines[0].media.is_some());
+        let mut restarted = App::new(vec![recipient.clone()], Modifier::Ctrl, 26, 30);
+        load_history(&mut restarted, &store, &[recipient]);
+        let chat = restarted.chats.iter().find(|c| c.jid == *sender.jid()).unwrap();
+        assert_eq!(chat.lines.len(), 1, "restart must keep the same one message");
+    }
+
     #[test]
     fn an_irc_chat_read_locally_stays_read_after_restart_without_live_archive_ids() {
         use crate::app::{App, ChatKind};

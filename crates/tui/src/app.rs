@@ -1819,6 +1819,42 @@ impl App {
         }
     }
 
+    /// Offline delivery and MAM may both carry the same message. Merge transport
+    /// metadata before counting unread or notifying; never deduplicate by body.
+    pub fn merge_duplicate(&mut self, account: &BareJid, message: &Incoming) -> bool {
+        // Corrections have their own handling and must not be swallowed here.
+        if message.replaces.is_some() {
+            return false;
+        }
+        let Some(chat) = self
+            .chats
+            .iter_mut()
+            .find(|c| &c.account == account && c.jid == message.peer)
+        else {
+            return false;
+        };
+        let outgoing = message.direction == Direction::Outgoing;
+        let Some(line) = chat.lines.iter_mut().find(|line| {
+            line.outgoing == outgoing
+                && !line.notice
+                && (message
+                    .archive_id
+                    .as_ref()
+                    .is_some_and(|id| line.archive_id.as_ref() == Some(id))
+                    || (message.id.as_ref().is_some_and(|id| line.id.as_ref() == Some(id))
+                        && message.nick.as_ref().is_none_or(|nick| &line.who == nick)))
+        }) else {
+            return false;
+        };
+        if message.archive_id.is_some() {
+            line.archive_id = message.archive_id.clone();
+        }
+        if line.id.is_none() {
+            line.id = message.id.clone();
+        }
+        true
+    }
+
     /// A message arrived (or one's own came back): shown, and its read marker owed. What
     /// to do about it comes back: the marker, while the chat is in sight.
     pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) -> Vec<Action> {
@@ -1839,6 +1875,9 @@ impl App {
                 line.archive_id = message.archive_id.clone();
             }
             self.delivery(account, &id.clone(), Delivery::Sent);
+            return Vec::new();
+        }
+        if self.merge_duplicate(account, message) {
             return Vec::new();
         }
         if message.not_for_this_device {
