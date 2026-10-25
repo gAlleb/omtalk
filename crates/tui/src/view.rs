@@ -1158,7 +1158,15 @@ pub fn message_rows(
             };
             if slot.image && path.is_some() && ready(&slot.url) {
                 // A picture's rows hold no text: its time and name on a row of their own.
-                if heads.last().is_some_and(|(at, _)| *at == rows.len()) {
+                if !line.encrypted {
+                    rows.push(
+                        TextLine::from(vec![
+                            Span::raw(pad.clone()),
+                            Span::styled(marker, Style::default().fg(theme::warn())),
+                        ])
+                        .into(),
+                    );
+                } else if heads.last().is_some_and(|(at, _)| *at == rows.len()) {
                     rows.push(TextLine::from(pad.clone()).into());
                 }
                 for row in 0..PICTURE_ROWS {
@@ -6275,6 +6283,43 @@ mod tests {
         app.chats[bob].lines.push(line);
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("👍 2  ❤ 1"), "one gets its count too: {text}");
+    }
+
+    #[test]
+    fn loaded_pictures_keep_the_unencrypted_mark_in_both_layouts() {
+        for compact in [false, true] {
+            for outgoing in [false, true] {
+                for encrypted in [false, true] {
+                    let mut line = Line::message_sharing(
+                        1_700_000_000,
+                        "alice".into(),
+                        "https://example.org/cat.png".into(),
+                        encrypted,
+                        outgoing,
+                        true,
+                    );
+                    line.media.as_mut().unwrap().state = MediaState::Ready("/cache/cat.png".into());
+                    let rows = message_rows(
+                        &[line],
+                        80,
+                        theme::text_icons(),
+                        &|_| true,
+                        "me",
+                        Look {
+                            compact,
+                            ..Look::default()
+                        },
+                    );
+                    let text = rows
+                        .iter()
+                        .map(|r| r.text.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert_eq!(text.contains("[без шифрования]"), !encrypted, "{text}");
+                    assert!(rows.iter().any(|r| r.picture.is_some()));
+                }
+            }
+        }
     }
 
     #[test]
