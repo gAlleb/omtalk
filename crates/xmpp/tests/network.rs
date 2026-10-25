@@ -173,3 +173,49 @@ async fn a_message_sent_into_a_frozen_network_counts_only_once_the_server_has_it
     }
     assert!(got, "it arrived");
 }
+
+/// The first connection checks the password; delay the real stream's handshake so
+/// the restored chat's own-account IQ is allocated before binding completes.
+#[tokio::test]
+async fn own_iq_queued_before_login_matches_the_servers_reply() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let forwarding = tokio::spawn(async move {
+        let mut connection = 0;
+        while let Ok((mut client, _)) = listener.accept().await {
+            let delay = connection > 0;
+            connection += 1;
+            tokio::spawn(async move {
+                let mut server = TcpStream::connect(SERVER).await.unwrap();
+                if delay {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            });
+        }
+    });
+    let (mut accounts, mut events) = Accounts::new();
+    let mut settings = config("u08", &addr);
+    settings.iq_timeout = Duration::from_secs(3);
+    let chat: omtalk_xmpp::BareJid = format!("#early-{}%irc.example.org@bridge.localhost", settings.resource)
+        .parse()
+        .unwrap();
+    let account = accounts.add(settings).await;
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    // Deliberately no wait for Online: this is the old TUI startup call, without
+    // the new retry queue or an injected/mock timeout.
+    let result = account.read_up_to(&chat, &chat, "early-room-id").await;
+    let stored = account
+        .read_marks()
+        .await
+        .unwrap()
+        .contains(&(chat, "early-room-id".into()));
+    account.stop().await;
+    forwarding.abort();
+    drain.abort();
+    assert!(stored, "the real server must have stored the publication");
+    assert!(
+        result.is_ok(),
+        "the server stored and acknowledged it, but the client returned {result:?}"
+    );
+}

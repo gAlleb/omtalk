@@ -15,7 +15,7 @@ lto = true
 codegen-units = 1
 opt-level = "s"
 
-# tokio-xmpp 6.0.0 with lost wakeups fixed (vendor/tokio-xmpp, marked "omtalk:"): its
+# tokio-xmpp 6.0.0 with early own-account IQ tracking and lost wakeups fixed (vendor/tokio-xmpp, marked "omtalk:"): its
 # receiving half returned Pending without a wakeup whenever a send held the stream's
 # lock, so an answer could sit unread until its request timed out.
 [patch.crates-io]

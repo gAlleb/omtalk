@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The cause of the startup read-mark timeout is fixed in the XMPP library.** An own-account IQ queued before login was tracked under no address; after login the server's successful reply was matched under the account address and discarded. The tracker now knows the account before any IQ can be queued. A regression test publishes before login to real local Prosody and verifies both acknowledgement and stored state.
+
 - **Read-state synchronization waits for login and retries temporary failures.** Pending positions are coalesced per chat and published in order; one chat waiting for retry does not block another. Errors name the chat and say when a retry is scheduled, instead of losing the update after a timeout.
 
 - The mute glyph has extra space before the unread badge, so wide Nerd Font glyphs do not paint over its background.

@@ -265,10 +265,14 @@ impl Client {
         connector: C,
         timeouts: Timeouts,
     ) -> Self {
-        let stream = StanzaStream::new_c2s(connector, jid.into(), password.into(), timeouts, 16);
-        let (stream_tx, stream_rx) = stream.split();
-
+        let jid = jid.into();
         let iq_response_tracker = iq::IqResponseTracker::new();
+        // omtalk: own-account IQs may be queued before binding. Seed the bare JID
+        // now, otherwise they are keyed by None while replies after binding are
+        // normalized to Some(own_jid) and silently fail to match.
+        iq_response_tracker.set_account_jid(jid.to_bare());
+        let stream = StanzaStream::new_c2s(connector, jid, password.into(), timeouts, 16);
+        let (stream_tx, stream_rx) = stream.split();
         let (worker, shutdown_tx, stanza_rx) =
             worker::ClientWorker::new(stream_rx, iq_response_tracker.clone(), 16);
 
