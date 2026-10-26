@@ -1,0 +1,49 @@
+name: Build artifacts
+
+"on":
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: rust zig github:rust-cross/cargo-zigbuild
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-dist-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'mise.toml', 'vendor/**/*.rs', 'vendor/**/Cargo.toml') }}
+
+      - name: Build static x86_64 and aarch64 binaries
+        run: mise run dist
+
+      # tar preserves executable permissions when the Actions artifact is downloaded.
+      - name: Package binaries and checksums
+        run: tar -C dist -czf omtalk-linux.tar.gz omtalk-x86_64 omtalk-aarch64 SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: omtalk-linux-${{ github.sha }}
+          path: omtalk-linux.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

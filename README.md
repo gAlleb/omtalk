@@ -84,6 +84,13 @@ target/release/omtalk you@example.org
 (for Raspberry Pi 4/5 and other aarch64 Linux machines). Cross-compilation uses the
 pinned zig compiler without installing a system-wide cross toolchain.
 
+GitHub Actions builds both static Linux binaries after a branch push, using the
+same `mise run dist` task. Download `omtalk-linux-<commit>` from the run's Artifacts:
+its tarball contains both executables and `SHA256SUMS`. Several commits in one
+push produce one build of the final commit; a newer push cancels an unfinished
+run for the same branch. Artifacts are retained for 14 days. Manual runs are also
+available from the Actions page.
+
 ## Controls
 
 ### Panes and shortcuts
