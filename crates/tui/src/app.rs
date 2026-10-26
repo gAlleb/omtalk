@@ -2932,8 +2932,7 @@ impl App {
         let mut words = line.split_whitespace();
         let name = words.next().unwrap_or_default();
         let args: Vec<&str> = words.collect();
-        let target = args.first().and_then(|a| a.parse::<Jid>().ok());
-        let account = self.account_for(target.as_ref());
+        let account = self.account_for();
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
@@ -3280,21 +3279,9 @@ impl App {
         }
     }
 
-    /// The account to reach `jid` from: the one on its server (or on the server whose
-    /// service it is, as `muc.example.org`), else the one last picked.
-    pub fn account_for(&self, jid: Option<&Jid>) -> Option<BareJid> {
-        let domain = jid.map(|j| j.domain().as_str());
-        let local = domain.and_then(|d| {
-            self.accounts
-                .iter()
-                .find(|a| a.domain().as_str() == d)
-                .or_else(|| {
-                    self.accounts
-                        .iter()
-                        .find(|a| d.ends_with(&format!(".{}", a.domain())))
-                })
-        });
-        local.or(self.active.as_ref()).or(self.accounts.first()).cloned()
+    /// Commands use the explicitly selected account, irrespective of the peer's domain.
+    pub fn account_for(&self) -> Option<BareJid> {
+        self.active.as_ref().or(self.accounts.first()).cloned()
     }
 
     /// Pasted text goes in at the cursor as it is, line breaks included; in the services
@@ -3458,7 +3445,7 @@ impl App {
                 }
             }
         }
-        let account = self.account_for(None);
+        let account = self.account_for();
         let mut servers: Vec<String> = self.accounts.iter().map(|a| a.domain().to_string()).collect();
         for room in self.chats.iter().filter(|c| c.is_room()) {
             let domain = room.jid.domain().to_string();
@@ -3563,7 +3550,7 @@ impl App {
                 .filter(|c| c.kind == ChatKind::Direct)
                 .map(|c| c.jid.clone())
         });
-        let Some(account) = self.account_for(peer.clone().map(Jid::from).as_ref()) else {
+        let Some(account) = self.account_for() else {
             return Vec::new();
         };
         let (keys, request) = crate::keys::Keys::open(account, peer);
@@ -3860,7 +3847,7 @@ impl App {
 
     /// Opens the services window on `jid`, or on the current account's own server.
     pub fn open_services(&mut self, jid: Option<Jid>) -> Vec<Action> {
-        let Some(account) = self.account_for(jid.as_ref()) else {
+        let Some(account) = self.account_for() else {
             return Vec::new();
         };
         let jid = jid.unwrap_or_else(|| Jid::from(account.domain().to_owned()));
@@ -4232,7 +4219,7 @@ impl App {
 
     /// Renames a folder of the account commands act for.
     fn rename_folder(&mut self, old: &str, new: &str) -> Result<Vec<Action>, String> {
-        let Some(account) = self.account_for(None) else {
+        let Some(account) = self.account_for() else {
             return Err(tr!("no account", "нет аккаунта").to_owned());
         };
         if self.folders.iter().any(|f| f.account == account && f.name == new) {
@@ -4933,6 +4920,32 @@ mod tests {
         );
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(!app.show_left);
+    }
+
+    #[test]
+    fn addressed_commands_keep_the_active_account_even_on_the_peers_server() {
+        let home = jid("me@home.org");
+        for work in [jid("me@work.org"), jid("second@home.org")] {
+            let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+            let server = app.server_chat(&work);
+            app.select(server);
+            for peer in ["friend@home.org", "friend@elsewhere.net"] {
+                let actions = app.command(&format!("/msg {peer} hello"));
+                assert!(actions.iter().any(|a| matches!(a, Action::Send { account, to, .. } if *account == work && *to == jid(peer))), "{actions:?}");
+                assert_eq!(app.current().unwrap().account, work);
+            }
+            assert!(
+                matches!(&app.command("/join room@muc.home.org")[..], [Action::Join { account, .. }] if *account == work)
+            );
+            assert!(
+                matches!(&app.command("/add friend@home.org")[..], [Action::AddContact { account, .. }] if *account == work)
+            );
+            let home_server = app.server_chat(&home);
+            app.select(home_server);
+            assert!(
+                matches!(&app.command("/join room@muc.work.org")[..], [Action::Join { account, .. }] if *account == home)
+            );
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Commands use the active account instead of silently selecting one on the recipient’s server, including when several accounts share a server.
 - Unencrypted messages and pictures sent to yourself merge with their own echo instead of appearing twice; live delivery now agrees with archive history about their outgoing direction.
 - Loaded pictures retain the unencrypted mark, for both sent and received attachments in both layouts.
 - An offline message received again from MAM is shown and counted once. This fixes duplicate unencrypted pictures on login; sending the same picture again remains a separate message.

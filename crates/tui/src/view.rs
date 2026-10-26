@@ -3945,22 +3945,37 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert_eq!(app.visible_chats(), [a, c, b]);
 
-        // Commands go from the account on the peer's server, else from the one last picked.
-        assert_eq!(
-            app.account_for(Some(&"x@work.org".parse().unwrap())),
-            Some(work.clone())
-        );
-        assert_eq!(
-            app.account_for(Some(&"room@muc.work.org".parse().unwrap())),
-            Some(work.clone())
-        );
+        // The selected account wins, regardless of whom a command addresses.
         app.select(a);
-        assert_eq!(
-            app.account_for(Some(&"x@elsewhere.net".parse().unwrap())),
-            Some(home.clone())
-        );
+        assert_eq!(app.account_for(), Some(home.clone()));
         app.select(b);
-        assert_eq!(app.account_for(None), Some(work.clone()));
+        assert_eq!(app.account_for(), Some(work.clone()));
+    }
+
+    #[test]
+    fn only_the_active_account_heading_is_underlined() {
+        let home = jid("me@home.org");
+        let work = jid("me@work.org");
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+        for active in [&home, &work] {
+            app.active = Some(active.clone());
+            for account in [&home, &work] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+                terminal
+                    .draw(|f| f.render_widget(account_row(&app, account, false, 40), f.area()))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let start = 4; // fold mark and connection dot precede the account name
+                for x in start..start + account.to_string().len() as u16 {
+                    assert_eq!(
+                        buffer[(x, 0)]
+                            .modifier
+                            .contains(ratatui::style::Modifier::UNDERLINED),
+                        account == active
+                    );
+                }
+            }
+        }
     }
 
     #[test]

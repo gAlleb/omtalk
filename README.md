@@ -230,8 +230,8 @@ to stop reporting it.
 
 The chat list groups chats by account. Click an account heading or press `←` on it to
 collapse it; its unread count stays visible. Prefix+`z` toggles the current account
-alone. Commands use the account on the target contact's server, otherwise the last
-selected account (underlined).
+alone. Commands use the active account, underlined in the chat list. Selecting a chat or
+account heading changes it; the recipient's server never changes the sender.
 
 `/msg address` opens a direct chat; `/add address [name]` adds a contact. `/accept` and
 `/refuse` take an address to answer subscription requests. `/name Name` in a direct
