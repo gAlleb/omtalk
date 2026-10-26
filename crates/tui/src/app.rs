@@ -5130,8 +5130,16 @@ impl App {
                     _ => Vec::new(),
                 }
             }
-            MouseEventKind::ScrollUp if inside(self.areas.messages) => self.scroll(3),
-            MouseEventKind::ScrollDown if inside(self.areas.messages) => self.scroll(-3),
+            // Touchpads can interleave wheel events and arrow keys. Follow the
+            // pane being scrolled instead of retaining focus on the chat list.
+            MouseEventKind::ScrollUp if inside(self.areas.messages) => {
+                self.focus = Focus::Messages;
+                self.scroll(3)
+            }
+            MouseEventKind::ScrollDown if inside(self.areas.messages) => {
+                self.focus = Focus::Messages;
+                self.scroll(-3)
+            }
             MouseEventKind::ScrollUp if inside_opt(self.areas.left) => self.move_selection(-1),
             MouseEventKind::ScrollDown if inside_opt(self.areas.left) => self.move_selection(1),
             // A room's participants, as with the arrow keys: the pane follows the one picked.
@@ -5430,6 +5438,43 @@ mod tests {
         assert!(app.chats[chat].muted);
         assert!(!app.chats[server].muted);
         assert_eq!(app.config_notify.sound_on, "private+mention");
+    }
+
+    #[test]
+    fn mixed_touchpad_scroll_and_up_keys_keep_scrolling_the_open_chat() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        app.chat(&me, &jid("lynx@example.org"), ChatKind::Direct);
+        let room = app.chat(
+            &me,
+            &jid("chat5@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        app.focus = Focus::Chats; // left behind by clicking chat5 in the list
+        app.areas.messages = Rect::new(20, 0, 102, 38);
+        app.areas.left = Some(Rect::new(0, 0, 20, 41));
+        // Replay the decisive sequence from OMTALK_SCROLL_LOG: both scrolls
+        // are at (63,13), with an unmodified Up key between successive scrolls.
+        for _ in 0..2 {
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 63,
+                row: 13,
+                modifiers: KeyModifiers::NONE,
+            });
+            app.on_key(key(KeyCode::Up));
+            assert_eq!(
+                app.selected,
+                Some(room),
+                "an Up inside a scrolling gesture must not select the previous chat"
+            );
+        }
+        assert_eq!(app.chats[room].scroll, 8);
+        // Deliberately navigating the chat list still works.
+        app.focus = Focus::Chats;
+        app.on_key(key(KeyCode::Up));
+        assert_ne!(app.selected, Some(room));
     }
 
     #[test]
