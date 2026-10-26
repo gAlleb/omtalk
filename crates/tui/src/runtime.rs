@@ -441,6 +441,29 @@ fn log_event<T: std::fmt::Debug>(journal: &Option<std::fs::File>, event: T) -> T
     event
 }
 
+/// Optional navigation-only trace: no message bodies, pasted text or typed letters.
+fn trace_scroll(app: &App, event: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("OMTALK_SCROLL_LOG") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let chat = app
+        .current()
+        .map(|c| (&c.account, &c.jid, c.scroll, c.lines.len(), c.older_loading));
+    let _ = writeln!(
+        file,
+        "{} {event} selected={:?} chat={chat:?} focus={:?} messages={:?} left={:?}",
+        chrono::Utc::now().format("%H:%M:%S%.3f"),
+        app.selected,
+        app.focus,
+        app.areas.messages,
+        app.areas.left
+    );
+}
+
 /// Makes `dir` (and its parents) if need be, readable by the user alone (0700).
 fn private_dir(dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -688,6 +711,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             app.typing_out,
             Some((_, omtalk_xmpp::chatstates::ChatState::Composing))
         ) || app.typing_in.values().any(|t| !t.is_empty());
+        let selected_before = app.selected;
         let actions = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)), if typing => app.typing_tick(now()),
             _ = tokio::time::sleep_until(status.1 + STATUS_FADE), if fades => {
@@ -695,8 +719,14 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 Vec::new()
             }
             event = input.next() => match log_event(&journal, event) {
-                Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
-                Some(Ok(TermEvent::Mouse(mouse))) => app.on_mouse(mouse),
+                Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
+                    if matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down | crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown | crossterm::event::KeyCode::Home | crossterm::event::KeyCode::End) { trace_scroll(&app, &format!("navigation key {key:?}")); }
+                    app.on_key(key)
+                }
+                Some(Ok(TermEvent::Mouse(mouse))) => {
+                    trace_scroll(&app, &format!("mouse {mouse:?}"));
+                    app.on_mouse(mouse)
+                },
                 Some(Ok(TermEvent::FocusGained)) => app.on_focus(true),
                 Some(Ok(TermEvent::FocusLost)) => app.on_focus(false),
                 // Pasted text arrives whole (bracketed paste), line breaks and all,
@@ -732,6 +762,10 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             _ = hangup.recv() => break,
             _ = terminate.recv() => break,
         };
+        if app.selected != selected_before {
+            trace_scroll(&app, &format!("selection changed from {selected_before:?}"));
+        }
+
         for action in actions {
             if action == Action::Quit {
                 break;
@@ -1118,6 +1152,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         } => {
             let mut lines = lines;
             prepare_media(&mut lines, shared);
+            trace_scroll(
+                app,
+                &format!(
+                    "older received account={account} chat={chat} lines={} done={done}",
+                    lines.len()
+                ),
+            );
             app.older(&account, &chat, lines, before, done);
         }
         Msg::RoomName { account, room, name } => {

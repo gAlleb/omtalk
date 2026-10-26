@@ -3358,6 +3358,51 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn touchpad_scroll_over_messages_keeps_the_chat_across_history_pages() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        app.chat(&me, &jid("above@example.org"), ChatKind::Direct);
+        let target = jid("target@example.org");
+        let chat = app.chat(&me, &target, ChatKind::Direct);
+        app.select(chat);
+        // A click in the chat list can leave keyboard focus there. The pointer
+        // over messages must still scroll history, including during local loads.
+        app.focus = Focus::Chats;
+        for page in 0..20 {
+            app.older(
+                &me,
+                &target,
+                vec![Line::message(
+                    1000 - page,
+                    "bob".into(),
+                    format!("older {page}"),
+                    false,
+                    false,
+                )],
+                None,
+                false,
+            );
+            screen(&mut app, 120, 30);
+            let area = app.areas.messages;
+            for kind in [
+                MouseEventKind::ScrollUp,
+                MouseEventKind::ScrollLeft,
+                MouseEventKind::ScrollRight,
+                MouseEventKind::ScrollUp,
+            ] {
+                app.on_mouse(MouseEvent {
+                    kind,
+                    column: area.x + area.width / 2,
+                    row: area.y + area.height / 2,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert_eq!(app.selected, Some(chat), "history page {page}");
+            }
+        }
+    }
+
+    #[test]
     fn room_management_is_available_by_keyboard_and_mouse() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         let me = jid("me@example.org");
