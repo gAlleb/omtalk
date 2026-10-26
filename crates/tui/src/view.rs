@@ -89,6 +89,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     reaction_picker(frame, app, area);
     reaction_details(frame, app, area);
     search_window(frame, app, area);
+    switch_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -2201,6 +2202,59 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(hints), right_area);
 }
 
+fn switch_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(cursor) = app.switcher else { return };
+    let targets = app.switch_targets();
+    let width = screen.width.saturating_sub(4).min(80);
+    let height = screen.height.saturating_sub(2).min(18);
+    let area = Rect::new(screen.x + (screen.width - width) / 2, screen.y + 1, width, height);
+    clear(frame, area);
+    let title = trf!(
+        " Go to: {} ",
+        " Перейти: {} ",
+        app.input.strip_prefix(':').unwrap_or_default()
+    );
+    let block = pane(&title, true).title_bottom(tr!(
+        " ↑↓ · Enter · Esc · :: text ",
+        " ↑↓ · Enter · Esc · :: текст "
+    ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let first = cursor.saturating_sub(inner.height.saturating_sub(1) as usize);
+    app.areas.switch_rows = targets
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(inner.height as usize)
+        .enumerate()
+        .map(|(row, (index, _))| (Rect::new(inner.x, inner.y + row as u16, inner.width, 1), index))
+        .collect();
+    let rows: Vec<TextLine> = targets
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(inner.height as usize)
+        .map(|(i, (account, jid, name))| {
+            let text = format!(
+                "{}{} · {} · {}",
+                if i == cursor { "› " } else { "  " },
+                name,
+                jid,
+                account
+            );
+            TextLine::from(Span::styled(
+                text,
+                if i == cursor {
+                    Style::default().fg(theme::accent())
+                } else {
+                    Style::default()
+                },
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
 /// The results of `/search`, over the conversation.
 fn search_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     let Some(search) = app.search.as_ref() else { return };
@@ -3301,6 +3355,33 @@ mod tests {
     use omtalk_xmpp::BareJid;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn contact_switcher_renders_filters_and_opens_with_a_click() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        app.server_chat(&me);
+        app.contacts.insert((me.clone(), jid("offline@example.org")));
+        for c in ":offline".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let text = screen(&mut app, 100, 25);
+        assert!(text.contains("offline@example.org"), "{text}");
+        assert_eq!(app.areas.switch_rows.len(), 1);
+        let row = app.areas.switch_rows[0].0;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.chats[app.selected.unwrap()].jid, jid("offline@example.org"));
+        assert!(app.switcher.is_none());
+        // Narrow terminals must remain drawable while the switcher is open.
+        app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        screen(&mut app, 40, 12);
+    }
 
     fn jid(text: &str) -> BareJid {
         text.parse().unwrap()

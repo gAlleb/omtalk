@@ -407,6 +407,7 @@ pub struct Areas {
     pub reaction_details: Rect,
     /// The search results on screen, each with its index.
     pub search_rows: Vec<(Rect, usize)>,
+    pub switch_rows: Vec<(Rect, usize)>,
     pub left: Option<Rect>,
     pub right: Option<Rect>,
     pub messages: Rect,
@@ -892,6 +893,8 @@ pub struct App {
     pub chats: Vec<Chat>,
     pub selected: Option<usize>,
     unread_return: Option<(BareJid, BareJid)>,
+    pub switcher: Option<usize>,
+    pub contacts: BTreeSet<(BareJid, BareJid)>,
     pub focus: Focus,
     pub input: String,
     /// In characters, not bytes.
@@ -1035,6 +1038,8 @@ impl App {
             chats: Vec::new(),
             selected: None,
             unread_return: None,
+            switcher: None,
+            contacts: BTreeSet::new(),
             focus: Focus::Input,
             input: String::new(),
             cursor: 0,
@@ -2129,9 +2134,50 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(cursor) = self.switcher {
+            match key.code {
+                KeyCode::Up => {
+                    self.switcher = Some(cursor.saturating_sub(1));
+                    return Vec::new();
+                }
+                KeyCode::Down => {
+                    self.switcher = Some((cursor + 1).min(self.switch_targets().len().saturating_sub(1)));
+                    return Vec::new();
+                }
+                KeyCode::Enter => {
+                    let target = self.switch_targets().get(cursor).cloned();
+                    self.switcher = None;
+                    self.input.clear();
+                    self.cursor = 0;
+                    if let Some((account, jid, _)) = target {
+                        let index = self.chat(&account, &jid, ChatKind::Direct);
+                        self.collapsed.remove(&Group::Account(account));
+                        self.collapsed.remove(&self.group_of(index));
+                        return self.open(index);
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Esc => {
+                    self.switcher = None;
+                    self.input.clear();
+                    self.cursor = 0;
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
         let before = self.input.clone();
         let mut actions = self.handle_key(key);
         if self.input != before {
+            if self.input == ":" && before.is_empty() {
+                self.switcher = Some(0);
+            } else if self.switcher.is_some() {
+                self.switcher = if self.input.starts_with(':') && !self.input.starts_with("::") {
+                    Some(0)
+                } else {
+                    None
+                };
+            }
             actions.extend(self.after_edit());
         }
         actions
@@ -2864,7 +2910,7 @@ impl App {
         if self.sent.last() != Some(&kept) {
             self.sent.push(kept);
         }
-        let escaped = input.starts_with("//");
+        let escaped = input.starts_with("//") || input.starts_with("::");
         if escaped {
             input.remove(0);
         }
@@ -4360,6 +4406,33 @@ impl App {
             .collect()
     }
 
+    pub fn switch_targets(&self) -> Vec<(BareJid, BareJid, String)> {
+        let mut targets = BTreeMap::new();
+        for (account, jid) in self.contacts.iter().chain(self.names.keys()) {
+            targets.insert(
+                (account.clone(), jid.clone()),
+                self.name_of(&(account.clone(), jid.clone()))
+                    .unwrap_or_else(|| jid.to_string()),
+            );
+        }
+        for chat in self.chats.iter().filter(|c| c.kind != ChatKind::Server) {
+            targets.insert(
+                (chat.account.clone(), chat.jid.clone()),
+                chat.name.clone().unwrap_or_else(|| chat.jid.to_string()),
+            );
+        }
+        let query = self.input.strip_prefix(':').unwrap_or_default().to_lowercase();
+        let mut targets: Vec<_> = targets
+            .into_iter()
+            .filter(|((_, jid), name)| {
+                name.to_lowercase().contains(&query) || jid.as_str().to_lowercase().contains(&query)
+            })
+            .map(|((a, j), n)| (a, j, n))
+            .collect();
+        targets.sort_by_key(|(a, j, n)| (n.to_lowercase(), j.clone(), a.clone()));
+        targets
+    }
+
     fn first_unread(&mut self) -> Vec<Action> {
         let next = self
             .chat_tree(true)
@@ -4718,6 +4791,24 @@ impl App {
         let (x, y) = (mouse.column, mouse.row);
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         let inside_opt = |r: Option<Rect>| r.is_some_and(inside);
+        if self.switcher.is_some() {
+            let code = match mouse.kind {
+                MouseEventKind::ScrollUp => Some(KeyCode::Up),
+                MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some((_, index)) = self.areas.switch_rows.iter().find(|(r, _)| inside(*r)) {
+                        self.switcher = Some(*index);
+                        Some(KeyCode::Enter)
+                    } else {
+                        Some(KeyCode::Esc)
+                    }
+                }
+                _ => None,
+            };
+            return code
+                .map(|code| self.on_key(KeyEvent::new(code, KeyModifiers::NONE)))
+                .unwrap_or_default();
+        }
         if self.services.is_some() {
             return self.services_mouse(mouse);
         }
@@ -5304,6 +5395,38 @@ mod tests {
         assert!(app.chats[chat].muted);
         assert!(!app.chats[server].muted);
         assert_eq!(app.config_notify.sound_on, "private+mention");
+    }
+
+    #[test]
+    fn escaped_prefixes_are_sent_literally_and_colon_finds_offline_contacts() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(bob);
+        for (typed, expected) in [("//settings", "/settings"), ("///", "//"), ("::hello", ":hello")] {
+            app.input = typed.into();
+            assert!(
+                app.submit()
+                    .iter()
+                    .any(|a| matches!(a, Action::Send { text, .. } if text == expected))
+            );
+        }
+        app.contacts.insert((me.clone(), jid("offline@example.org")));
+        for c in ":OFFLINE".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.switch_targets().len(), 1);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.chats[app.selected.unwrap()].jid, jid("offline@example.org"));
+        app.on_key(key(KeyCode::Char(':')));
+        app.on_key(key(KeyCode::Char(':')));
+        assert!(app.switcher.is_none());
+        assert_eq!(app.input, "::");
+        app.input.clear();
+        app.cursor = 0;
+        app.on_key(key(KeyCode::Char(':')));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.input.is_empty() && app.switcher.is_none());
     }
 
     #[test]

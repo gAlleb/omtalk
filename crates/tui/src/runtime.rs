@@ -1050,6 +1050,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             names,
             whole,
         } => {
+            if whole {
+                app.contacts.retain(|(a, _)| a != &account);
+            }
+            app.contacts
+                .extend(names.iter().map(|(jid, _)| (account.clone(), jid.clone())));
             for (jid, name) in &names {
                 let _ = shared
                     .store

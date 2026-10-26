@@ -127,11 +127,12 @@ Choosing another chat manually cancels the return point. Change the key in `/set
 `[ui] unread_shortcut = "f8"`. `"modifier+n"` follows the main modifier; `"none"`
 disables the direct shortcut. Prefix+N remains available.
 
-`//settings` sends `/settings` as a literal message.
+Type `:` in an empty input to find a contact or open room by name or JID; use
+Up/Down and Enter to open it, Esc to cancel. `::text` sends `:text`, and
+`//settings` sends `/settings`. `/np` shares `♫ Artist — Title` from the first
+playing MPRIS player (players sorted by name); requires `playerctl`. Nothing
+is sent if no player is playing or its title is unavailable.
 
-`/np` shares `♫ Artist — Title` from the first playing MPRIS player (players
-sorted by name); requires `playerctl`. Nothing is sent if no player is playing
-or its title is unavailable.
 
 ### Input and completion
 
