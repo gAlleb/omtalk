@@ -14,6 +14,7 @@ mod keys;
 mod mpris;
 mod notify;
 mod read_sync;
+mod room_admin;
 mod runtime;
 mod services;
 mod settings;

@@ -798,6 +798,7 @@ pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
     ("n", "first unread chat", "первый непрочитанный чат"),
     ("p", "settings", "настройки"),
     ("c", "this chat's commands", "команды этого чата"),
+    ("g", "room management", "управление комнатой"),
     (
         "w",
         "close the chat (a room is left)",
@@ -2366,6 +2367,7 @@ impl App {
             KeyCode::Char('e') => self.open_keys(None),
             KeyCode::Char('p') => self.open_settings(),
             KeyCode::Char('c') => self.open_chat_commands(),
+            KeyCode::Char('g') => self.open_room_admin(None),
             KeyCode::Char('a') => self.reply_here(),
             KeyCode::Char('w') => match self.selected {
                 Some(index) => self.close_chat(index),
@@ -3124,6 +3126,7 @@ impl App {
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
+            ("/room", _) if rest.is_empty() => return self.open_room_admin(None),
             ("/om", _) if rest.is_empty() => {
                 return match self.selected {
                     Some(index) => self.send_to(index, "ॐ असतो मा सद्गमय".into()),
@@ -4200,6 +4203,23 @@ impl App {
         }]
     }
 
+    fn open_room_admin(&mut self, target: Option<BareJid>) -> Vec<Action> {
+        let Some(chat) = self.current().filter(|c| c.is_room()) else {
+            self.status = tr!("open a room first", "сначала откройте комнату").into();
+            return Vec::new();
+        };
+        let mut services = Services::room(chat.account.clone(), chat.jid.clone());
+        services.room_nick = target.as_ref().and_then(|jid| {
+            chat.occupants
+                .iter()
+                .find(|(_, real)| real.as_ref() == Some(jid))
+                .map(|(nick, _)| nick.clone())
+        });
+        services.room_target = target;
+        self.services = Some(services);
+        Vec::new()
+    }
+
     /// Closes the window; a command still waiting for its form is cancelled on the
     /// server, so it does not hang there half done.
     pub fn close_services(&mut self) -> Vec<Action> {
@@ -4938,6 +4958,12 @@ impl App {
                 self.focus = Focus::Input;
                 return vec![Action::PastePrimary];
             }
+            MouseEventKind::Down(MouseButton::Right)
+                if self.current().is_some_and(|c| c.is_room())
+                    && let Some((_, jid)) = self.areas.people.iter().find(|(r, _)| inside(*r)) =>
+            {
+                return self.open_room_admin(Some(jid.clone()));
+            }
             // A right click on a message offers reactions to it.
             MouseEventKind::Down(MouseButton::Right)
                 if inside(self.areas.messages)
@@ -5404,6 +5430,24 @@ mod tests {
         assert!(app.chats[chat].muted);
         assert!(!app.chats[server].muted);
         assert_eq!(app.config_notify.sound_on, "private+mention");
+    }
+
+    #[test]
+    fn room_management_keeps_the_account_room_and_selected_member() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let room = jid("room@muc.example.org");
+        let bob = jid("bob@example.org");
+        let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+        app.chats[chat].occupants.insert("Bob".into(), Some(bob.clone()));
+        app.select(chat);
+        app.open_room_admin(Some(bob.clone()));
+        let services = app.services.as_ref().unwrap();
+        assert!(services.room);
+        assert_eq!(services.account, me);
+        assert_eq!(services.jid, Jid::from(room));
+        assert_eq!(services.room_target, Some(bob));
+        assert_eq!(services.room_nick.as_deref(), Some("Bob"));
     }
 
     #[test]

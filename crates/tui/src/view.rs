@@ -2770,6 +2770,7 @@ fn services_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     };
     let title = match &services.form {
         Some(form) => format!("{} · {}", form.title, form.jid),
+        None if services.room => trf!("Room management · {place}", "Управление комнатой · {place}"),
         None => trf!("Services · {place}", "Сервисы · {place}"),
     };
     let block = pane(&title, true);
@@ -3355,6 +3356,33 @@ mod tests {
     use omtalk_xmpp::BareJid;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn room_management_is_available_by_keyboard_and_mouse() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert!(app.services.as_ref().unwrap().room);
+        let text = screen(&mut app, 120, 35);
+        assert!(text.contains("room@muc.example.org"), "{text}");
+        let row = app.areas.service_rows[0].0;
+        let actions = app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            matches!(&actions[..], [Action::Services { request: crate::services::Request::Room { node, .. }, .. }] if node == "config")
+        );
+    }
 
     #[test]
     fn contact_switcher_renders_filters_and_opens_with_a_click() {
@@ -5802,7 +5830,7 @@ mod tests {
 
         // /help: every command, the last ones too.
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        let text = screen(&mut app, 120, 44);
+        let text = screen(&mut app, 120, 46);
         assert!(text.contains("/create") && text.contains("/quit"), "{text}");
     }
 

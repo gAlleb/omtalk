@@ -191,6 +191,14 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
 
 /// What tasks tell the interface.
 enum Msg {
+    RoomStep {
+        token: String,
+        account: BareJid,
+        room: BareJid,
+        node: String,
+        title: String,
+        step: Result<CommandStep, String>,
+    },
     NowPlaying {
         account: BareJid,
         chat: BareJid,
@@ -1220,12 +1228,59 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             app.own_resource.insert(account, resource);
         }
         Msg::Listed { jid, node, listing } => {
-            if let Some(services) = app.services.as_mut() {
+            if let Some(services) = app.services.as_mut().filter(|s| !s.room) {
                 services.listed(&jid, &node, listing);
             }
         }
+        Msg::RoomStep {
+            token,
+            account,
+            room,
+            node,
+            title,
+            mut step,
+        } => {
+            let topic = app
+                .chats
+                .iter()
+                .find(|c| c.account == account && c.jid == room)
+                .and_then(|c| c.topic.clone());
+            if let Some(services) = app.services.as_mut().filter(|s| {
+                s.room
+                    && s.room_request.as_deref() == Some(&token)
+                    && s.account == account
+                    && s.jid == room
+                    && s.node.as_deref() == Some(&node)
+            }) {
+                if let Ok(step) = &mut step
+                    && let Some(form) = &mut step.form
+                {
+                    for field in &mut form.fields {
+                        if node == "subject"
+                            && field.var.as_deref() == Some("subject")
+                            && let Some(topic) = &topic
+                        {
+                            field.values = vec![topic.clone()];
+                        }
+                        if matches!(node.as_str(), "owner" | "admin" | "member" | "outcast")
+                            && field.var.as_deref() == Some("jid")
+                            && let Some(jid) = &services.room_target
+                        {
+                            field.values = vec![jid.to_string()];
+                        }
+                        if node == "role"
+                            && field.var.as_deref() == Some("nick")
+                            && let Some(nick) = &services.room_nick
+                        {
+                            field.values = vec![nick.clone()];
+                        }
+                    }
+                }
+                services.stepped(room.into(), title, step);
+            }
+        }
         Msg::Stepped { jid, title, step } => {
-            if let Some(services) = app.services.as_mut() {
+            if let Some(services) = app.services.as_mut().filter(|s| !s.room) {
                 services.stepped(jid, title, step);
             }
         }
@@ -3068,10 +3123,57 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::Services { request, title } => {
             let account = match &request {
-                Request::Browse { account, .. } | Request::Execute { account, .. } => account.clone(),
+                Request::Browse { account, .. }
+                | Request::Execute { account, .. }
+                | Request::Room { account, .. } => account.clone(),
             };
             let Some((xmpp, _)) = get(&account) else { return };
             match request {
+                Request::Room {
+                    token,
+                    room,
+                    node,
+                    form,
+                    ..
+                } => {
+                    let step = crate::room_admin::step(&xmpp, &room, &node, form).await;
+                    let saved = step
+                        .as_ref()
+                        .is_ok_and(|s| s.status == omtalk_xmpp::services::CommandStatus::Completed);
+                    tell(Msg::RoomStep {
+                        token,
+                        account: account.clone(),
+                        room: room.clone(),
+                        node: node.clone(),
+                        title,
+                        step,
+                    });
+                    if saved {
+                        if node == "avatar" {
+                            tokio::spawn(load_avatar(
+                                shared.clone(),
+                                xmpp.clone(),
+                                room.clone(),
+                                AvatarFrom::VCard(None),
+                            ));
+                        }
+                        tokio::spawn(async move {
+                            if let Ok(name) = xmpp.room_name(&room).await {
+                                let _ = shared.tx.send(Msg::RoomName {
+                                    account: account.clone(),
+                                    room: room.clone(),
+                                    name,
+                                });
+                            }
+                            let members = read_members(&xmpp, &room).await;
+                            let _ = shared.tx.send(Msg::Members {
+                                account,
+                                room,
+                                members,
+                            });
+                        });
+                    }
+                }
                 Request::Browse { jid, node, .. } => {
                     // Commands are listed under the address itself, not under its nodes.
                     let (info, items, commands) = tokio::join!(

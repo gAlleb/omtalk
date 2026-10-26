@@ -242,6 +242,61 @@ impl Account {
         self.set(Some(room.clone().into()), query).await.map(drop)
     }
 
+    /// The complete configuration offered by this room's server.
+    pub async fn room_config(&self, room: &BareJid) -> Result<DataForm, Error> {
+        let answer = self
+            .get(
+                Some(room.clone().into()),
+                Element::builder("query", MUC_OWNER).build(),
+            )
+            .await?
+            .ok_or_else(|| Error::Unexpected("empty room configuration".into()))?;
+        let form = answer
+            .get_child("x", ns::DATA_FORMS)
+            .ok_or_else(|| Error::Unexpected("missing room configuration form".into()))?;
+        DataForm::try_from(form.clone()).map_err(|e| Error::Unexpected(e.to_string()))
+    }
+
+    pub async fn configure_room(&self, room: &BareJid, mut form: DataForm) -> Result<(), Error> {
+        form.type_ = DataFormType::Submit;
+        self.set(
+            Some(room.clone().into()),
+            Element::builder("query", MUC_OWNER)
+                .append(Element::from(form))
+                .build(),
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Roles concern a currently present nick; affiliations concern an account.
+    pub async fn set_role(
+        &self,
+        room: &BareJid,
+        nick: &str,
+        role: Role,
+        reason: Option<&str>,
+    ) -> Result<(), Error> {
+        let role = match role {
+            Role::Moderator => "moderator",
+            Role::Participant => "participant",
+            Role::Visitor => "visitor",
+            Role::None => "none",
+        };
+        let mut item = Element::builder("item", MUC_ADMIN)
+            .attr(xml_ncname!("nick").into(), nick)
+            .attr(xml_ncname!("role").into(), role);
+        if let Some(reason) = reason.filter(|r| !r.is_empty()) {
+            item = item.append(Element::builder("reason", MUC_ADMIN).append(reason).build());
+        }
+        self.set(
+            Some(room.clone().into()),
+            Element::builder("query", MUC_ADMIN).append(item.build()).build(),
+        )
+        .await
+        .map(drop)
+    }
+
     /// Sets the room's subject (its topic); the room tells everyone, and refuses if one
     /// may not.
     pub async fn set_subject(&self, room: &BareJid, subject: &str) -> Result<(), Error> {

@@ -57,6 +57,31 @@ pub fn vcard_photo(vcard: &Element) -> Option<Vec<u8>> {
 }
 
 impl crate::Account {
+    /// Update only PHOTO, preserving the room's other vCard fields.
+    pub async fn set_room_avatar(&self, room: &BareJid, png: Option<&[u8]>) -> Result<(), Error> {
+        let mut card = self
+            .get(
+                Some(room.clone().into()),
+                Element::builder("vCard", VCARD).build(),
+            )
+            .await?
+            .unwrap_or_else(|| Element::builder("vCard", VCARD).build());
+        while card.remove_child("PHOTO", VCARD).is_some() {}
+        if let Some(png) = png {
+            card.append_child(
+                Element::builder("PHOTO", VCARD)
+                    .append(Element::builder("TYPE", VCARD).append("image/png").build())
+                    .append(
+                        Element::builder("BINVAL", VCARD)
+                            .append(base64::engine::general_purpose::STANDARD.encode(png))
+                            .build(),
+                    )
+                    .build(),
+            );
+        }
+        self.set(Some(room.clone().into()), card).await.map(drop)
+    }
+
     /// The avatar `id` of `owner`, from PEP, checked against its name.
     pub async fn avatar(&self, owner: &BareJid, id: &str) -> Result<Vec<u8>, Error> {
         let to = (owner != self.jid()).then(|| owner.clone().into());

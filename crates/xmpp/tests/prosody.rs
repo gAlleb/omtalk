@@ -1105,3 +1105,149 @@ async fn a_contact_is_named_and_unnamed_and_ones_own_name_reaches_contacts() {
     assert_eq!(nick::of(&items), Some(None), "taken away");
     let _ = (&mut a_events, &mut b_events);
 }
+
+#[tokio::test]
+async fn room_administration_preserves_configuration_and_enforces_privileges() {
+    use omtalk_xmpp::{Role, muc};
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u60")).await;
+    let guest = accounts.add(config("u61")).await;
+    online(&mut events, &[&owner, &guest]).await;
+    let room: BareJid = format!("manage-{}@muc.localhost", rand_suffix()).parse().unwrap();
+    owner.join(&room, "owner").await.unwrap();
+    owner.make_private(&room).await.unwrap();
+    let mut form = owner.room_config(&room).await.unwrap();
+    form.fields
+        .iter_mut()
+        .find(|f| f.var.as_deref() == Some("muc#roomconfig_roomname"))
+        .unwrap()
+        .values = vec!["Managed room".into()];
+    owner.configure_room(&room, form).await.unwrap();
+    assert_eq!(
+        owner.room_name(&room).await.unwrap().as_deref(),
+        Some("Managed room")
+    );
+    let read = owner.room_config(&room).await.unwrap();
+    for (key, expected) in [
+        ("muc#roomconfig_membersonly", "1"),
+        ("muc#roomconfig_persistentroom", "1"),
+        ("muc#roomconfig_whois", "anyone"),
+    ] {
+        assert_eq!(
+            read.fields
+                .iter()
+                .find(|f| f.var.as_deref() == Some(key))
+                .unwrap()
+                .values,
+            [expected]
+        );
+    }
+    assert!(
+        guest.room_config(&room).await.is_err(),
+        "a stranger cannot read owner configuration"
+    );
+    assert!(
+        guest
+            .set_affiliation(&room, guest.jid(), Affiliation::Owner)
+            .await
+            .is_err(),
+        "a stranger cannot promote themselves"
+    );
+    owner
+        .set_affiliation(&room, guest.jid(), Affiliation::Member)
+        .await
+        .unwrap();
+    guest.join(&room, "guest").await.unwrap();
+    for role in [Role::Moderator, Role::Visitor, Role::Participant] {
+        owner
+            .set_role(&room, "guest", role.clone(), Some("test"))
+            .await
+            .unwrap();
+        wait_for(&mut events, |e| match &e.event {
+            Event::Presence(p) => {
+                muc::occupant(p).filter(|o| o.room == room && o.nick == "guest" && o.role == role)
+            }
+            _ => None,
+        })
+        .await;
+    }
+    for affiliation in [Affiliation::Admin, Affiliation::Owner, Affiliation::Member] {
+        owner
+            .set_affiliation(&room, guest.jid(), affiliation.clone())
+            .await
+            .unwrap();
+        assert!(
+            owner
+                .affiliated(&room, affiliation)
+                .await
+                .unwrap()
+                .contains(guest.jid())
+        );
+    }
+    owner
+        .set_role(&room, "guest", Role::None, Some("kick test"))
+        .await
+        .unwrap();
+    guest.join(&room, "guest").await.unwrap();
+    owner
+        .set_affiliation(&room, guest.jid(), Affiliation::Outcast)
+        .await
+        .unwrap();
+    assert!(
+        owner
+            .affiliated(&room, Affiliation::Outcast)
+            .await
+            .unwrap()
+            .contains(guest.jid())
+    );
+    assert!(
+        guest.join(&room, "guest").await.is_err(),
+        "a banned account cannot rejoin"
+    );
+    owner
+        .set_affiliation(&room, guest.jid(), Affiliation::None)
+        .await
+        .unwrap();
+    assert!(
+        !owner
+            .affiliated(&room, Affiliation::Outcast)
+            .await
+            .unwrap()
+            .contains(guest.jid())
+    );
+}
+
+#[tokio::test]
+async fn room_avatar_changes_preserve_other_vcard_fields() {
+    let (mut accounts, mut events) = Accounts::new();
+    let owner = accounts.add(config("u62")).await;
+    online(&mut events, &[&owner]).await;
+    let room: BareJid = format!("avatar-admin-{}@muc.localhost", rand_suffix())
+        .parse()
+        .unwrap();
+    owner.join(&room, "owner").await.unwrap();
+    owner.make_private(&room).await.unwrap();
+    let card: Element = r#"<vCard xmlns="vcard-temp"><FN>Keep this field</FN></vCard>"#
+        .parse()
+        .unwrap();
+    owner.set(Some(room.clone().into()), card).await.unwrap();
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+        )
+        .unwrap();
+    owner.set_room_avatar(&room, Some(&png)).await.unwrap();
+    assert_eq!(owner.vcard_avatar(&room).await.unwrap(), Some(png));
+    owner.set_room_avatar(&room, None).await.unwrap();
+    assert_eq!(owner.vcard_avatar(&room).await.unwrap(), None);
+    let card = owner
+        .get(Some(room.into()), Element::builder("vCard", "vcard-temp").build())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        card.get_child("FN", "vcard-temp").unwrap().text(),
+        "Keep this field"
+    );
+}

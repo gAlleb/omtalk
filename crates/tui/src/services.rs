@@ -10,6 +10,13 @@ use xmpp_parsers::data_forms::{DataForm, DataFormType, FieldType};
 /// What the window asks the runtime to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
+    Room {
+        token: String,
+        account: BareJid,
+        room: BareJid,
+        node: String,
+        form: Option<DataForm>,
+    },
     Browse {
         account: BareJid,
         jid: Jid,
@@ -94,6 +101,10 @@ impl FormState {
 }
 
 pub struct Services {
+    pub room: bool,
+    pub room_request: Option<String>,
+    pub room_target: Option<BareJid>,
+    pub room_nick: Option<String>,
     pub account: BareJid,
     pub jid: Jid,
     pub node: Option<String>,
@@ -121,6 +132,10 @@ impl Services {
             node: None,
         };
         let services = Self {
+            room: false,
+            room_request: None,
+            room_target: None,
+            room_nick: None,
             account,
             jid,
             node: None,
@@ -133,6 +148,14 @@ impl Services {
             loading: true,
         };
         (services, request)
+    }
+
+    pub fn room(account: BareJid, room: BareJid) -> Self {
+        let (mut services, _) = Self::open(account, room.clone().into());
+        services.room = true;
+        services.listing = Some(crate::room_admin::listing(&room));
+        services.loading = false;
+        services
     }
 
     /// Where "back" leads from the first place: for a biboumi channel, its IRC server,
@@ -272,6 +295,23 @@ impl Services {
         let Some(node) = command.node.clone() else {
             return Outcome::Stay;
         };
+        if self.room {
+            let token = omtalk_xmpp::receipts::new_id();
+            self.room_request = Some(token.clone());
+            self.node = Some(node.clone());
+            self.loading = true;
+            self.problem = None;
+            return Outcome::Request(
+                Request::Room {
+                    token,
+                    account: self.account.clone(),
+                    room: self.jid.to_bare(),
+                    node,
+                    form: None,
+                },
+                command.name.unwrap_or_default(),
+            );
+        }
         self.loading = true;
         Outcome::Request(
             Request::Execute {
@@ -300,6 +340,15 @@ impl Services {
     }
 
     pub fn reload(&mut self) -> Outcome {
+        if self.room {
+            self.room_request = None;
+            self.node = None;
+            self.form = None;
+            self.problem = None;
+            self.loading = false;
+            self.listing = Some(crate::room_admin::listing(&self.jid.to_bare()));
+            return Outcome::Stay;
+        }
         self.loading = true;
         self.problem = None;
         Outcome::Request(
@@ -418,10 +467,38 @@ impl Services {
 
     /// A step on the open form: its values go with it, except when cancelling.
     pub fn act(&mut self, action: CommandAction) -> Outcome {
+        if self.room && self.loading && action != CommandAction::Cancel {
+            return Outcome::Stay;
+        }
         let Some(form) = &self.form else {
             return Outcome::Stay;
         };
         let filled = (action != CommandAction::Cancel).then(|| submission(form));
+        if self.room {
+            if action == CommandAction::Cancel {
+                self.room_request = None;
+                self.form = None;
+                self.node = None;
+                self.loading = false;
+                self.problem = None;
+                return Outcome::Stay;
+            }
+            let node = form.step.node.clone();
+            let title = form.title.clone();
+            let token = omtalk_xmpp::receipts::new_id();
+            self.room_request = Some(token.clone());
+            self.loading = true;
+            return Outcome::Request(
+                Request::Room {
+                    token,
+                    account: self.account.clone(),
+                    room: self.jid.to_bare(),
+                    node,
+                    form: filled,
+                },
+                title,
+            );
+        }
         let request = Request::Execute {
             account: self.account.clone(),
             jid: form.jid.clone(),
@@ -584,6 +661,58 @@ mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
     use omtalk_xmpp::Element;
+
+    #[test]
+    fn room_forms_use_muc_requests_preserve_server_fields_and_cancel_locally() {
+        let account = "me@example.org".parse().unwrap();
+        let room: BareJid = "room@muc.example.org".parse().unwrap();
+        let mut services = Services::room(account, room.clone());
+        let Outcome::Request(
+            Request::Room {
+                node,
+                token,
+                form: None,
+                ..
+            },
+            _,
+        ) = services.enter()
+        else {
+            panic!("room config request")
+        };
+        assert_eq!(node, "config");
+        let mut step = step(Some(form()), CommandStatus::Executing);
+        step.node = "config".into();
+        step.actions = vec![CommandAction::Complete];
+        services.stepped(room.into(), "Configuration".into(), Ok(step));
+        services.loading = false;
+        let Outcome::Request(
+            Request::Room {
+                form: Some(sent),
+                token: next,
+                ..
+            },
+            _,
+        ) = services.act(CommandAction::Complete)
+        else {
+            panic!("room config submission")
+        };
+        assert_ne!(token, next, "a new operation cannot accept a stale answer");
+        assert_eq!(sent.type_, DataFormType::Submit);
+        assert_eq!(
+            sent.fields
+                .iter()
+                .find(|f| f.var.as_deref() == Some("FORM_TYPE"))
+                .unwrap()
+                .values,
+            ["http://jabber.org/protocol/admin"]
+        );
+        assert!(
+            matches!(services.act(CommandAction::Complete), Outcome::Stay),
+            "no double submit while waiting"
+        );
+        assert!(matches!(services.act(CommandAction::Cancel), Outcome::Stay));
+        assert!(services.room_request.is_none() && services.form.is_none());
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

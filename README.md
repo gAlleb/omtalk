@@ -328,6 +328,17 @@ password, nick and persistent connections. Long result tables scroll with arrows
 ## Encryption and devices
 
 Click the lock above the input or use prefix+`o` to toggle OMEMO for the chat.
+`/room` (modifier+G or prefix+G) opens room management. Right-click a participant
+in the side pane to prefill their account and nickname. The configuration page
+uses the server's complete form, preserving unedited values and hidden fields.
+Other pages show owners, administrators, members and bans, assign affiliations,
+grant/revoke moderator or voice, kick, change the topic, and set/remove a room avatar.
+Affiliations apply to account JIDs, including offline users; roles apply to present
+nicknames. Changing either requires the confirmation checkbox. The server enforces
+your permissions; failures remain in the form for correction. The avatar page takes
+a local image path (including `~/`), converts it to PNG up to 512×512, and preserves
+other room vCard fields. Avatar support depends on the room server.
+
 Group encryption needs a members-only room with visible member addresses; omtalk
 includes offline members' devices when encrypting.
 
@@ -469,6 +480,7 @@ address is given or the description says otherwise.
 | Contacts | `/accept ADDRESS`, `/refuse ADDRESS` | Answer a subscription request |
 | Names | `/name [NAME]` | Set/clear a contact's name; in a room, set its title (title required) |
 | Names | `/nickname [NAME]` | Set/clear your published nickname for the active account |
+| Rooms | `/room` | Manage room configuration, affiliations, roles, topic and avatar |
 | Rooms | `/join ADDRESS [NICK]` | Join a room |
 | Rooms | `/create NAME [TITLE]` | Create a room; NAME may be an address |
 | Rooms | `/invite ADDRESS` | Add and invite a member to the current room |
