@@ -2929,10 +2929,58 @@ impl App {
     }
 
     fn command(&mut self, line: &str) -> Vec<Action> {
-        let mut words = line.split_whitespace();
-        let name = words.next().unwrap_or_default();
-        let args: Vec<&str> = words.collect();
-        let account = self.account_for();
+        let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let rest = rest.trim_start();
+        let parsed = (|| -> Result<(&str, Option<BareJid>), String> {
+            if rest.split_whitespace().next() != Some("--account") {
+                return Ok((rest, None));
+            }
+            if !complete::allows_account(name) {
+                return Err(trf!(
+                    "{name} acts on the current chat and does not accept --account",
+                    "{name} действует на текущий чат и не принимает --account"
+                ));
+            }
+            let rest = rest["--account".len()..].trim_start();
+            let (value, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let account = value
+                .parse::<BareJid>()
+                .ok()
+                .filter(|jid| self.accounts.contains(jid));
+            let Some(account) = account else {
+                return Err(trf!(
+                    "--account needs a configured account address: {}",
+                    "--account нужен адрес настроенного аккаунта: {}",
+                    self.accounts
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            };
+            if rest.split_whitespace().next() == Some("--account") {
+                return Err(tr!(
+                    "--account can only be given once",
+                    "--account можно указать только один раз"
+                )
+                .into());
+            }
+            Ok((rest.trim_start(), Some(account)))
+        })();
+        let (rest, explicit) = match parsed {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.status = message;
+                self.refused = true;
+                return Vec::new();
+            }
+        };
+        // Strip the option only from the command prefix. Message text (and its
+        // whitespace) is untouched, including a literal "--account" in the body.
+        let command_line = format!("{name} {rest}");
+        let line = command_line.as_str();
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        let account = explicit.clone().or_else(|| self.account_for());
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
@@ -2987,6 +3035,11 @@ impl App {
             ("/accept", Some(jid)) => Ok(vec![Action::Accept { account, jid }]),
             ("/remove", Some(jid)) => Ok(vec![Action::RemoveContact { account, jid }]),
             // Without an address: the contact of the open chat.
+            ("/remove", None) if explicit.is_some() => Err(tr!(
+                "/remove --account ACCOUNT needs a contact address",
+                "/remove --account АККАУНТ нужен адрес контакта"
+            )
+            .into()),
             ("/remove", None) => match self.current().filter(|c| c.kind == ChatKind::Direct) {
                 Some(chat) => Ok(vec![Action::RemoveContact {
                     account: chat.account.clone(),
@@ -3012,7 +3065,7 @@ impl App {
                     "/services: нужен адрес сервиса, например example.org"
                 )
                 .to_owned()),
-                address => return self.open_services(address.and_then(Result::ok)),
+                address => return self.open_services_for(account, address.and_then(Result::ok)),
             },
             ("/folder", _) => match self.selected {
                 Some(index) => {
@@ -3064,7 +3117,7 @@ impl App {
                     Some(Err(_)) => return self.say(tr!("/keys [ADDRESS]", "/keys [АДРЕС]")),
                     None => None,
                 };
-                return self.open_keys(peer);
+                return self.open_keys_for(account, peer);
             }
             ("/reply", _) => return self.reply_here(),
             ("/search", _) => {
@@ -3424,7 +3477,10 @@ impl App {
 
     /// What Tab can complete here.
     fn completion_context(&self) -> complete::Context {
-        let mut context = complete::Context::default();
+        let mut context = complete::Context {
+            accounts: self.accounts.iter().map(ToString::to_string).collect(),
+            ..complete::Context::default()
+        };
         if let Some(chat) = self.current().filter(|c| c.is_room()) {
             let own = match &chat.kind {
                 ChatKind::Room { nick } => nick.as_str(),
@@ -3545,14 +3601,18 @@ impl App {
 
     /// Opens the keys window: `peer`'s devices (else the open chat's peer) and one's own.
     pub fn open_keys(&mut self, peer: Option<BareJid>) -> Vec<Action> {
-        let peer = peer.or_else(|| {
-            self.current()
-                .filter(|c| c.kind == ChatKind::Direct)
-                .map(|c| c.jid.clone())
-        });
         let Some(account) = self.account_for() else {
             return Vec::new();
         };
+        self.open_keys_for(account, peer)
+    }
+
+    fn open_keys_for(&mut self, account: BareJid, peer: Option<BareJid>) -> Vec<Action> {
+        let peer = peer.or_else(|| {
+            self.current()
+                .filter(|c| c.kind == ChatKind::Direct && c.account == account)
+                .map(|c| c.jid.clone())
+        });
         let (keys, request) = crate::keys::Keys::open(account, peer);
         self.keys = Some(keys);
         vec![Action::Keys(request)]
@@ -3850,6 +3910,10 @@ impl App {
         let Some(account) = self.account_for() else {
             return Vec::new();
         };
+        self.open_services_for(account, jid)
+    }
+
+    fn open_services_for(&mut self, account: BareJid, jid: Option<Jid>) -> Vec<Action> {
         let jid = jid.unwrap_or_else(|| Jid::from(account.domain().to_owned()));
         let (services, request) = Services::open(account, jid);
         self.services = Some(services);
@@ -4920,6 +4984,90 @@ mod tests {
         );
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(!app.show_left);
+    }
+
+    #[test]
+    fn explicit_account_routes_messages_without_changing_the_body() {
+        let home = jid("me@home.org");
+        let work = jid("second@home.org");
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&home);
+        app.select(server);
+        let actions = type_text(
+            &mut app,
+            "/msg --account second@home.org friend@home.org привет  --account это текст",
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Send { account, to, text, .. }
+            if *account == work && *to == jid("friend@home.org") && text == "привет  --account это текст")),
+            "{actions:?}"
+        );
+        assert_eq!(app.current().unwrap().account, work);
+        assert_eq!(app.active, Some(work));
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn explicit_account_applies_to_addressed_commands_and_their_windows() {
+        let home = jid("me@home.org");
+        let work = jid("me@work.org");
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&home);
+        app.select(server);
+        assert!(
+            matches!(&app.command("/join --account me@work.org room@muc.home.org Ник")[..], [Action::Join { account, nick: Some(nick), .. }] if *account == work && nick == "Ник")
+        );
+        assert!(
+            matches!(&app.command("/add --account me@work.org friend@home.org Друг")[..], [Action::AddContact { account, name: Some(name), .. }] if *account == work && name == "Друг")
+        );
+        assert!(
+            matches!(&app.command("/remove --account me@work.org friend@home.org")[..], [Action::RemoveContact { account, .. }] if *account == work)
+        );
+        assert!(
+            matches!(&app.command("/accept --account me@work.org friend@home.org")[..], [Action::Accept { account, .. }] if *account == work)
+        );
+        assert!(
+            matches!(&app.command("/refuse --account me@work.org friend@home.org")[..], [Action::Refuse { account, .. }] if *account == work)
+        );
+        assert!(
+            matches!(&app.command("/create --account me@work.org team Комната")[..], [Action::CreateRoom { account, name: Some(name), .. }] if *account == work && name == "Комната")
+        );
+        let actions = app.command("/keys --account me@work.org friend@home.org");
+        assert!(
+            matches!(&actions[..], [Action::Keys(crate::keys::Request::Load { account, peer: Some(peer) })] if *account == work && *peer == jid("friend@home.org"))
+        );
+        app.command("/services --account me@work.org muc.home.org");
+        let services = app.services.as_ref().unwrap();
+        assert_eq!(services.account, work);
+        assert_eq!(services.jid.to_string(), "muc.home.org");
+        assert_eq!(
+            app.active,
+            Some(home),
+            "an administrative command need not switch chats"
+        );
+    }
+
+    #[test]
+    fn invalid_account_options_refuse_without_sending_or_discarding_input() {
+        let home = jid("me@home.org");
+        let mut app = App::new(vec![home.clone(), jid("me@work.org")], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&home);
+        app.select(server);
+        for line in [
+            "/msg --account",
+            "/msg --account absent@work.org friend@home.org hello",
+            "/msg --account me@work.org/phone friend@home.org hello",
+            "/msg --account me@work.org --account me@home.org friend@home.org",
+            "/remove --account me@work.org",
+            "/leave --account me@work.org",
+        ] {
+            let actions = type_text(&mut app, line);
+            assert!(actions.is_empty(), "{line}: {actions:?}");
+            assert_eq!(app.input, line, "a refused command must remain editable");
+            assert_eq!(app.active, Some(home.clone()));
+        }
     }
 
     #[test]

@@ -280,9 +280,19 @@ pub fn about(name: &str) -> Option<&'static Command> {
     COMMANDS.iter().find(|c| c.name == name)
 }
 
+/// Commands that can choose an account independently of the currently open chat.
+pub fn allows_account(command: &str) -> bool {
+    matches!(
+        command,
+        "/msg" | "/join" | "/add" | "/remove" | "/accept" | "/refuse" | "/create" | "/keys" | "/services"
+    )
+}
+
 /// What can be completed where, gathered from the app.
 #[derive(Debug, Default)]
 pub struct Context {
+    /// Full JIDs of the configured accounts, for --account.
+    pub accounts: Vec<String>,
     /// Nicks in the current room, if it is one.
     pub nicks: Vec<String>,
     /// Addresses of people: direct chats and room participants who show theirs.
@@ -311,6 +321,32 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     let before: String = input.chars().take(cursor).collect();
     let first_end = before.find(char::is_whitespace);
     let command = first_end.map(|end| &before[..end]);
+    if let (Some(command), Some(end)) = (command, first_end)
+        && allows_account(command)
+    {
+        let rest = before[end..].trim_start();
+        if rest.split_whitespace().next() == Some("--account") {
+            if rest == "--account" {
+                return Some((before.chars().count(), vec![" ".into()]));
+            }
+            let value = rest["--account".len()..].trim_start();
+            if let Some(end) = value.find(char::is_whitespace) {
+                let tail = value[end..].trim_start();
+                let normalized = format!("{command} {tail}");
+                let skipped = before.chars().count() - normalized.chars().count();
+                return candidates(&normalized, normalized.chars().count(), context)
+                    .map(|(start, found)| (start + skipped, found));
+            }
+            let start = before.chars().count() - value.chars().count();
+            let found = matching(context.accounts.iter().map(String::as_str), value, " ");
+            return (!found.is_empty()).then_some((start, found));
+        }
+        if !rest.contains(char::is_whitespace) && rest.starts_with('-') {
+            let start = before.chars().count() - rest.chars().count();
+            let found = matching(["--account"].into_iter(), rest, " ");
+            return (!found.is_empty()).then_some((start, found));
+        }
+    }
     // The folder's name is all the rest of the line, spaces and all.
     // A path: all the rest of the line, completed from the disk.
     if let (Some("/upload"), Some(end)) = (command, first_end) {
@@ -335,7 +371,7 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     let start = before[..start_byte].chars().count();
     let found = match command {
         None if typed.starts_with('/') => matching(COMMANDS.iter().map(|c| c.name), typed, " "),
-        Some("/msg" | "/add" | "/accept" | "/refuse" | "/keys" | "/invite")
+        Some("/msg" | "/add" | "/remove" | "/accept" | "/refuse" | "/keys" | "/invite")
             if is_first_argument(&before, start_byte) =>
         {
             matching(context.people.iter().map(String::as_str), typed, " ")
@@ -423,6 +459,7 @@ mod tests {
 
     fn context() -> Context {
         Context {
+            accounts: vec!["me@home.org".into(), "me@work.org".into()],
             nicks: vec!["Алиса".into(), "alex".into(), "bob".into()],
             people: vec!["anna@home.org".into(), "boss@work.org".into()],
             rooms: vec!["team@muc.home.org".into()],
@@ -433,6 +470,32 @@ mod tests {
 
     fn complete(input: &str) -> Option<(usize, Vec<String>)> {
         candidates(input, input.chars().count(), &context())
+    }
+
+    #[test]
+    fn account_options_and_their_following_targets_complete() {
+        assert_eq!(complete("/msg --a"), Some((5, vec!["--account ".into()])));
+        assert_eq!(
+            complete("/msg --account me@w"),
+            Some((15, vec!["me@work.org ".into()]))
+        );
+        for (prefix, tail, expected) in [
+            ("/msg --account me@work.org ", "b", "boss@work.org "),
+            ("/join --account me@work.org ", "t", "team@muc.home.org "),
+            ("/services --account me@work.org ", "m", "muc.home.org"),
+            ("/remove --account me@work.org ", "a", "anna@home.org "),
+            ("/msg --account я@home.org ", "b", "boss@work.org "),
+        ] {
+            assert_eq!(
+                complete(&format!("{prefix}{tail}")),
+                Some((prefix.chars().count(), vec![expected.into()]))
+            );
+        }
+        assert!(
+            complete("/msg boss@work.org --a").is_none(),
+            "message body is not an option"
+        );
+        assert!(complete("/msg --account unknown").is_none());
     }
 
     #[test]

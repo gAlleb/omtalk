@@ -230,8 +230,24 @@ to stop reporting it.
 
 The chat list groups chats by account. Click an account heading or press `←` on it to
 collapse it; its unread count stays visible. Prefix+`z` toggles the current account
-alone. Commands use the active account, underlined in the chat list. Selecting a chat or
+alone. Addressed commands use the active account, underlined in the chat list. Selecting a chat or
 account heading changes it; the recipient's server never changes the sender.
+
+To choose a different sender for one command, put `--account` and the full configured
+account JID immediately after the command name. `Tab` completes account addresses and
+then the recipient as usual:
+
+```text
+/msg --account me@work.org friend@example.org hello
+/join --account me@home.org room@conference.example.org
+```
+
+The option is available for `/msg`, `/join`, `/add`, `/remove`, `/accept`, `/refuse`,
+`/create`, `/keys`, and `/services`. Unknown accounts are rejected; the input stays
+editable. `/remove --account ACCOUNT` also needs the contact's address. Commands on
+an existing chat, such as `/invite`, `/leave`, and `/upload`, use that chat's account.
+In message text, `--account` is ordinary text. Opening a chat with `/msg --account`
+selects that chat and makes its account active.
 
 `/msg address` opens a direct chat; `/add address [name]` adds a contact. `/accept` and
 `/refuse` take an address to answer subscription requests. `/name Name` in a direct

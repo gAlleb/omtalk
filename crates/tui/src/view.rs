@@ -884,7 +884,14 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(theme::border(true))
         .title(Span::styled(
-            tr!(" Tab completes ", " Tab — дописать "),
+            if app.accounts.len() > 1 {
+                tr!(
+                    " Tab completes · --account JID ",
+                    " Tab — дописать · --account JID "
+                )
+            } else {
+                tr!(" Tab completes ", " Tab — дописать ")
+            },
             Style::default().fg(theme::dim()),
         ));
     let inner = block.inner(area);

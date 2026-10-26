@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Addressed commands accept `--account JID` immediately after the command name, with Tab completion and validation of configured accounts. Message text is preserved; chat-bound commands keep their own account.
 - Commands use the active account instead of silently selecting one on the recipient’s server, including when several accounts share a server.
 - Unencrypted messages and pictures sent to yourself merge with their own echo instead of appearing twice; live delivery now agrees with archive history about their outgoing direction.
 - Loaded pictures retain the unencrypted mark, for both sent and received attachments in both layouts.
