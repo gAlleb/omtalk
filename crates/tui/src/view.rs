@@ -615,18 +615,24 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                         }
                         _ => {}
                     }
-                } else if let Some(link) = &row.fetch {
-                    app.areas
-                        .fetches
-                        .push((Rect::new(inner.x, y, inner.width, 1), link.clone()));
-                } else if let Some((nick, width)) = &row.who {
-                    app.areas
-                        .nicks
-                        .push((Rect::new(inner.x, y, *width, 1), nick.clone()));
-                } else if let Some(path) = &row.open {
-                    app.areas
-                        .files
-                        .push((Rect::new(inner.x, y, inner.width, 1), path.clone()));
+                } else {
+                    // Compact rows can hold both a sender and an attachment. Register
+                    // each separately; recognizing the sender must not hide "open".
+                    let prefix = if let Some((nick, width)) = &row.who {
+                        let width = (*width).min(inner.width);
+                        app.areas
+                            .nicks
+                            .push((Rect::new(inner.x, y, width, 1), nick.clone()));
+                        width
+                    } else {
+                        0
+                    };
+                    let attachment = Rect::new(inner.x + prefix, y, inner.width - prefix, 1);
+                    if let Some(link) = &row.fetch {
+                        app.areas.fetches.push((attachment, link.clone()));
+                    } else if let Some(path) = &row.open {
+                        app.areas.files.push((attachment, path.clone()));
+                    }
                 }
                 texts.push(text);
             }
@@ -3645,6 +3651,62 @@ mod tests {
         let row: String = text.lines().nth(button.y as usize).unwrap().chars().collect();
         assert!(row.contains(theme::nerd().locked));
         assert!(button.width >= theme::nerd().locked.width() as u16);
+    }
+
+    #[test]
+    fn ready_video_filename_and_open_label_are_clickable_in_compact_and_normal_chats() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let path = std::path::PathBuf::from("/cache/my clip.mp4");
+        for compact in [false, true] {
+            for outgoing in [false, true] {
+                let me = jid("me@example.org");
+                let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+                let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+                app.select(chat);
+                app.compact = compact;
+                let mut line = Line::message_sharing(
+                    1_700_000_000,
+                    if outgoing { "me".into() } else { "bob".into() },
+                    "https://upload.example.org/my%20clip.mp4".into(),
+                    true,
+                    outgoing,
+                    true,
+                );
+                line.media.as_mut().unwrap().state = MediaState::Ready(path.clone());
+                app.chats[chat].lines.push(line);
+                let text = screen(&mut app, 160, 24);
+                let (y, row) = text
+                    .lines()
+                    .enumerate()
+                    .find(|(_, row)| row.contains("my clip.mp4"))
+                    .expect(&text);
+                for label in ["my clip.mp4", "открыть"] {
+                    let x = row[..row.find(label).expect(&text)].width() as u16;
+                    assert!(
+                        app.areas
+                            .files
+                            .iter()
+                            .any(|(r, p)| r.contains((x, y as u16).into()) && *p == path),
+                        "missing file control: compact={compact}, outgoing={outgoing}, {label}\n{text}"
+                    );
+                    assert_eq!(
+                        app.on_mouse(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column: x,
+                            row: y as u16,
+                            modifiers: KeyModifiers::NONE
+                        }),
+                        [Action::Open(path.clone())]
+                    );
+                }
+                for (nick, _) in &app.areas.nicks {
+                    assert!(
+                        app.areas.files.iter().all(|(file, _)| !file.intersects(*nick)),
+                        "sender and file controls must not overlap"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

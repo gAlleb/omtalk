@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Ready files, including MP4 videos, can be opened by clicking their name or “open” in compact mode. The sender name and attachment now have separate click areas.
 - `End` returns a scrolled conversation to the latest message even with input focus; the “↓ End” label is clickable. At the bottom, input editing keeps its usual End key.
 - Addressed commands accept `--account JID` immediately after the command name, with Tab completion and validation of configured accounts. Message text is preserved; chat-bound commands keep their own account.
 - Commands use the active account instead of silently selecting one on the recipient’s server, including when several accounts share a server.
