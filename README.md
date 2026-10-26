@@ -127,6 +127,10 @@ Choosing another chat manually cancels the return point. Change the key in `/set
 `[ui] unread_shortcut = "f8"`. `"modifier+n"` follows the main modifier; `"none"`
 disables the direct shortcut. Prefix+N remains available.
 
+`/np` shares `♫ Artist — Title` from the first playing MPRIS player (players
+sorted by name); requires `playerctl`. Nothing is sent if no player is playing
+or its title is unavailable.
+
 ### Input and completion
 
 The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, or to the end;

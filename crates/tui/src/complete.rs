@@ -21,6 +21,11 @@ impl Command {
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "/np",
+        args: ["", ""],
+        about: ["share the playing MPRIS track", "отправить текущий трек MPRIS"],
+    },
+    Command {
         name: "/msg",
         args: ["JID [TEXT]", "JID [ТЕКСТ]"],
         about: [

@@ -191,6 +191,11 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
 
 /// What tasks tell the interface.
 enum Msg {
+    NowPlaying {
+        account: BareJid,
+        chat: BareJid,
+        text: Result<String, String>,
+    },
     Incoming {
         account: BareJid,
         message: Incoming,
@@ -874,6 +879,27 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
+        Msg::NowPlaying { account, chat, text } => match text {
+            Ok(text) => {
+                if let Some(index) = app
+                    .chats
+                    .iter()
+                    .position(|c| c.account == account && c.jid == chat)
+                {
+                    // /np is a standalone message. A reply or edit started while
+                    // playerctl was running belongs to the user's draft.
+                    let replying = app.replying.take();
+                    let editing = app.editing.take();
+                    let actions = app.send_to(index, text);
+                    app.replying = replying;
+                    app.editing = editing;
+                    for action in actions {
+                        tokio::spawn(perform(action, shared.clone()));
+                    }
+                }
+            }
+            Err(error) => app.status = error,
+        },
         Msg::Incoming { account, message, at } => {
             // The database already keeps repeated MAM/offline copies once. The view
             // must merge them too, before an alert or another unread is generated.
@@ -2379,6 +2405,10 @@ async fn perform(action: Action, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
     match action {
+        Action::NowPlaying { account, chat } => {
+            let text = crate::mpris::now_playing().await;
+            tell(Msg::NowPlaying { account, chat, text });
+        }
         // Written by the loop, which keeps what the runtime uses.
         Action::Setting { .. } | Action::SetMuted { .. } | Action::SetChatNotify { .. } => {}
         Action::Send {

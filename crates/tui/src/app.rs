@@ -453,6 +453,10 @@ pub struct Areas {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    NowPlaying {
+        account: BareJid,
+        chat: BareJid,
+    },
     Send {
         account: BareJid,
         to: BareJid,
@@ -3070,6 +3074,22 @@ impl App {
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
+            ("/np", _) if rest.is_empty() => {
+                return if let Some(chat) = self
+                    .selected
+                    .map(|i| &self.chats[i])
+                    .filter(|c| c.kind != ChatKind::Server)
+                {
+                    vec![Action::NowPlaying {
+                        account: chat.account.clone(),
+                        chat: chat.jid.clone(),
+                    }]
+                } else {
+                    self.status = tr!("open a chat first", "сначала откройте чат").into();
+                    Vec::new()
+                };
+            }
+
             ("/msg", Some(jid)) => {
                 let index = self.chat(&account, &jid, ChatKind::Direct);
                 let mut actions = self.open(index);
@@ -5280,6 +5300,24 @@ mod tests {
         assert!(app.chats[chat].muted);
         assert!(!app.chats[server].muted);
         assert_eq!(app.config_notify.sound_on, "private+mention");
+    }
+
+    #[test]
+    fn unread_return_is_cancelled_by_manual_navigation_and_np_captures_the_chat() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
+        app.select(bob);
+        app.chats[carol].unread = 1;
+        app.first_unread();
+        app.select(carol);
+        app.first_unread();
+        assert_eq!(app.selected, Some(carol));
+        app.input = "/np".into();
+        assert!(
+            matches!(&app.submit()[0], Action::NowPlaying { account, chat } if account == &me && chat == &jid("carol@example.org"))
+        );
     }
 
     #[test]

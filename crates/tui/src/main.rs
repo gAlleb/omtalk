@@ -11,6 +11,7 @@ mod clipboard;
 mod complete;
 mod config;
 mod keys;
+mod mpris;
 mod notify;
 mod read_sync;
 mod runtime;
