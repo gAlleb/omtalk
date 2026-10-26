@@ -187,6 +187,12 @@ impl Settings {
                 tr!("Prefix", "Префикс"),
                 Value::Text(ui.leader.clone()),
             ),
+            row(
+                "ui",
+                "unread_shortcut",
+                tr!("Unread chat shortcut", "Переход к непрочитанным"),
+                Value::Text(ui.unread_shortcut.clone()),
+            ),
             row("ui", "icons", tr!("Icons", "Значки"), choice(ICONS, icons)),
             row(
                 "ui",

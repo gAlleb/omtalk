@@ -778,6 +778,7 @@ pub const LEADER_KEYS: &[(&str, &str, &str)] = &[
         "OMEMO keys: fingerprints, trust",
         "ключи OMEMO: отпечатки, доверие",
     ),
+    ("n", "first unread chat", "первый непрочитанный чат"),
     ("p", "settings", "настройки"),
     ("c", "this chat's commands", "команды этого чата"),
     (
@@ -998,6 +999,7 @@ pub const MIN_PANE: u16 = 12;
 
 impl App {
     pub fn new(accounts: Vec<BareJid>, modifier: Modifier, left: u16, right: u16) -> Self {
+        let ui_modifier = modifier;
         let modifier = match modifier {
             Modifier::Ctrl => KeyModifiers::CONTROL,
             Modifier::Alt => KeyModifiers::ALT,
@@ -1041,6 +1043,7 @@ impl App {
             recall: None,
             avatar_blocks: BTreeMap::new(),
             config_ui: crate::config::Ui {
+                modifier: ui_modifier,
                 left,
                 right,
                 ..Default::default()
@@ -2146,6 +2149,7 @@ impl App {
             self.leader_pending = false;
             return match key.code {
                 KeyCode::Esc => Vec::new(),
+                KeyCode::Char('n') => self.first_unread(),
                 code => self.shortcut(code),
             };
         }
@@ -2171,6 +2175,9 @@ impl App {
             && self.current().is_some_and(|chat| chat.scroll > 0)
         {
             return self.chat_end();
+        }
+        if self.config_ui.unread_binding().ok().flatten() == Some((key.code, key.modifiers)) {
+            return self.first_unread();
         }
         if self.focus == Focus::Input && self.edit_key(key) {
             return Vec::new();
@@ -3760,6 +3767,11 @@ impl App {
                 self.config_ui.modifier = ui;
                 Ok(())
             }
+            ("unread_shortcut", Value::Text(text)) => {
+                let mut ui = self.config_ui.clone();
+                ui.unread_shortcut = text.clone();
+                ui.unread_binding().map(|_| self.config_ui = ui)
+            }
             ("leader", Value::Text(text)) => crate::config::parse_key(text).map(|key| {
                 self.leader = key;
                 self.config_ui.leader = text.clone();
@@ -4106,6 +4118,10 @@ impl App {
     /// with their chats, then its other chats. Account headings only when there is more
     /// than one account or any folder.
     pub fn tree(&self) -> Vec<(Entry, usize)> {
+        self.chat_tree(false)
+    }
+
+    fn chat_tree(&self, include_folded: bool) -> Vec<(Entry, usize)> {
         let mut rows = Vec::new();
         let headings = self.accounts.len() > 1 || !self.folders.is_empty();
         let base = usize::from(headings);
@@ -4113,7 +4129,7 @@ impl App {
             let group = Group::Account(account.clone());
             if headings {
                 rows.push((Entry::Heading(group.clone()), 0));
-                if self.collapsed.contains(&group) {
+                if !include_folded && self.collapsed.contains(&group) {
                     continue;
                 }
             }
@@ -4130,7 +4146,7 @@ impl App {
             }
             for folder in self.folders.iter().filter(|f| &f.account == account) {
                 let group = Group::Folder(account.clone(), folder.name.clone());
-                let folded = self.collapsed.contains(&group);
+                let folded = !include_folded && self.collapsed.contains(&group);
                 rows.push((Entry::Heading(group), base));
                 for jid in &folder.chats {
                     // The server channel stays above, whatever a folder says.
@@ -4173,6 +4189,25 @@ impl App {
                 Entry::Heading(_) => None,
             })
             .collect()
+    }
+
+    fn first_unread(&mut self) -> Vec<Action> {
+        let next = self
+            .chat_tree(true)
+            .into_iter()
+            .find_map(|(entry, _)| match entry {
+                Entry::Chat(index)
+                    if self.chats[index].unread > 0 && self.chats[index].kind != ChatKind::Server =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            });
+        let Some(index) = next else { return Vec::new() };
+        self.collapsed
+            .remove(&Group::Account(self.chats[index].account.clone()));
+        self.collapsed.remove(&self.group_of(index));
+        self.select(index)
     }
 
     /// Folds a heading's chats away, or opens them again.
@@ -5005,6 +5040,109 @@ mod tests {
         );
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(!app.show_left);
+    }
+
+    #[test]
+    fn unread_jump_uses_list_order_and_unfolds_only_the_target() {
+        let home = jid("me@home.org");
+        let work = jid("me@work.org");
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&home);
+        let loose = app.chat(&home, &jid("loose@home.org"), ChatKind::Direct);
+        let folder = app.chat(&home, &jid("folder@home.org"), ChatKind::Direct);
+        let other = app.chat(&work, &jid("other@work.org"), ChatKind::Direct);
+        app.move_to_folder(folder, Some("First"));
+        app.select(server);
+        for i in [loose, folder, other] {
+            app.chats[i].unread = 1;
+        }
+        app.chats[folder].muted = true; // mute rules are unchanged: unread is still unread
+        app.collapsed.insert(Group::Account(home.clone()));
+        app.collapsed.insert(Group::Account(work.clone()));
+        app.collapsed.insert(Group::Folder(home.clone(), "First".into()));
+        app.input = "draft".into();
+        app.cursor = 2;
+        let jump = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        app.on_key(jump);
+        assert_eq!(
+            app.selected,
+            Some(folder),
+            "folder order wins over insertion order"
+        );
+        assert!(app.visible_chats().contains(&folder));
+        assert!(app.collapsed.contains(&Group::Account(work.clone())));
+        assert_eq!((&*app.input, app.cursor), ("draft", 2));
+        app.on_key(jump);
+        assert_eq!(app.selected, Some(loose));
+        app.on_key(jump);
+        assert_eq!(app.selected, Some(other));
+        assert_eq!(app.active, Some(work));
+        assert!(app.visible_chats().contains(&other));
+        assert!(app.on_key(jump).is_empty());
+        assert_eq!(app.selected, Some(other), "no unread: stay put");
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.cursor, 0, "Ctrl+A retains shell editing");
+    }
+
+    #[test]
+    fn unread_shortcut_uses_the_configured_main_modifier() {
+        for (modifier, keys) in [
+            (Modifier::Ctrl, KeyModifiers::CONTROL),
+            (Modifier::Alt, KeyModifiers::ALT),
+            (Modifier::Super, KeyModifiers::SUPER),
+        ] {
+            let me = jid("me@example.org");
+            let mut app = App::new(vec![me.clone()], modifier, 26, 30);
+            let server = app.server_chat(&me);
+            let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+            app.select(server);
+            app.chats[bob].unread = 1;
+            app.on_key(KeyEvent::new(KeyCode::Char('n'), keys));
+            assert_eq!(app.selected, Some(bob));
+        }
+    }
+
+    #[test]
+    fn unread_shortcut_can_be_changed_and_saved_without_consuming_plain_typing() {
+        use crate::settings::{Value, Written};
+        let mut app = app();
+        let me = jid("me@example.org");
+        let server = app.server_chat(&me);
+        let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(server);
+        app.chats[bob].unread = 1;
+        app.open_settings();
+        let row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.key == "unread_shortcut")
+            .unwrap();
+        app.settings.as_mut().unwrap().rows[row].value = Value::Text("f8".into());
+        let actions = app.apply_setting(row);
+        app.settings = None;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(actions.iter().any(|a| matches!(a, Action::Setting { key: "unread_shortcut", value: Written::Text(value), .. } if value == "f8")));
+        crate::settings::write(&path, "ui", "unread_shortcut", &Written::Text("f8".into())).unwrap();
+        assert_eq!(
+            crate::config::load(&path).unwrap().ui.unread_binding().unwrap(),
+            Some((KeyCode::F(8), KeyModifiers::NONE))
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.input, "n");
+        assert_eq!(app.selected, Some(server));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.selected, Some(server), "the previous binding was replaced");
+        app.on_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        assert_eq!(app.selected, Some(bob));
+        app.select(server);
+        app.chats[bob].unread = 1;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.selected, Some(bob), "prefix+N remains available");
     }
 
     #[test]

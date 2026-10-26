@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Jump to the first unread chat with modifier+N or prefix+N, including folded groups. The direct key is configurable through `unread_shortcut` or settings; Ctrl+A and reply on prefix+A are unchanged.
 - Ready files, including MP4 videos, can be opened by clicking their name or “open” in compact mode. The sender name and attachment now have separate click areas.
 - `End` returns a scrolled conversation to the latest message even with input focus; the “↓ End” label is clickable. At the bottom, input editing keeps its usual End key.
 - Addressed commands accept `--account JID` immediately after the command name, with Tab completion and validation of configured accounts. Message text is preserved; chat-bound commands keep their own account.

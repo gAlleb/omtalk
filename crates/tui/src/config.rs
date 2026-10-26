@@ -156,6 +156,8 @@ pub struct Ui {
     pub modifier: Modifier,
     /// The prefix key, as "ctrl+x", "alt+a" or "ctrl+space".
     pub leader: String,
+    /// A full key chord, or modifier+n to follow the main modifier; none disables it.
+    pub unread_shortcut: String,
     pub icons: IconSet,
     pub left: u16,
     pub right: u16,
@@ -188,6 +190,7 @@ impl Default for Ui {
         Self {
             modifier: Modifier::Ctrl,
             leader: "ctrl+x".into(),
+            unread_shortcut: "modifier+n".into(),
             icons: IconSet::Nerd,
             left: 26,
             right: 30,
@@ -202,6 +205,38 @@ impl Default for Ui {
             compact: false,
             language: crate::lang::Language::English,
         }
+    }
+}
+
+impl Ui {
+    pub fn unread_binding(
+        &self,
+    ) -> Result<Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>, String> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let text = self.unread_shortcut.trim().to_lowercase();
+        if text == "none" {
+            return Ok(None);
+        }
+        let text = if let Some(key) = text.strip_prefix("modifier+") {
+            let modifier = match self.modifier {
+                Modifier::Ctrl => "ctrl",
+                Modifier::Alt => "alt",
+                Modifier::Super => "super",
+                Modifier::None => return Ok(None),
+            };
+            format!("{modifier}+{key}")
+        } else {
+            text
+        };
+        let binding = parse_key(&text)?;
+        if matches!(binding, (KeyCode::Char(_), KeyModifiers::NONE)) {
+            return Err(tr!(
+                "unread shortcut: use a modifier or a function key",
+                "переход к непрочитанным: нужен модификатор или функциональная клавиша"
+            )
+            .into());
+        }
+        Ok(Some(binding))
     }
 }
 
@@ -220,8 +255,8 @@ pub fn parse_key(text: &str) -> Result<(crossterm::event::KeyCode, crossterm::ev
             "shift" => KeyModifiers::SHIFT,
             other => {
                 return Err(trf!(
-                    "leader = {text:?}: unknown modifier {other:?}",
-                    "leader = {text:?}: неизвестный модификатор {other:?}"
+                    "key = {text:?}: unknown modifier {other:?}",
+                    "key = {text:?}: неизвестный модификатор {other:?}"
                 ));
             }
         };
@@ -233,8 +268,8 @@ pub fn parse_key(text: &str) -> Result<(crossterm::event::KeyCode, crossterm::ev
         c if c.chars().count() == 1 => KeyCode::Char(c.chars().next().unwrap()),
         _ => {
             return Err(trf!(
-                "leader = {text:?}: cannot read key {key:?}",
-                "leader = {text:?}: не понимаю клавишу {key:?}"
+                "key = {text:?}: cannot read key {key:?}",
+                "key = {text:?}: не понимаю клавишу {key:?}"
             ));
         }
     };
@@ -294,6 +329,32 @@ pub fn run_password_command(command: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_binding_follows_the_modifier_and_validates_custom_keys() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut ui = Ui::default();
+        assert_eq!(
+            ui.unread_binding().unwrap(),
+            Some((KeyCode::Char('n'), KeyModifiers::CONTROL))
+        );
+        ui.modifier = Modifier::Alt;
+        assert_eq!(
+            ui.unread_binding().unwrap(),
+            Some((KeyCode::Char('n'), KeyModifiers::ALT))
+        );
+        ui.modifier = Modifier::None;
+        assert_eq!(ui.unread_binding().unwrap(), None);
+        ui.unread_shortcut = "f8".into();
+        assert_eq!(
+            ui.unread_binding().unwrap(),
+            Some((KeyCode::F(8), KeyModifiers::NONE))
+        );
+        ui.unread_shortcut = "n".into();
+        assert!(ui.unread_binding().is_err());
+        ui.unread_shortcut = "none".into();
+        assert_eq!(ui.unread_binding().unwrap(), None);
+    }
 
     #[test]
     fn example_parses_and_defaults_fill_in() {

@@ -515,6 +515,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     }
     let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
     app.leader = config::parse_key(&ui.leader)?;
+    ui.unread_binding()?;
     app.own_status = kept_status;
     // Contacts' names as last told, before the chats are made from the history.
     for account in &jids {

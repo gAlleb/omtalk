@@ -107,6 +107,7 @@ prefix. Below, “prefix” means this sequence, not holding Ctrl+X down.
 | `z` | Show only the current account; repeat to show all |
 | `o` | Toggle OMEMO for the chat |
 | `a` | Reply to the last incoming message |
+| `n` | First unread chat |
 | `e` | Open OMEMO keys |
 | `s` / `c` | Service browser / current chat's commands |
 | `p` | Settings |
@@ -118,6 +119,13 @@ prefix. Below, “prefix” means this sequence, not holding Ctrl+X down.
 Super, except combinations needed by the input line. Both are in `[ui]`.
 In a room, `Tab` after the input line focuses participants: arrows select someone,
 `Enter` opens a direct chat, and `Esc` returns to input.
+
+Jump to the first unread chat in list order with modifier+N (Ctrl+N by default)
+or prefix+N. All accounts are included and folded groups open as needed. Muted chats
+still participate because their unread counts remain. With no unread chats, selection
+stays put. Change the key in `/settings` → “Unread chat shortcut” or set
+`[ui] unread_shortcut = "f8"`. `"modifier+n"` follows the main modifier; `"none"`
+disables the direct shortcut. Prefix+N remains available.
 
 ### Input and completion
 
@@ -359,6 +367,7 @@ password_command = "pass show xmpp/you"   # otherwise the password is asked for 
 
 [ui]
 leader = "ctrl+x"      # prefix key, as in tmux: press, release, then a letter
+unread_shortcut = "modifier+n" # first unread chat; also accepts "f8" or "alt+n"
 modifier = "ctrl"      # ctrl, alt, super or none: the same shortcuts while held
 icons = "nerd"         # nerd (Nerd Font glyphs) or text
 left = 26              # width of the chat list
