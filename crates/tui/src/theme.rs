@@ -155,6 +155,7 @@ pub struct Icons {
     pub attach: &'static str,
     pub bell: &'static str,
     pub muted: &'static str,
+    pub bot: &'static str,
 }
 
 /// U+F023 lock, U+F09C unlock, U+F233 server, U+F120 terminal, U+F07B folder, U+F0C6 paperclip.
@@ -174,6 +175,7 @@ pub fn nerd() -> Icons {
         attach: "\u{f0c6}",
         bell: "\u{f0f3}",
         muted: "\u{f1f6}",
+        bot: "\u{f06a9}",
     }
 }
 
@@ -192,5 +194,6 @@ pub fn text_icons() -> Icons {
         attach: tr!("[file]", "[файл]"),
         bell: tr!("[notify]", "[увед.]"),
         muted: tr!("[muted]", "[тихо]"),
+        bot: tr!("[bot]", "[бот]"),
     }
 }

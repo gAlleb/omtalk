@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Contacts declaring the standard XMPP `client/bot` identity get a robot icon in the chat list and header. Discovery is limited to viewed contacts and remembered locally; names are not used to guess.
 - Jump to the first unread chat with modifier+N or prefix+N, including folded groups. The direct key is configurable through `unread_shortcut` or settings; Ctrl+A and reply on prefix+A are unchanged.
 - Ready files, including MP4 videos, can be opened by clicking their name or “open” in compact mode. The sender name and attachment now have separate click areas.
 - `End` returns a scrolled conversation to the latest message even with input focus; the “↓ End” label is clickable. At the bottom, input editing keeps its usual End key.

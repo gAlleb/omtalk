@@ -191,6 +191,7 @@ pub struct Chat {
     pub omemo: bool,
     /// No sound, desktop notification or terminal bell from this chat.
     pub muted: bool,
+    pub bot: bool,
     /// Rows scrolled up from the newest.
     pub scroll: usize,
     /// Older messages asked for (scrolled to the top), not here yet.
@@ -272,6 +273,7 @@ impl Chat {
             unread: 0,
             omemo: true,
             muted: false,
+            bot: false,
             scroll: 0,
             older_loading: false,
             older_done: false,
@@ -675,6 +677,11 @@ pub enum Action {
     Fetch(String),
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
+    /// Discover the declared kind of a contact or one of its connected clients.
+    BotInfo {
+        account: BareJid,
+        jid: Jid,
+    },
     Quit,
 }
 
@@ -978,6 +985,8 @@ pub struct App {
     /// Chats where OMEMO was turned on or off by hand: kept, a chat opened takes it.
     pub omemo_choice: BTreeMap<(BareJid, BareJid), bool>,
     pub muted_chats: BTreeSet<(BareJid, BareJid)>,
+    pub bots: BTreeSet<(BareJid, BareJid)>,
+    pub bot_checks: BTreeSet<(BareJid, String)>,
     /// Read frontiers to persist before waiting for another event, including messages
     /// that a bridge sent without an archive stanza-id.
     pub local_reads: BTreeMap<(BareJid, BareJid), omtalk_store::ReadPoint>,
@@ -1081,6 +1090,8 @@ impl App {
             nicknames: BTreeMap::new(),
             omemo_choice: BTreeMap::new(),
             muted_chats: BTreeSet::new(),
+            bots: BTreeSet::new(),
+            bot_checks: BTreeSet::new(),
             local_reads: BTreeMap::new(),
         }
     }
@@ -1161,6 +1172,7 @@ impl App {
             chat.omemo = on;
         }
         chat.muted = self.muted_chats.contains(&(account.clone(), jid.clone()));
+        chat.bot = chat.kind == ChatKind::Direct && self.bots.contains(&(account.clone(), jid.clone()));
         if chat.kind == ChatKind::Direct {
             chat.name = self.name_of(&(account.clone(), jid.clone()));
         }
@@ -1561,6 +1573,39 @@ impl App {
         clients
     }
 
+    /// Query only contacts being viewed, once per address/resource in this login.
+    pub fn ask_bot_info(&mut self, account: &BareJid, peer: &BareJid) -> Vec<Action> {
+        if account == peer {
+            return Vec::new();
+        }
+        let mut targets = vec![Jid::from(peer.clone())];
+        targets.extend(
+            self.clients(account, peer)
+                .into_iter()
+                .filter_map(|client| format!("{peer}/{}", client.resource).parse::<Jid>().ok()),
+        );
+        targets
+            .into_iter()
+            .filter_map(|jid| {
+                self.bot_checks
+                    .insert((account.clone(), jid.to_string()))
+                    .then(|| Action::BotInfo {
+                        account: account.clone(),
+                        jid,
+                    })
+            })
+            .collect()
+    }
+
+    pub fn mark_bot(&mut self, account: &BareJid, peer: &BareJid) {
+        self.bots.insert((account.clone(), peer.clone()));
+        for chat in &mut self.chats {
+            if &chat.account == account && &chat.jid == peer && chat.kind == ChatKind::Direct {
+                chat.bot = true;
+            }
+        }
+    }
+
     /// One's own message, sent from here: shown at once, as being sent. `id` is the
     /// message's, for receipts.
     pub fn sending(&mut self, index: usize, text: &str, encrypted: bool, id: &str, at: i64) {
@@ -1785,10 +1830,13 @@ impl App {
         // A direct chat's right pane lists the peer's devices; read them afresh each time
         // it is opened, since devices come and go.
         if chat.kind == ChatKind::Direct {
+            let account = chat.account.clone();
+            let peer = chat.jid.clone();
             actions.push(Action::Devices {
-                account: chat.account.clone(),
-                jid: chat.jid.clone(),
+                account: account.clone(),
+                jid: peer.clone(),
             });
+            actions.extend(self.ask_bot_info(&account, &peer));
         }
         actions
     }
@@ -5040,6 +5088,38 @@ mod tests {
         );
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(!app.show_left);
+    }
+
+    #[test]
+    fn bot_discovery_checks_bare_and_online_resources_once_per_login() {
+        let me = jid("me@example.org");
+        let peer = jid("helper@example.org");
+        let mut app = app();
+        app.connection.insert(me.clone(), Connection::Online);
+        let online = Online {
+            account: peer.clone(),
+            resource: "bot-session".into(),
+            state: Some(omtalk_xmpp::presence::State::Online),
+            client: "service".into(),
+            status: None,
+        };
+        app.presence(&me, online, 0);
+        let targets: Vec<_> = app
+            .ask_bot_info(&me, &peer)
+            .into_iter()
+            .filter_map(|a| {
+                if let Action::BotInfo { jid, .. } = a {
+                    Some(jid.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(targets, ["helper@example.org", "helper@example.org/bot-session"]);
+        assert!(app.ask_bot_info(&me, &peer).is_empty());
+        assert!(app.ask_bot_info(&me, &me).is_empty());
+        app.bot_checks.clear();
+        assert_eq!(app.ask_bot_info(&me, &peer).len(), 2);
     }
 
     #[test]

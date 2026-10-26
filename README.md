@@ -264,6 +264,11 @@ selects that chat and makes its account active.
 chat sets your private roster name for that contact, shared with your other clients;
 `/name` clears it. `/nickname Name` publishes your own name; without a name it clears it.
 
+Contacts that declare the XMPP Service Discovery identity `client/bot` are marked
+with a robot head in the chat list and header (`[bot]` with text icons). The identity
+is checked when opening a direct chat, including its known online resources; names
+are not used to guess. Confirmed bot identities are remembered locally across restarts.
+
 Folders are local to omtalk and belong to an account. `/folder NAME` moves the current
 chat into a folder, creating it if needed; `/folder` takes it out. Dragging chats onto
 folders or back onto the account does the same. Empty folders disappear. Use

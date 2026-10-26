@@ -274,6 +274,10 @@ enum Msg {
         account: BareJid,
         online: omtalk_xmpp::presence::Online,
     },
+    Bot {
+        account: BareJid,
+        peer: BareJid,
+    },
     /// The resource this program got on the account; `fresh` for a new session (not
     /// one resumed), whose server tells all presences again.
     Bound {
@@ -546,6 +550,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
     }
     restore_mutes(&store, &mut app);
+    restore_bots(&store, &mut app);
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
     app.send_typing = ui.typing;
@@ -1118,7 +1123,24 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             )
             .into();
         }
-        Msg::Online { account, online } => app.presence(&account, online, now()),
+        Msg::Online { account, online } => {
+            let peer = online.account.clone();
+            app.presence(&account, online, now());
+            if app
+                .current()
+                .is_some_and(|c| c.kind == ChatKind::Direct && c.account == account && c.jid == peer)
+            {
+                for action in app.ask_bot_info(&account, &peer) {
+                    tokio::spawn(perform(action, shared.clone()));
+                }
+            }
+        }
+        Msg::Bot { account, peer } => {
+            app.mark_bot(&account, &peer);
+            let _ = shared
+                .store
+                .keep(&format!("{KEPT_BOT}{account}/{peer}"), Some("1"));
+        }
         Msg::Log { account, text } => app.server_log(&account, text, now()),
         Msg::Bound {
             account,
@@ -1128,6 +1150,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             // A new session hears every presence again; what was known is stale.
             if fresh {
                 app.online.retain(|(a, _), _| *a != account);
+                app.bot_checks.retain(|(a, _)| *a != account);
+                if let Some(peer) = app
+                    .current()
+                    .filter(|c| c.kind == ChatKind::Direct && c.account == account)
+                    .map(|c| c.jid.clone())
+                {
+                    for action in app.ask_bot_info(&account, &peer) {
+                        tokio::spawn(perform(action, shared.clone()));
+                    }
+                }
             }
             app.own_resource.insert(account, resource);
         }
@@ -3322,6 +3354,17 @@ async fn perform(action: Action, shared: Shared) {
             }
             fetch_media(link, shared.clone()).await;
         }
+        Action::BotInfo { account, jid } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            if let Ok(info) = xmpp.disco_info(&jid, None).await
+                && info.is_bot()
+            {
+                tell(Msg::Bot {
+                    account,
+                    peer: jid.to_bare(),
+                });
+            }
+        }
         Action::Open(path) => {
             // Detached and silent: the viewer must not write over the interface. Waited
             // for aside, so that it leaves no zombie behind.
@@ -3385,6 +3428,18 @@ fn folded_from_kept(kept: &str) -> std::collections::BTreeSet<crate::app::Group>
 
 /// Local notification mutes, by "account/chat".
 const KEPT_MUTED: &str = "muted/";
+const KEPT_BOT: &str = "bot/";
+
+fn restore_bots(store: &Store, app: &mut App) {
+    for (key, value) in store.kept_under(KEPT_BOT).unwrap_or_default() {
+        if value == "1"
+            && let Some((account, peer)) = key.split_once('/')
+            && let (Ok(account), Ok(peer)) = (account.parse::<BareJid>(), peer.parse::<BareJid>())
+        {
+            app.mark_bot(&account, &peer);
+        }
+    }
+}
 
 fn save_mute(
     store: &Store,
@@ -3626,6 +3681,42 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn discovered_bot_is_restored_before_its_chat_is_opened() {
+        use super::*;
+        use crate::config::Modifier;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let peer: BareJid = "helper@example.org".parse().unwrap();
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        apply(
+            &mut app,
+            Msg::Bot {
+                account: me.clone(),
+                peer: peer.clone(),
+            },
+            &shared,
+        );
+        let mut restarted = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        restore_bots(&store, &mut restarted);
+        let chat = restarted.chat(&me, &peer, ChatKind::Direct);
+        assert!(restarted.chats[chat].bot);
+    }
+
     #[tokio::test]
     async fn image_link_history_respects_manual_downloads_and_uploaded_files() {
         use super::*;

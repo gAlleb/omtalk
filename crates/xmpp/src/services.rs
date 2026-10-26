@@ -30,6 +30,33 @@ pub struct ServiceInfo {
     pub extensions: Vec<DataForm>,
 }
 
+impl ServiceInfo {
+    /// XMPP Registrar identity for an automated IM client (not a name heuristic).
+    pub fn is_bot(&self) -> bool {
+        self.identities
+            .iter()
+            .any(|i| i.category == "client" && i.kind == "bot")
+    }
+}
+
+impl From<DiscoInfoResult> for ServiceInfo {
+    fn from(info: DiscoInfoResult) -> Self {
+        Self {
+            identities: info
+                .identities
+                .into_iter()
+                .map(|i| Identity {
+                    category: i.category,
+                    kind: i.type_,
+                    name: i.name,
+                })
+                .collect(),
+            features: info.features,
+            extensions: info.extensions,
+        }
+    }
+}
+
 /// Something listed under an address: a service, a node, or a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceItem {
@@ -171,19 +198,7 @@ impl Account {
             .await?
             .ok_or_else(|| empty("disco#info"))?;
         let info = DiscoInfoResult::try_from(answer).map_err(|e| Error::Unexpected(e.to_string()))?;
-        Ok(ServiceInfo {
-            identities: info
-                .identities
-                .into_iter()
-                .map(|i| Identity {
-                    category: i.category,
-                    kind: i.type_,
-                    name: i.name,
-                })
-                .collect(),
-            features: info.features,
-            extensions: info.extensions,
-        })
+        Ok(ServiceInfo::from(info))
     }
 
     pub async fn disco_items(&self, jid: &Jid, node: Option<&str>) -> Result<Vec<ServiceItem>, Error> {
@@ -303,6 +318,20 @@ pub(crate) fn step(node: &str, answer: &Element) -> Result<CommandStep, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_identity_is_read_from_disco_xml_without_guessing_names() {
+        for (category, kind, name, expected) in [
+            ("client", "bot", "Helper", true),
+            ("client", "pc", "Robot Bot", false),
+            ("account", "registered", "bot", false),
+            ("automation", "command-list", "Bot", false),
+        ] {
+            let xml: Element = format!(r#"<query xmlns="http://jabber.org/protocol/disco#info"><identity category="{category}" type="{kind}" name="{name}"/><feature var="http://jabber.org/protocol/disco#info"/></query>"#).parse().unwrap();
+            let info = ServiceInfo::from(DiscoInfoResult::try_from(xml).unwrap());
+            assert_eq!(info.is_bot(), expected);
+        }
+    }
 
     #[test]
     fn a_result_with_items_is_a_table_and_the_rest_of_its_form_stays() {

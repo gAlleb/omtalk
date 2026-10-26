@@ -345,6 +345,7 @@ fn chat_row(
     let width = width.saturating_sub(branch.width() as u16);
     let icon = match chat.kind {
         ChatKind::Room { .. } => "# ".to_owned(),
+        ChatKind::Direct if chat.bot => format!("{} ", icons.bot),
         ChatKind::Direct => "@ ".to_owned(),
         ChatKind::Server => format!("{} ", icons.service),
     };
@@ -432,7 +433,12 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             } else {
                 clients.join(", ")
             };
-            (chat.title(), format!("{} · {seen}", chat.jid))
+            let title = if chat.bot {
+                format!("{} {}", app.icons.bot, chat.title())
+            } else {
+                chat.title()
+            };
+            (title, format!("{} · {seen}", chat.jid))
         }
         // A room: its name; the right pane has its topic and address in full. With that
         // pane folded, the topic (else the address) beside the name.
@@ -3945,7 +3951,7 @@ mod tests {
         let actions = app.on_mouse(click(name));
         assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
         assert!(
-            matches!(&actions[..], [Action::History { peer, .. }, Action::Devices { .. }, Action::ReopenChat { .. }] if peer.as_str() == "bob@example.org"),
+            matches!(&actions[..], [Action::History { peer, .. }, Action::Devices { .. }, Action::BotInfo { .. }, Action::ReopenChat { .. }] if peer.as_str() == "bob@example.org"),
             "a new chat asks the archive for its history, and is open for good: {actions:?}"
         );
         // Asked once: opened again, nothing more is read.
@@ -4030,6 +4036,27 @@ mod tests {
         assert_eq!(app.account_for(), Some(home.clone()));
         app.select(b);
         assert_eq!(app.account_for(), Some(work.clone()));
+    }
+
+    #[test]
+    fn bot_contacts_have_a_robot_in_the_list_and_chat_header() {
+        let me = jid("me@example.org");
+        let peer = jid("helper@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &peer, ChatKind::Direct);
+        app.select(chat);
+        app.chats[chat].name = Some("Helper".into());
+        assert!(!screen(&mut app, 120, 20).contains(theme::nerd().bot));
+        app.mark_bot(&me, &peer);
+        let text = screen(&mut app, 120, 20);
+        assert!(text.matches(theme::nerd().bot).count() >= 2, "{text}");
+        app.icons = theme::text_icons();
+        assert!(screen(&mut app, 120, 20).contains("[бот] Helper"));
+        let elsewhere = app.chat(&jid("another@example.org"), &peer, ChatKind::Direct);
+        assert!(
+            !app.chats[elsewhere].bot,
+            "discovery belongs to the receiving account"
+        );
     }
 
     #[test]
