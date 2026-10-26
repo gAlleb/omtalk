@@ -91,7 +91,9 @@ pinned zig compiler without installing a system-wide cross toolchain.
 Three columns show chats, the conversation, and room participants or the contact's
 devices. Click to select a chat, drag pane borders to resize them, and use `‹`/`›` to
 hide a pane. The mouse wheel scrolls. `Tab` switches focus; `PgUp`/`PgDn` scroll the
-conversation. Typing in another pane moves focus to the input line and enters the text.
+conversation. While scrolled up, `End` returns to the latest message, including from
+the input line; clicking “↓ End” does the same. At the bottom, `End` moves the input
+cursor as usual. Typing in another pane moves focus to the input line and enters the text.
 Lists use arrows and `Home`/`End`.
 
 The default prefix is **Ctrl+X**: press, release, then a key. A menu appears after the

@@ -397,6 +397,8 @@ pub struct Areas {
     pub top_shown: bool,
     /// The "↑ earlier" row above the oldest message: a click asks for older ones.
     pub older: Option<Rect>,
+    /// The bottom-border "↓ End" control returns to the latest message.
+    pub chat_end: Option<Rect>,
     /// The reactions of the picker open over a message, each where it is drawn.
     pub reaction_buttons: Vec<(Rect, &'static str)>,
     pub reaction_rows: Vec<(Rect, usize)>,
@@ -2163,6 +2165,13 @@ impl App {
         {
             return vec![Action::PasteClipboard];
         }
+        if self.focus == Focus::Input
+            && key.code == KeyCode::End
+            && key.modifiers.is_empty()
+            && self.current().is_some_and(|chat| chat.scroll > 0)
+        {
+            return self.chat_end();
+        }
         if self.focus == Focus::Input && self.edit_key(key) {
             return Vec::new();
         }
@@ -2352,7 +2361,7 @@ impl App {
             KeyCode::Up => self.scroll(1),
             KeyCode::Down => self.scroll(-1),
             KeyCode::Home => self.scroll(isize::MAX / 2),
-            KeyCode::End => self.scroll(isize::MIN / 2),
+            KeyCode::End => self.chat_end(),
             KeyCode::Enter => {
                 self.focus = Focus::Input;
                 Vec::new()
@@ -4326,6 +4335,15 @@ impl App {
         self.select(order[next as usize])
     }
 
+    fn chat_end(&mut self) -> Vec<Action> {
+        if let Some(chat) = self.current_mut() {
+            chat.scroll = 0;
+            chat.jump_to = None;
+        }
+        self.selection = None;
+        Vec::new()
+    }
+
     fn scroll(&mut self, by: isize) -> Vec<Action> {
         let top_shown = self.areas.top_shown;
         let Some(chat) = self.current_mut() else {
@@ -4528,6 +4546,9 @@ impl App {
                 }
                 _ => Vec::new(),
             };
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && inside_opt(self.areas.chat_end) {
+            return self.chat_end();
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(chat) = self.selected

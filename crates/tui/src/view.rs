@@ -456,10 +456,21 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
         );
     }
     if scrolled {
+        let label = " ↓ End ";
         block = block.title_bottom(
-            TextLine::from(Span::styled(" ↓ End ", Style::default().fg(theme::accent())))
+            TextLine::from(Span::styled(label, Style::default().fg(theme::accent())))
                 .alignment(Alignment::Center),
         );
+        if messages.width > 2 && messages.height > 0 {
+            let available = messages.width - 2;
+            let width = (label.width() as u16).min(available);
+            app.areas.chat_end = Some(Rect::new(
+                messages.x + 1 + (available - width) / 2,
+                messages.bottom() - 1,
+                width,
+                1,
+            ));
+        }
     }
     // Who is typing here, at the foot of the conversation.
     if let Some(chat) = app.current() {
@@ -6401,6 +6412,68 @@ mod tests {
                     assert_eq!(rows.iter().any(|row| row.picture.is_some()), ready);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn end_key_and_the_drawn_end_control_return_to_the_latest_message() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        for width in [56, 100, 120] {
+            let me = jid("me@example.org");
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+            app.select(chat);
+            for i in 0..50 {
+                app.chats[chat].lines.push(Line::message(
+                    i,
+                    "bob".into(),
+                    format!("message {i}"),
+                    true,
+                    false,
+                ));
+            }
+            app.input = "draft".into();
+            app.cursor = 1;
+            app.focus = Focus::Input;
+            app.chats[chat].scroll = 12;
+            let text = screen(&mut app, width, 20);
+            assert!(text.contains("↓ End"), "{text}");
+            let (y, row) = text
+                .lines()
+                .enumerate()
+                .find(|(_, row)| row.contains("↓ End"))
+                .unwrap();
+            let x = row[..row.find("↓ End").unwrap()].width() as u16;
+            let hit = app.areas.chat_end.unwrap();
+            assert!(
+                hit.contains((x, y as u16).into()),
+                "hitbox must cover the rendered label"
+            );
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y as u16,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert_eq!(app.chats[chat].scroll, 0);
+            assert_eq!((&*app.input, app.cursor), ("draft", 1));
+            assert!(screen(&mut app, width, 20).contains("message 49"));
+            assert!(
+                app.areas.chat_end.is_none(),
+                "no invisible control when already at the end"
+            );
+            for focus in [Focus::Input, Focus::Messages] {
+                app.focus = focus;
+                app.chats[chat].scroll = 12;
+                app.chats[chat].jump_to = Some(1);
+                app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+                assert_eq!(app.chats[chat].scroll, 0);
+                assert!(app.chats[chat].jump_to.is_none());
+                assert_eq!((&*app.input, app.cursor), ("draft", 1));
+            }
+            app.focus = Focus::Input;
+            app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+            assert_eq!(app.cursor, 5, "at the bottom, End still edits the input");
         }
     }
 
