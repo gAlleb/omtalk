@@ -21,6 +21,11 @@ impl Command {
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "/emoji",
+        args: ["", ""],
+        about: ["insert an emoji", "вставить эмодзи"],
+    },
+    Command {
         name: "/room",
         args: ["", ""],
         about: [

@@ -134,6 +134,14 @@ playing MPRIS player (players sorted by name); requires `playerctl`. Nothing
 is sent if no player is playing or its title is unavailable.
 
 
+The smile button beside the attachment and notification controls (or `/emoji`)
+opens an offline picker with 3,944 Unicode Emoji 17.0 sequences. Arrows select;
+Enter or a click inserts the whole emoji at the input cursor without sending.
+Esc closes it and preserves the draft. Tab/Shift+Tab or the category buttons switch
+groups; PageUp/PageDown move through the grid. Type or paste to search Russian or
+English names and Russian keywords. Data sources and the Unicode license are in
+[`crates/tui/data/`](crates/tui/data/README.md).
+
 ### Input and completion
 
 The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, or to the end;
@@ -480,6 +488,7 @@ address is given or the description says otherwise.
 | Contacts | `/accept ADDRESS`, `/refuse ADDRESS` | Answer a subscription request |
 | Names | `/name [NAME]` | Set/clear a contact's name; in a room, set its title (title required) |
 | Names | `/nickname [NAME]` | Set/clear your published nickname for the active account |
+| Input | `/emoji` | Open the emoji picker without changing the draft |
 | Rooms | `/room` | Manage room configuration, affiliations, roles, topic and avatar |
 | Rooms | `/join ADDRESS [NICK]` | Join a room |
 | Rooms | `/create NAME [TITLE]` | Create a room; NAME may be an address |

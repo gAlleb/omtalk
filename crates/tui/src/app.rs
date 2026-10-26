@@ -416,6 +416,10 @@ pub struct Areas {
     pub mute_button: Rect,
     /// The paperclip: send a file.
     pub attach_button: Rect,
+    pub emoji_button: Rect,
+    pub emoji_window: Rect,
+    pub emoji_cells: Vec<(Rect, usize)>,
+    pub emoji_categories: Vec<(Rect, usize)>,
     pub hide_left: Option<Rect>,
     pub hide_right: Option<Rect>,
     /// Thin strips that bring a hidden pane back.
@@ -895,6 +899,7 @@ pub struct App {
     pub selected: Option<usize>,
     unread_return: Option<(BareJid, BareJid)>,
     pub switcher: Option<usize>,
+    pub emoji: Option<crate::emoji::Picker>,
     pub contacts: BTreeSet<(BareJid, BareJid)>,
     pub focus: Focus,
     pub input: String,
@@ -1040,6 +1045,7 @@ impl App {
             selected: None,
             unread_return: None,
             switcher: None,
+            emoji: None,
             contacts: BTreeSet::new(),
             focus: Focus::Input,
             input: String::new(),
@@ -2135,6 +2141,12 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(picker) = self.emoji.as_mut()
+            && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            let outcome = picker.key(key);
+            return self.emoji_outcome(outcome);
+        }
         if let Some(cursor) = self.switcher {
             match key.code {
                 KeyCode::Up => {
@@ -3126,6 +3138,7 @@ impl App {
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
+            ("/emoji", _) if rest.is_empty() => return self.open_emoji(),
             ("/room", _) if rest.is_empty() => return self.open_room_admin(None),
             ("/om", _) if rest.is_empty() => {
                 return match self.selected {
@@ -3522,6 +3535,10 @@ impl App {
     /// Pasted text goes in at the cursor as it is, line breaks included; in the services
     /// window's form, into the field being edited, on one line.
     pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        if let Some(picker) = self.emoji.as_mut() {
+            picker.paste(text);
+            return Vec::new();
+        }
         let before = self.input.clone();
         let mut actions = self.paste(text);
         if self.input != before {
@@ -4812,6 +4829,30 @@ impl App {
         chat.lines = older;
     }
 
+    fn open_emoji(&mut self) -> Vec<Action> {
+        if self.current().is_some_and(|c| c.kind != ChatKind::Server) {
+            self.emoji = Some(crate::emoji::Picker::new());
+        } else {
+            self.status = tr!("open a chat first", "сначала откройте чат").into();
+        }
+        Vec::new()
+    }
+
+    fn emoji_outcome(&mut self, outcome: crate::emoji::Outcome) -> Vec<Action> {
+        match outcome {
+            crate::emoji::Outcome::Stay => Vec::new(),
+            crate::emoji::Outcome::Close => {
+                self.emoji = None;
+                self.focus = Focus::Input;
+                Vec::new()
+            }
+            crate::emoji::Outcome::Insert(text) => {
+                self.emoji = None;
+                self.on_paste(text)
+            }
+        }
+    }
+
     fn max_pane(&self) -> u16 {
         (self.areas.screen.width / 2).max(MIN_PANE)
     }
@@ -4820,6 +4861,28 @@ impl App {
         let (x, y) = (mouse.column, mouse.row);
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         let inside_opt = |r: Option<Rect>| r.is_some_and(inside);
+        if let Some(picker) = self.emoji.as_mut() {
+            let outcome = match mouse.kind {
+                MouseEventKind::ScrollUp => picker.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                MouseEventKind::ScrollDown => picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some((_, category)) = self.areas.emoji_categories.iter().find(|(r, _)| inside(*r))
+                    {
+                        picker.category(*category);
+                        crate::emoji::Outcome::Stay
+                    } else if let Some((_, index)) = self.areas.emoji_cells.iter().find(|(r, _)| inside(*r)) {
+                        picker.cursor = *index;
+                        picker.pick()
+                    } else if !inside(self.areas.emoji_window) {
+                        crate::emoji::Outcome::Close
+                    } else {
+                        crate::emoji::Outcome::Stay
+                    }
+                }
+                _ => crate::emoji::Outcome::Stay,
+            };
+            return self.emoji_outcome(outcome);
+        }
         if self.switcher.is_some() {
             let code = match mouse.kind {
                 MouseEventKind::ScrollUp => Some(KeyCode::Up),
@@ -5027,6 +5090,8 @@ impl App {
                     return self.toggle_omemo();
                 } else if inside(self.areas.mute_button) {
                     return self.set_muted(!self.current().is_some_and(|c| c.muted));
+                } else if inside(self.areas.emoji_button) {
+                    return self.open_emoji();
                 } else if inside(self.areas.attach_button) {
                     // The path is typed (Tab helps), or a file dropped on the terminal.
                     self.input = "/upload ".into();
@@ -5438,6 +5503,39 @@ mod tests {
         assert!(app.chats[chat].muted);
         assert!(!app.chats[server].muted);
         assert_eq!(app.config_notify.sound_on, "private+mention");
+    }
+
+    #[test]
+    fn emoji_inserts_a_whole_family_at_the_cursor_without_sending_or_losing_the_draft() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(chat);
+        app.input = "до после".into();
+        app.cursor = 3;
+        app.open_emoji();
+        let family = "👨‍👩‍👧‍👦";
+        let index = crate::emoji::catalog()
+            .iter()
+            .position(|e| e.symbol == family)
+            .unwrap();
+        app.emoji.as_mut().unwrap().matches = vec![index];
+        let actions = app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.input, format!("до {family}после"));
+        assert_eq!(app.cursor, 3 + family.chars().count());
+        assert!(app.emoji.is_none());
+        assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
+        assert!(app.chats[chat].lines.is_empty());
+        let draft = app.input.clone();
+        let cursor = app.cursor;
+        app.open_emoji();
+        app.on_paste("кошка");
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(
+            (app.input, app.cursor),
+            (draft, cursor),
+            "cancel must preserve the original input"
+        );
     }
 
     #[test]

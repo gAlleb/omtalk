@@ -153,6 +153,7 @@ pub struct Icons {
     pub folder: &'static str,
     /// The button that sends a file, on the input box.
     pub attach: &'static str,
+    pub emoji: &'static str,
     pub bell: &'static str,
     pub muted: &'static str,
     pub bot: &'static str,
@@ -173,6 +174,7 @@ pub fn nerd() -> Icons {
         command: "\u{f120}",
         folder: "\u{f07b}",
         attach: "\u{f0c6}",
+        emoji: "\u{f118}",
         bell: "\u{f0f3}",
         muted: "\u{f1f6}",
         bot: "\u{f06a9}",
@@ -192,6 +194,7 @@ pub fn text_icons() -> Icons {
         command: "$",
         folder: "/",
         attach: tr!("[file]", "[файл]"),
+        emoji: tr!("[emoji]", "[эмодзи]"),
         bell: tr!("[notify]", "[увед.]"),
         muted: tr!("[muted]", "[тихо]"),
         bot: tr!("[bot]", "[бот]"),

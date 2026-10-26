@@ -90,6 +90,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     reaction_details(frame, app, area);
     search_window(frame, app, area);
     switch_window(frame, app, area);
+    emoji_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -1659,6 +1660,11 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     let button = format!(" {label} ");
     let attach = format!(" {} ", app.icons.attach);
     let can_mute = app.current().is_some_and(|c| c.kind != ChatKind::Server);
+    let emoji = if can_mute {
+        format!(" {} ", app.icons.emoji)
+    } else {
+        String::new()
+    };
     let mute = if can_mute {
         format!(
             " {} ",
@@ -1681,7 +1687,9 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         " ⏎ ",
     ]
     .into_iter()
-    .find(|h| button.width() + attach.width() + mute.width() + h.width() + 4 <= area.width as usize)
+    .find(|h| {
+        button.width() + attach.width() + mute.width() + emoji.width() + h.width() + 5 <= area.width as usize
+    })
     .unwrap_or("");
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1693,6 +1701,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         ))
         .title(Span::styled(attach.clone(), Style::default().fg(theme::accent())))
         .title(Span::styled(mute.clone(), Style::default().fg(theme::dim())))
+        .title(Span::styled(emoji.clone(), Style::default().fg(theme::accent())))
         .title(
             TextLine::from(Span::styled(hint, Style::default().fg(theme::dim()))).alignment(Alignment::Right),
         );
@@ -1714,6 +1723,14 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         mute.width() as u16,
         1,
     );
+
+    app.areas.emoji_button = Rect::new(
+        area.x + 1 + button.width() as u16 + attach.width() as u16 + mute.width() as u16 + 3,
+        area.y,
+        emoji.width() as u16,
+        1,
+    )
+    .intersection(area);
 
     if app.input.is_empty() {
         let hint = if app.current().is_some() {
@@ -2200,6 +2217,107 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hints_width)]).areas(area);
     frame.render_widget(Paragraph::new(TextLine::from(left)), left_area);
     frame.render_widget(Paragraph::new(hints), right_area);
+}
+
+fn emoji_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(picker) = app.emoji.as_mut() else { return };
+    let width = screen.width.saturating_sub(4).min(72);
+    let height = screen.height.saturating_sub(2).min(24);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
+    app.areas.emoji_window = area;
+    clear(frame, area);
+    let title = trf!(
+        " Emoji · {} ",
+        " Эмодзи · {} ",
+        crate::emoji::category_name(picker.category)
+    );
+    let block = pane(&title, true).title_bottom(tr!(
+        " Arrows · Enter · Esc · Tab categories · type to search ",
+        " Стрелки · Enter · Esc · Tab категории · поиск "
+    ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 5 || inner.height < 4 {
+        return;
+    }
+    let visible = (inner.width / 4).max(1) as usize;
+    let first_category = picker.category.saturating_sub(visible - 1);
+    for (col, category) in (first_category..crate::emoji::CATEGORY_ICONS.len())
+        .take(visible)
+        .enumerate()
+    {
+        let rect = Rect::new(inner.x + col as u16 * 4, inner.y, 4, 1);
+        app.areas.emoji_categories.push((rect, category));
+        frame.render_widget(
+            Paragraph::new(format!(" {} ", crate::emoji::CATEGORY_ICONS[category])).style(
+                if category == picker.category {
+                    theme::selected()
+                } else {
+                    Style::default()
+                },
+            ),
+            rect,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(trf!("Search: {}", "Поиск: {}", picker.query)),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+    let search_width = trf!("Search: {}", "Поиск: {}", picker.query)
+        .width()
+        .min(inner.width.saturating_sub(1) as usize);
+    frame.set_cursor_position(Position::new(inner.x + search_width as u16, inner.y + 1));
+    picker.columns = (inner.width / crate::emoji::CELL_WIDTH).max(1) as usize;
+    picker.rows = inner.height.saturating_sub(3) as usize;
+    let first_row = (picker.cursor / picker.columns).saturating_sub(picker.rows.saturating_sub(1));
+    let first = first_row * picker.columns;
+    let catalog = crate::emoji::catalog();
+    for (slot, index) in picker
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(picker.rows * picker.columns)
+    {
+        let relative = slot - first;
+        let rect = Rect::new(
+            inner.x + (relative % picker.columns) as u16 * crate::emoji::CELL_WIDTH,
+            inner.y + 2 + (relative / picker.columns) as u16,
+            crate::emoji::CELL_WIDTH,
+            1,
+        );
+        app.areas.emoji_cells.push((rect, slot));
+        frame.render_widget(
+            Paragraph::new(format!(" {} ", catalog[*index].symbol)).style(if slot == picker.cursor {
+                theme::selected()
+            } else {
+                Style::default()
+            }),
+            rect,
+        );
+    }
+    let label = picker
+        .matches
+        .get(picker.cursor)
+        .map(|i| {
+            trf!(
+                "{} · {}/{}",
+                "{} · {}/{}",
+                catalog[*i].label(),
+                picker.cursor + 1,
+                picker.matches.len()
+            )
+        })
+        .unwrap_or_else(|| tr!("No emoji found", "Эмодзи не найдены").into());
+    frame.render_widget(
+        Paragraph::new(label).style(Style::default().fg(theme::dim())),
+        Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+    );
 }
 
 fn switch_window(frame: &mut Frame, app: &mut App, screen: Rect) {
@@ -3356,6 +3474,49 @@ mod tests {
     use omtalk_xmpp::BareJid;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn emoji_button_grid_and_categories_are_clickable_in_both_icon_modes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        for icons in [theme::nerd(), theme::text_icons()] {
+            let me = jid("me@example.org");
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            app.icons = icons;
+            let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+            app.select(chat);
+            app.input = "draft".into();
+            app.cursor = 2;
+            let click = |rect: Rect| MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + rect.width / 2,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            let text = screen(&mut app, 140, 35);
+            assert!(text.contains(icons.emoji), "{text}");
+            assert!(app.areas.emoji_button.x > app.areas.mute_button.x);
+            app.on_mouse(click(app.areas.emoji_button));
+            assert!(
+                app.emoji.is_some(),
+                "the painted emoji button must open the picker"
+            );
+            screen(&mut app, 140, 35);
+            let category = app.areas.emoji_categories[2].0;
+            app.on_mouse(click(category));
+            assert_eq!(app.emoji.as_ref().unwrap().category, 2);
+            app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+            assert_eq!(app.emoji.as_ref().unwrap().category, 1);
+            app.on_paste("grinning face");
+            screen(&mut app, 140, 35);
+            let picker = app.emoji.as_ref().unwrap();
+            let symbol = crate::emoji::catalog()[picker.matches[0]].symbol;
+            let cell = app.areas.emoji_cells[0].0;
+            let actions = app.on_mouse(click(cell));
+            assert_eq!(app.input, format!("dr{symbol}aft"));
+            assert!(app.emoji.is_none());
+            assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
+        }
+    }
 
     #[test]
     fn touchpad_scroll_over_messages_keeps_the_chat_across_history_pages() {
@@ -5875,7 +6036,7 @@ mod tests {
 
         // /help: every command, the last ones too.
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        let text = screen(&mut app, 120, 46);
+        let text = screen(&mut app, 120, 48);
         assert!(text.contains("/create") && text.contains("/quit"), "{text}");
     }
 

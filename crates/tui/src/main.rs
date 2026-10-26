@@ -10,6 +10,7 @@ mod avatar;
 mod clipboard;
 mod complete;
 mod config;
+mod emoji;
 mod keys;
 mod mpris;
 mod notify;
