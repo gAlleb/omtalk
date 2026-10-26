@@ -2853,7 +2853,7 @@ impl App {
     }
 
     fn submit(&mut self) -> Vec<Action> {
-        let input = std::mem::take(&mut self.input);
+        let mut input = std::mem::take(&mut self.input);
         self.cursor = 0;
         self.recall = None;
         if input.trim().is_empty() {
@@ -2864,8 +2864,12 @@ impl App {
         if self.sent.last() != Some(&kept) {
             self.sent.push(kept);
         }
+        let escaped = input.starts_with("//");
+        if escaped {
+            input.remove(0);
+        }
         // "/me waves" is a message, sent as it is (XEP-0245); other "/…" are commands.
-        if input.trim_start().starts_with('/') && !is_action(input.trim_start()) {
+        if !escaped && input.trim_start().starts_with('/') && !is_action(input.trim_start()) {
             self.refused = false;
             let actions = self.command(input.trim());
             if self.refused {
