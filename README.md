@@ -122,8 +122,8 @@ In a room, `Tab` after the input line focuses participants: arrows select someon
 
 Jump to the first unread chat in list order with modifier+N (Ctrl+N by default)
 or prefix+N. All accounts are included and folded groups open as needed. Muted chats
-still participate because their unread counts remain. With no unread chats, selection
-stays put. Change the key in `/settings` → “Unread chat shortcut” or set
+still participate because their unread counts remain. After visiting the unread chats, press again to return to the starting chat.
+Choosing another chat manually cancels the return point. Change the key in `/settings` → “Unread chat shortcut” or set
 `[ui] unread_shortcut = "f8"`. `"modifier+n"` follows the main modifier; `"none"`
 disables the direct shortcut. Prefix+N remains available.
 

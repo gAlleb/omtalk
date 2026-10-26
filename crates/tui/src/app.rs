@@ -887,6 +887,7 @@ pub struct App {
     pub connection: BTreeMap<BareJid, Connection>,
     pub chats: Vec<Chat>,
     pub selected: Option<usize>,
+    unread_return: Option<(BareJid, BareJid)>,
     pub focus: Focus,
     pub input: String,
     /// In characters, not bytes.
@@ -1029,6 +1030,7 @@ impl App {
             accounts,
             chats: Vec::new(),
             selected: None,
+            unread_return: None,
             focus: Focus::Input,
             input: String::new(),
             cursor: 0,
@@ -1802,6 +1804,7 @@ impl App {
         if index >= self.chats.len() {
             return Vec::new();
         }
+        self.unread_return = None;
         let mut actions = Vec::new();
         // Leaving a chat mid-word: it learns the typing paused.
         if let Some(((account, to), ChatState::Composing)) = self.typing_out.clone()
@@ -4345,11 +4348,32 @@ impl App {
                 }
                 _ => None,
             });
-        let Some(index) = next else { return Vec::new() };
+        let origin = self.unread_return.clone().or_else(|| {
+            self.selected
+                .map(|i| (self.chats[i].account.clone(), self.chats[i].jid.clone()))
+        });
+        let index = match next {
+            Some(index) => index,
+            None => {
+                let Some((account, jid)) = self.unread_return.take() else {
+                    return Vec::new();
+                };
+                let Some(index) = self
+                    .chats
+                    .iter()
+                    .position(|c| c.account == account && c.jid == jid)
+                else {
+                    return Vec::new();
+                };
+                return self.open(index);
+            }
+        };
         self.collapsed
             .remove(&Group::Account(self.chats[index].account.clone()));
         self.collapsed.remove(&self.group_of(index));
-        self.select(index)
+        let actions = self.select(index);
+        self.unread_return = origin;
+        actions
     }
 
     /// Folds a heading's chats away, or opens them again.
@@ -5294,8 +5318,8 @@ mod tests {
         assert_eq!(app.selected, Some(other));
         assert_eq!(app.active, Some(work));
         assert!(app.visible_chats().contains(&other));
-        assert!(app.on_key(jump).is_empty());
-        assert_eq!(app.selected, Some(other), "no unread: stay put");
+        app.on_key(jump);
+        assert_eq!(app.selected, Some(server), "no unread: return to origin");
         app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(app.cursor, 0, "Ctrl+A retains shell editing");
     }
