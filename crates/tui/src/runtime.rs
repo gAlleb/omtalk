@@ -931,6 +931,21 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             for action in app.on_incoming(&account, &message, at) {
                 tokio::spawn(perform(action, shared.clone()));
             }
+            // Catch-up can bring older history after a local or remote read
+            // frontier was already applied. Inserting it must not unread it again.
+            flush_local_reads(app, &shared.store);
+            if let Some(chat) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == message.peer)
+            {
+                if let Some(id) = &chat.read_mark {
+                    let _ = shared.store.read_remotely(&account, &chat.jid, id);
+                }
+                if let Ok(Some(unread)) = shared.store.unread_after_mark(&account, &chat.jid, None) {
+                    chat.unread = unread;
+                }
+            }
             if let Some(text) = &message.text {
                 fetch_if_media(text, message.shared_file, shared);
             }
@@ -1732,8 +1747,18 @@ fn trace_presence(account: &BareJid, presence: &xmpp_parsers::presence::Presence
     );
 }
 
-/// After every new login: announce the device, read what was missed, enter the rooms.
+/// After every new login: personal catch-up, room entry and read positions proceed
+/// independently, so a slow archive or publication cannot hold the rooms up.
 async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
+    tokio::join!(
+        come_online_messages(account.clone(), xmpp.clone(), omemo.clone(), shared.clone()),
+        come_online_rooms(&account, &xmpp, &omemo, &shared),
+        sync_read_marks(&account, &xmpp, &shared),
+    );
+    sync_read_marks(&account, &xmpp, &shared).await;
+}
+
+async fn come_online_messages(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
     // The first requests of a session sometimes go unanswered: tried again, so that
     // the device is in its list and its keys out for this session, not the next.
@@ -1850,35 +1875,12 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             text: trf!("archive: {e}", "архив: {e}"),
         }),
     }
-    // The rooms entered here before, and those the account's clients enter by themselves
-    // (autojoin in its bookmarks, as Gajim and Conversations keep them): on a new device
-    // the bookmarks are all there is.
-    let mut rooms: Vec<BareJid> = shared
-        .store
-        .rooms(&account)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(room, _)| room)
-        .collect();
-    // Read once for all of them; unread, each room asks again. One closed here (/close,
-    // /leave) stays closed here, though the account's other clients still enter it.
-    let marks = xmpp.bookmarks().await.ok();
-    let closed = shared.store.closed_chats(&account).unwrap_or_default();
-    for mark in marks.iter().flatten() {
-        if mark.autojoin && !rooms.contains(&mark.room) && !closed.contains(&mark.room) {
-            rooms.push(mark.room.clone());
-        }
-    }
-    for room in rooms {
-        let entry = Entry {
-            bookmarks: marks.as_deref(),
-            ..Entry::default()
-        };
-        join(&account, &xmpp, &omemo, &shared, room, entry).await;
-    }
-    // Where each chat is read up to, as the account's clients left it on the server
-    // (XEP-0490): read there, read here; what came after, unread here as there. Asked
-    // after the missed messages are in, which it counts.
+}
+
+/// Read positions are useful before catch-up too: old archive pages must not
+/// temporarily unread messages already read on another device.
+async fn sync_read_marks(account: &BareJid, xmpp: &Account, shared: &Shared) {
+    let tell = |msg| drop(shared.tx.send(msg));
     match xmpp.read_marks().await {
         Ok(marks) => tell(Msg::ReadMarks {
             account: account.clone(),
@@ -1895,6 +1897,37 @@ async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared:
             )));
         }
     }
+}
+
+/// Enter rooms independently of personal catch-up and of each other's archives.
+async fn come_online_rooms(account: &BareJid, xmpp: &Account, omemo: &Omemo, shared: &Shared) {
+    // The rooms entered here before, and those the account's clients enter by themselves
+    // (autojoin in its bookmarks, as Gajim and Conversations keep them): on a new device
+    // the bookmarks are all there is.
+    let mut rooms: Vec<BareJid> = shared
+        .store
+        .rooms(account)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(room, _)| room)
+        .collect();
+    // Read once for all of them; unread, each room asks again. One closed here (/close,
+    // /leave) stays closed here, though the account's other clients still enter it.
+    let marks = xmpp.bookmarks().await.ok();
+    let closed = shared.store.closed_chats(account).unwrap_or_default();
+    for mark in marks.iter().flatten() {
+        if mark.autojoin && !rooms.contains(&mark.room) && !closed.contains(&mark.room) {
+            rooms.push(mark.room.clone());
+        }
+    }
+    futures::future::join_all(rooms.into_iter().map(|room| async {
+        let entry = Entry {
+            bookmarks: marks.as_deref(),
+            ..Entry::default()
+        };
+        join(account, xmpp, omemo, shared, room, entry).await;
+    }))
+    .await;
 }
 
 /// How a room is entered.
@@ -3878,6 +3911,71 @@ mod tests {
 
     #[cfg(feature = "insecure-tcp")]
     #[tokio::test(flavor = "multi_thread")]
+    async fn startup_enters_a_ready_room_while_another_room_does_not_answer() {
+        use super::*;
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let (_accounts, events, account) = login_plain("u79").await;
+        let (_silent_accounts, _silent_events, silent) = login_plain("u80").await;
+        let me = account.jid().clone();
+        let ready: BareJid = format!("zstartup-{}@muc.localhost", receipts::new_id())
+            .parse()
+            .unwrap();
+        // A connected ordinary client receives presence but never sends the MUC
+        // self-presence that completes join. It must not hold the real room up.
+        let slow = silent.jid().clone();
+        let omemo = Arc::new(Omemo::new(
+            account.clone(),
+            State::new(OwnKeys::generate(0).unwrap()),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: [(me.clone(), (account.clone(), omemo.clone()))].into(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: Store::open(&dir.path().join("history.db")).unwrap(),
+            tx,
+        };
+        for room in [&slow, &ready] {
+            shared.store.remember_room(&me, room, "me").unwrap();
+        }
+        let pump = tokio::spawn(pump(events, shared.clone()));
+        let startup = tokio::spawn(come_online(me, account.clone(), omemo, shared));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(rx.recv().await, Some(Msg::Joined { room, .. }) if room == ready) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("a silent room must not delay entry into a ready room");
+        assert!(
+            !startup.is_finished(),
+            "the other room is still waiting for its self-presence"
+        );
+        startup.abort();
+        pump.abort();
+        account.leave(&ready, "me").await.unwrap();
+        account
+            .bookmark(&omtalk_xmpp::bookmarks::Bookmark {
+                room: ready,
+                name: None,
+                nick: Some("me".into()),
+                autojoin: false,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "insecure-tcp")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn plain_messages_to_self_echo_into_the_original_line_and_history() {
         use super::*;
         use crate::config::Modifier;
@@ -4142,6 +4240,80 @@ mod tests {
         load_history(&mut restarted, &store, &[recipient]);
         let chat = restarted.chats.iter().find(|c| c.jid == *sender.jid()).unwrap();
         assert_eq!(chat.lines.len(), 1, "restart must keep the same one message");
+    }
+
+    #[tokio::test]
+    async fn late_archive_pages_respect_the_other_laptops_read_frontier() {
+        use super::*;
+        use crate::config::Modifier;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("history.db")).unwrap();
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let room: BareJid = "chat5@muc.example.org".parse().unwrap();
+        let message = |at: i64| Incoming {
+            peer: room.clone(),
+            sender: "bob@example.org".parse().unwrap(),
+            nick: Some("bob".into()),
+            device: None,
+            direction: Direction::Incoming,
+            encrypted: false,
+            text: Some(format!("message {at}")),
+            at: Some(at),
+            not_for_this_device: false,
+            id: Some(format!("m{at}")),
+            markable: false,
+            archive_id: Some(format!("a{at}")),
+            untrusted: false,
+            reply_to: None,
+            replaces: None,
+            shared_file: false,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&me);
+        let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+        app.select(server);
+        // The office laptop read through message 100. Its marker arrives before
+        // some older archive pages, which are new to this laptop, but already read.
+        let boundary = message(100);
+        keep(&shared, &me, &boundary);
+        apply(
+            &mut app,
+            Msg::ReadMarks {
+                account: me.clone(),
+                marks: vec![(room.clone(), "a100".into())],
+            },
+            &shared,
+        );
+        for at in (19..100).chain(101..106) {
+            let message = message(at);
+            keep(&shared, &me, &message);
+            apply(
+                &mut app,
+                Msg::Incoming {
+                    account: me.clone(),
+                    message,
+                    at,
+                },
+                &shared,
+            );
+        }
+        assert_eq!(
+            app.chats[chat].unread, 5,
+            "81 already-read archive messages must not turn five new messages into 86"
+        );
     }
 
     #[test]
