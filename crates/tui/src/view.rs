@@ -2584,10 +2584,16 @@ fn settings_window(frame: &mut Frame, app: &mut App, screen: Rect) {
             if !lines.is_empty() {
                 lines.push((TextLine::default(), None));
             }
-            let heading = if section == "notify" {
-                tr!("Notifications", "Уведомления")
+            let heading = if section == "chat" {
+                settings
+                    .chat
+                    .as_ref()
+                    .map(|(_, _, title)| trf!("This chat: {title}", "Этот чат: {title}"))
+                    .unwrap_or_default()
+            } else if section == "notify" {
+                tr!("Notifications", "Уведомления").into()
             } else {
-                tr!("Interface", "Интерфейс")
+                tr!("Interface", "Интерфейс").into()
             };
             lines.push((
                 TextLine::styled(
@@ -5717,6 +5723,47 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         let text = screen(&mut app, 120, 44);
         assert!(text.contains("/create") && text.contains("/quit"), "{text}");
+    }
+
+    #[test]
+    fn chat_settings_show_only_local_options_and_sound_is_clickable() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let peer = jid("bob@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &peer, ChatKind::Direct);
+        app.select(chat);
+        for c in "/settings chat".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let text = screen(&mut app, 120, 24);
+        assert!(
+            text.contains("Этот чат") && text.contains("Мьют всех уведомлений") && text.contains("Звук"),
+            "{text}"
+        );
+        assert_eq!(app.settings.as_ref().unwrap().rows.len(), 3);
+        let area = app
+            .areas
+            .settings_rows
+            .iter()
+            .find(|(_, row)| *row == 2)
+            .unwrap()
+            .0;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click);
+        let actions = app.on_mouse(click);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SetChatNotify { prefs, .. } if prefs.sound == Some(true)))
+        );
+        assert_eq!(app.chat_notify[&(me, peer)].sound, Some(true));
     }
 
     #[test]

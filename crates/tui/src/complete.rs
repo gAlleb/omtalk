@@ -194,7 +194,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "/settings",
-        args: ["", ""],
+        args: ["[chat]", "[chat]"],
         about: ["settings", "настройки"],
     },
     Command {

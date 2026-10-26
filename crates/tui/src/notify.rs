@@ -75,6 +75,30 @@ impl Default for NotifyConfig {
     }
 }
 
+/// Local overrides; absent values preserve the global policy exactly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChatNotify {
+    pub mentions_only: Option<bool>,
+    pub sound: Option<bool>,
+}
+
+impl ChatNotify {
+    pub fn alert(&self, global: &Notify, private: bool, mention: bool) -> Alert {
+        let mut alert = global.alert(private, mention);
+        let matches = self.mentions_only.map(|only| !only || mention);
+        if let Some(matches) = matches {
+            alert.desktop = matches && global.desktop_on != When::NEVER;
+            alert.bell = matches && global.bell_on != When::NEVER;
+            alert.sound = matches && !global.sound.is_empty() && global.sound_on != When::NEVER;
+        }
+        if let Some(sound) = self.sound {
+            alert.sound = sound && !global.sound.is_empty() && matches.unwrap_or(true);
+        }
+        alert
+    }
+}
+
 /// What to do, ready.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notify {
@@ -210,6 +234,52 @@ pub fn desktop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_notification_overrides_preserve_inheritance_and_allow_explicit_sound() {
+        let global = NotifyConfig {
+            sound_on: "none".into(),
+            desktop_on: "all".into(),
+            bell_on: "all".into(),
+            ..Default::default()
+        }
+        .ready()
+        .unwrap();
+        for (private, mention) in [(false, false), (false, true), (true, false)] {
+            assert_eq!(
+                ChatNotify::default().alert(&global, private, mention),
+                global.alert(private, mention)
+            );
+        }
+        let prefs = ChatNotify {
+            mentions_only: Some(true),
+            sound: Some(true),
+        };
+        assert_eq!(prefs.alert(&global, false, false), Alert::default());
+        assert_eq!(
+            prefs.alert(&global, false, true),
+            Alert {
+                sound: true,
+                desktop: true,
+                bell: true
+            }
+        );
+        let silent = ChatNotify {
+            sound: Some(false),
+            ..prefs
+        };
+        assert_eq!(
+            silent.alert(&global, false, true),
+            Alert {
+                sound: false,
+                desktop: true,
+                bell: true
+            }
+        );
+        let mut no_command = global.clone();
+        no_command.sound.clear();
+        assert!(!prefs.alert(&no_command, false, true).sound);
+    }
 
     #[test]
     fn each_signal_is_set_on_its_own() {

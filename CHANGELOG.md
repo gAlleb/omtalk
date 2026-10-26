@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Per-chat notification preferences in `/settings chat`: inherit, all messages or mentions only, plus independent sound on/off/inherit. Mute overrides every signal. Choices persist locally per account and chat, including IRC bridges.
 - Contacts declaring the standard XMPP `client/bot` identity get a robot icon in the chat list and header. Discovery is limited to viewed contacts and remembered locally; names are not used to guess.
 - Jump to the first unread chat with modifier+N or prefix+N, including folded groups. The direct key is configurable through `unread_shortcut` or settings; Ctrl+A and reply on prefix+A are unchanged.
 - Ready files, including MP4 videos, can be opened by clicking their name or “open” in compact mode. The sender name and attachment now have separate click areas.

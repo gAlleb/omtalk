@@ -677,6 +677,11 @@ pub enum Action {
     Fetch(String),
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
+    SetChatNotify {
+        account: BareJid,
+        chat: BareJid,
+        prefs: crate::notify::ChatNotify,
+    },
     /// Discover the declared kind of a contact or one of its connected clients.
     BotInfo {
         account: BareJid,
@@ -986,6 +991,7 @@ pub struct App {
     pub omemo_choice: BTreeMap<(BareJid, BareJid), bool>,
     pub muted_chats: BTreeSet<(BareJid, BareJid)>,
     pub bots: BTreeSet<(BareJid, BareJid)>,
+    pub chat_notify: BTreeMap<(BareJid, BareJid), crate::notify::ChatNotify>,
     pub bot_checks: BTreeSet<(BareJid, String)>,
     /// Read frontiers to persist before waiting for another event, including messages
     /// that a bridge sent without an archive stanza-id.
@@ -1091,6 +1097,7 @@ impl App {
             omemo_choice: BTreeMap::new(),
             muted_chats: BTreeSet::new(),
             bots: BTreeSet::new(),
+            chat_notify: BTreeMap::new(),
             bot_checks: BTreeSet::new(),
             local_reads: BTreeMap::new(),
         }
@@ -1325,11 +1332,23 @@ impl App {
         }
         let kind = chat.map(|i| &self.chats[i].kind);
         let private = message.nick.is_none() && !matches!(kind, Some(ChatKind::Server));
+        let prefs = self.chat_notify.get(&(account.clone(), message.peer.clone()));
         let mention = match kind {
             Some(ChatKind::Room { nick }) => crate::notify::mentions(text, nick),
+            Some(ChatKind::Direct) if prefs.is_some_and(|p| p.mentions_only == Some(true)) => self
+                .nicknames
+                .get(&(account.clone(), account.clone()))
+                .map(String::as_str)
+                .or_else(|| account.node().map(|node| node.as_str()))
+                .is_some_and(|nick| crate::notify::mentions(text, nick)),
             _ => false,
         };
-        self.notify.alert(private, mention)
+        self.chat_notify
+            .get(&(account.clone(), message.peer.clone()))
+            .map_or_else(
+                || self.notify.alert(private, mention),
+                |prefs| prefs.alert(&self.notify, private, mention),
+            )
     }
 
     /// Who wrote and, in a room, which, as a desktop notification names them: the room
@@ -3237,7 +3256,21 @@ impl App {
                     "/me ТЕКСТ — о себе в третьем лице, как в IRC"
                 ));
             }
-            ("/settings", _) => return self.open_settings(),
+            ("/settings", _) => {
+                let chat_only = args.first() == Some(&"chat");
+                if chat_only && self.current().is_none_or(|chat| chat.kind == ChatKind::Server) {
+                    return self.say(tr!(
+                        "open a chat to configure notifications",
+                        "откройте чат для настройки уведомлений"
+                    ));
+                }
+                let actions = self.open_settings();
+                if chat_only && let Some(settings) = self.settings.as_mut() {
+                    settings.rows.retain(|row| row.section == "chat");
+                    settings.cursor = 0;
+                }
+                return actions;
+            }
             ("/commands", _) => return self.open_chat_commands(),
             ("/nick", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
@@ -3778,10 +3811,25 @@ impl App {
         ui.typing = self.send_typing;
         ui.avatars = self.show_avatars;
         ui.compact = self.compact;
-        self.settings = Some(crate::settings::Settings::open(crate::settings::Current {
+        let mut settings = crate::settings::Settings::open(crate::settings::Current {
             ui: &ui,
             notify: &self.config_notify,
-        }));
+        });
+        if let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) {
+            let prefs = self
+                .chat_notify
+                .get(&(chat.account.clone(), chat.jid.clone()))
+                .cloned()
+                .unwrap_or_default();
+            settings.add_chat(
+                chat.account.clone(),
+                chat.jid.clone(),
+                chat.title(),
+                chat.muted,
+                &prefs,
+            );
+        }
+        self.settings = Some(settings);
         Vec::new()
     }
 
@@ -3803,6 +3851,43 @@ impl App {
             return Vec::new();
         };
         let setting = settings.rows[row].clone();
+        if setting.section == "chat" {
+            let Some((account, peer, _)) = settings.chat.clone() else {
+                return Vec::new();
+            };
+            if let Value::Bool(muted) = setting.value {
+                return self.mute_chat(&account, &peer, muted);
+            }
+            let mut prefs = self
+                .chat_notify
+                .get(&(account.clone(), peer.clone()))
+                .cloned()
+                .unwrap_or_default();
+            match (setting.key, setting.value.text().as_str()) {
+                ("messages", value) => {
+                    prefs.mentions_only = match value {
+                        "all" => Some(false),
+                        "mention" => Some(true),
+                        _ => None,
+                    }
+                }
+                ("sound", value) => {
+                    prefs.sound = match value {
+                        "on" => Some(true),
+                        "off" => Some(false),
+                        _ => None,
+                    }
+                }
+                _ => return Vec::new(),
+            }
+            self.chat_notify
+                .insert((account.clone(), peer.clone()), prefs.clone());
+            return vec![Action::SetChatNotify {
+                account,
+                chat: peer,
+                prefs,
+            }];
+        }
         let used: Result<(), String> = match (setting.key, &setting.value) {
             ("modifier", value) => {
                 let (modifier, ui) = match value.text().as_str() {
@@ -4124,8 +4209,17 @@ impl App {
                 "откройте чат, чтобы включить или выключить уведомления"
             ));
         };
-        chat.muted = muted;
         let (account, jid) = (chat.account.clone(), chat.jid.clone());
+        self.mute_chat(&account, &jid, muted)
+    }
+
+    fn mute_chat(&mut self, account: &BareJid, jid: &BareJid, muted: bool) -> Vec<Action> {
+        for chat in &mut self.chats {
+            if &chat.account == account && &chat.jid == jid {
+                chat.muted = muted;
+            }
+        }
+        let (account, jid) = (account.clone(), jid.clone());
         let key = (account.clone(), jid.clone());
         if muted {
             self.muted_chats.insert(key);
@@ -5123,6 +5217,48 @@ mod tests {
     }
 
     #[test]
+    fn chat_notification_settings_target_the_opened_chat_not_the_later_selection() {
+        use crate::settings::Value;
+        let mut app = app();
+        let me = jid("me@example.org");
+        let peer = jid("bob@example.org");
+        let chat = app.chat(&me, &peer, ChatKind::Direct);
+        app.select(chat);
+        app.command("/settings chat");
+        let settings = app.settings.as_ref().unwrap();
+        assert_eq!(settings.rows[settings.cursor].section, "chat");
+        let row = settings
+            .rows
+            .iter()
+            .position(|r| r.section == "chat" && r.key == "sound")
+            .unwrap();
+        let options = match settings.rows[row].value {
+            Value::Choice(options, _) => options,
+            _ => unreachable!(),
+        };
+        app.settings.as_mut().unwrap().rows[row].value = Value::Choice(options, 2);
+        let server = app.server_chat(&me);
+        app.select(server);
+        assert!(
+            matches!(&app.apply_setting(row)[..], [Action::SetChatNotify { account, chat, prefs }]
+            if *account == me && *chat == peer && prefs.sound == Some(false))
+        );
+        let row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|r| r.section == "chat" && r.key == "muted")
+            .unwrap();
+        app.settings.as_mut().unwrap().rows[row].value = Value::Bool(true);
+        app.apply_setting(row);
+        assert!(app.chats[chat].muted);
+        assert!(!app.chats[server].muted);
+        assert_eq!(app.config_notify.sound_on, "private+mention");
+    }
+
+    #[test]
     fn unread_jump_uses_list_order_and_unfolds_only_the_target() {
         let home = jid("me@home.org");
         let work = jid("me@work.org");
@@ -5855,6 +5991,36 @@ mod tests {
             };
             let normal = app.alert_for(&me, &message);
             assert!(normal.sound && normal.desktop && normal.bell);
+            app.chat_notify.insert(
+                (me.clone(), peer.clone()),
+                crate::notify::ChatNotify {
+                    mentions_only: Some(true),
+                    sound: Some(false),
+                },
+            );
+            let alert = app.alert_for(&me, &message);
+            assert!(!alert.sound && alert.desktop && alert.bell);
+            let mut ordinary = message.clone();
+            ordinary.text = Some("hello everyone".into());
+            assert_eq!(app.alert_for(&me, &ordinary), Default::default());
+            app.chat_notify.insert(
+                (me.clone(), peer.clone()),
+                crate::notify::ChatNotify {
+                    mentions_only: Some(false),
+                    sound: Some(true),
+                },
+            );
+            assert!(app.alert_for(&me, &ordinary).sound);
+            let mut history = message.clone();
+            history.at = Some(1);
+            assert_eq!(app.alert_for(&me, &history), Default::default());
+            let mut own = message.clone();
+            own.direction = Direction::Outgoing;
+            assert_eq!(app.alert_for(&me, &own), Default::default());
+            app.focused = true;
+            assert_eq!(app.alert_for(&me, &message), Default::default());
+            app.focused = false;
+
             let actions = type_text(&mut app, "/mute");
             assert!(matches!(&actions[..], [Action::SetMuted { muted: true, .. }]));
             assert_eq!(app.alert_for(&me, &message), Default::default());

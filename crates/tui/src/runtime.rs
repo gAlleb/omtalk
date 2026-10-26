@@ -550,6 +550,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
     }
     restore_mutes(&store, &mut app);
+    restore_chat_notify(&store, &mut app);
     restore_bots(&store, &mut app);
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
@@ -728,6 +729,15 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                     app.status = trf!(
                         "mute setting was not saved: {problem}",
                         "мьют не сохранился: {problem}"
+                    );
+                }
+                continue;
+            }
+            if let Action::SetChatNotify { account, chat, prefs } = &action {
+                if let Err(problem) = save_chat_notify(&shared.store, account, chat, prefs) {
+                    app.status = trf!(
+                        "chat notifications were not saved: {problem}",
+                        "уведомления чата не сохранились: {problem}"
                     );
                 }
                 continue;
@@ -2337,7 +2347,7 @@ async fn perform(action: Action, shared: Shared) {
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
     match action {
         // Written by the loop, which keeps what the runtime uses.
-        Action::Setting { .. } | Action::SetMuted { .. } => {}
+        Action::Setting { .. } | Action::SetMuted { .. } | Action::SetChatNotify { .. } => {}
         Action::Send {
             account,
             to,
@@ -3429,6 +3439,33 @@ fn folded_from_kept(kept: &str) -> std::collections::BTreeSet<crate::app::Group>
 /// Local notification mutes, by "account/chat".
 const KEPT_MUTED: &str = "muted/";
 const KEPT_BOT: &str = "bot/";
+const KEPT_CHAT_NOTIFY: &str = "chat-notify/";
+
+fn save_chat_notify(
+    store: &Store,
+    account: &BareJid,
+    peer: &BareJid,
+    prefs: &crate::notify::ChatNotify,
+) -> Result<(), String> {
+    let value = toml::to_string(prefs).map_err(|e| e.to_string())?;
+    store
+        .keep(
+            &format!("{KEPT_CHAT_NOTIFY}{account}/{peer}"),
+            (prefs != &crate::notify::ChatNotify::default()).then_some(value.as_str()),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn restore_chat_notify(store: &Store, app: &mut App) {
+    for (key, value) in store.kept_under(KEPT_CHAT_NOTIFY).unwrap_or_default() {
+        if let Some((account, peer)) = key.split_once('/')
+            && let (Ok(account), Ok(peer), Ok(prefs)) =
+                (account.parse(), peer.parse(), toml::from_str(&value))
+        {
+            app.chat_notify.insert((account, peer), prefs);
+        }
+    }
+}
 
 fn restore_bots(store: &Store, app: &mut App) {
     for (key, value) in store.kept_under(KEPT_BOT).unwrap_or_default() {
@@ -3681,6 +3718,30 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_notification_overrides_survive_restart_and_reset_to_inherit() {
+        use super::*;
+        use crate::config::Modifier;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("prefs.db")).unwrap();
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let other: BareJid = "other@example.org".parse().unwrap();
+        let peer: BareJid = "#room%irc.example.org@bridge.example.org".parse().unwrap();
+        let prefs = crate::notify::ChatNotify {
+            mentions_only: Some(true),
+            sound: Some(false),
+        };
+        save_chat_notify(&store, &me, &peer, &prefs).unwrap();
+        let mut app = App::new(vec![me.clone(), other.clone()], Modifier::Ctrl, 26, 30);
+        restore_chat_notify(&store, &mut app);
+        assert_eq!(app.chat_notify.get(&(me.clone(), peer.clone())), Some(&prefs));
+        assert!(!app.chat_notify.contains_key(&(other, peer.clone())));
+        save_chat_notify(&store, &me, &peer, &Default::default()).unwrap();
+        let mut reset = App::new(vec![me], Modifier::Ctrl, 26, 30);
+        restore_chat_notify(&store, &mut reset);
+        assert!(reset.chat_notify.is_empty());
+    }
+
     #[test]
     fn discovered_bot_is_restored_before_its_chat_is_opened() {
         use super::*;

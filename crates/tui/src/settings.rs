@@ -113,6 +113,7 @@ pub enum Outcome {
 }
 
 pub struct Settings {
+    pub chat: Option<(omtalk_xmpp::BareJid, omtalk_xmpp::BareJid, String)>,
     pub rows: Vec<Setting>,
     pub cursor: usize,
     /// The text being typed for a text setting, and where the cursor is in it (chars).
@@ -286,11 +287,67 @@ impl Settings {
             ),
         ];
         Self {
+            chat: None,
             rows,
             cursor: 0,
             editing: None,
             problem: None,
         }
+    }
+
+    pub fn add_chat(
+        &mut self,
+        account: omtalk_xmpp::BareJid,
+        peer: omtalk_xmpp::BareJid,
+        title: String,
+        muted: bool,
+        prefs: &crate::notify::ChatNotify,
+    ) {
+        const EVENTS: Options = &[
+            ("inherit", "global settings", "как в общих"),
+            ("all", "all messages", "все сообщения"),
+            ("mention", "mentions only", "только упоминания"),
+        ];
+        const SOUND: Options = &[
+            ("inherit", "global settings", "как в общих"),
+            ("on", "on", "вкл"),
+            ("off", "off", "выкл"),
+        ];
+        self.chat = Some((account, peer, title));
+        self.rows.extend([
+            Setting {
+                section: "chat",
+                key: "muted",
+                label: tr!("Mute all notifications", "Мьют всех уведомлений"),
+                value: Value::Bool(muted),
+            },
+            Setting {
+                section: "chat",
+                key: "messages",
+                label: tr!("Notify for", "Уведомлять о"),
+                value: choice(
+                    EVENTS,
+                    match prefs.mentions_only {
+                        None => "inherit",
+                        Some(false) => "all",
+                        Some(true) => "mention",
+                    },
+                ),
+            },
+            Setting {
+                section: "chat",
+                key: "sound",
+                label: tr!("Sound", "Звук"),
+                value: choice(
+                    SOUND,
+                    match prefs.sound {
+                        None => "inherit",
+                        Some(true) => "on",
+                        Some(false) => "off",
+                    },
+                ),
+            },
+        ]);
     }
 
     pub fn selected(&self) -> &Setting {
