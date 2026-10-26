@@ -3124,6 +3124,15 @@ impl App {
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
+            ("/om", _) if rest.is_empty() => {
+                return match self.selected {
+                    Some(index) => self.send_to(index, "ॐ असतो मा सद्गमय".into()),
+                    None => {
+                        self.status = tr!("open a chat first", "сначала откройте чат").into();
+                        Vec::new()
+                    }
+                };
+            }
             ("/np", _) if rest.is_empty() => {
                 return if let Some(chat) = self
                     .selected
