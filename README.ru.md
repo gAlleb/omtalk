@@ -535,4 +535,5 @@ target/release/omtalk-cli you@example.org
 
 ## Лицензия
 
-GPL-3.0-or-later.
+GPL-3.0-or-later: GNU General Public License версии 3 или любой более поздней версии.
+Полный текст — в [LICENSE](LICENSE).

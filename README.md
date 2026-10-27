@@ -607,4 +607,5 @@ Server discovery uses SRV. `--host HOST [--port PORT]` selects STARTTLS manually
 
 ## License
 
-GPL-3.0-or-later.
+GPL-3.0-or-later: the GNU General Public License, version 3 or any later version. The
+full text is in [LICENSE](LICENSE).
