@@ -390,8 +390,9 @@ grant/revoke moderator or voice, kick, change the topic, and set/remove a room a
 Affiliations apply to account JIDs, including offline users; roles apply to present
 nicknames. Changing either requires the confirmation checkbox. The server enforces
 your permissions; failures remain in the form for correction. The avatar page takes
-a local image path (including `~/`), converts it to PNG up to 512×512, and preserves
-other room vCard fields. Avatar support depends on the room server.
+a local image path (including `~/`) and prepares it as `/avatar` does: the middle
+square, as PNG at most 256×256, smaller when it would be too large for the server. Other
+room vCard fields are preserved. Avatar support depends on the room server.
 
 Group encryption needs a members-only room with visible member addresses; omtalk
 includes offline members' devices when encrypting.
