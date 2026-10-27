@@ -430,6 +430,7 @@ pub struct Areas {
     pub group_rows: Vec<(Rect, Group)>,
     /// Pictures and file lines, to open with a click.
     pub files: Vec<(Rect, PathBuf)>,
+    pub links: Vec<(Rect, String)>,
     /// Files not fetched yet, to fetch with a click: their links.
     pub fetches: Vec<(Rect, String)>,
     /// The conversation's rows on screen and their text, for selecting it.
@@ -458,6 +459,7 @@ pub struct Areas {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    OpenUrl(String),
     NowPlaying {
         account: BareJid,
         chat: BareJid,
@@ -4971,6 +4973,7 @@ impl App {
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
             || self.areas.files.iter().any(|(r, _)| inside(*r))
+            || self.areas.links.iter().any(|(r, _)| inside(*r))
             || self.areas.fetches.iter().any(|(r, _)| inside(*r))
             || inside_opt(self.areas.older);
         match mouse.kind {
@@ -5090,6 +5093,8 @@ impl App {
                     return vec![Action::Fetch(link.clone())];
                 } else if let Some((_, path)) = self.areas.files.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Open(path.clone())];
+                } else if let Some((_, url)) = self.areas.links.iter().find(|(r, _)| inside(*r)) {
+                    return vec![Action::OpenUrl(url.clone())];
                 } else if inside(self.areas.omemo_button) {
                     return self.toggle_omemo();
                 } else if inside(self.areas.mute_button) {

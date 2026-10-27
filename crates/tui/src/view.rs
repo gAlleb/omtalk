@@ -588,6 +588,15 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 let y = top + offset as u16;
                 let mut text = row.text.clone();
                 let plain: String = row.text.spans.iter().map(|s| s.content.as_ref()).collect();
+                for (from, to, url) in &row.links {
+                    let from = (*from).min(inner.width as usize) as u16;
+                    let to = (*to).min(inner.width as usize) as u16;
+                    if to > from {
+                        app.areas
+                            .links
+                            .push((Rect::new(inner.x + from, y, to - from, 1), url.clone()));
+                    }
+                }
                 if let Some(line) = row.line {
                     app.areas
                         .message_lines
@@ -994,6 +1003,7 @@ pub struct Row {
     /// Which message (its index among the chat's lines) this row belongs to.
     pub line: Option<usize>,
     pub reactions: bool,
+    pub links: Vec<crate::links::Hit>,
 }
 
 /// One of the rows a picture covers.
@@ -1017,6 +1027,7 @@ impl From<TextLine<'static>> for Row {
             fetch: None,
             line: None,
             reactions: false,
+            links: Vec::new(),
         }
     }
 }
@@ -1215,6 +1226,7 @@ pub fn message_rows(
                         fetch: None,
                         line: None,
                         reactions: false,
+                        links: Vec::new(),
                     });
                 }
                 push_delivery(&mut rows, line, room, body_width, gutter, true);
@@ -1264,6 +1276,7 @@ pub fn message_rows(
                 fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
                 line: None,
                 reactions: false,
+                links: Vec::new(),
             });
             push_delivery(&mut rows, line, room, body_width, gutter, false);
             push_reactions(&mut rows, line, body_width, &pad);
@@ -1431,6 +1444,25 @@ pub fn message_rows(
         let end = starts.get(index + 1).copied().unwrap_or(rows.len());
         for row in &mut rows[*start..end] {
             row.line = Some(index);
+        }
+        if crate::links::urls(&lines[index].text).is_empty() {
+            continue;
+        }
+        let plain: Vec<String> = rows[*start..end]
+            .iter()
+            .map(|row| {
+                if row.picture.is_some() || row.open.is_some() || row.fetch.is_some() || row.reactions {
+                    String::new()
+                } else {
+                    row.text.spans.iter().map(|s| s.content.as_ref()).collect()
+                }
+            })
+            .collect();
+        for (row, hits) in rows[*start..end]
+            .iter_mut()
+            .zip(crate::links::row_hits(&lines[index].text, &plain))
+        {
+            row.links = hits;
         }
     }
     rows
@@ -3474,6 +3506,51 @@ mod tests {
     use omtalk_xmpp::BareJid;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn ordinary_and_wrapped_urls_open_without_shift_in_both_message_layouts() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        for compact in [false, true] {
+            let me = jid("me@example.org");
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            app.compact = compact;
+            let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+            app.select(chat);
+            let long = format!("https://example.org/{}", "segment/".repeat(12));
+            app.chats[chat].lines.push(Line::message(
+                100,
+                "bob".into(),
+                format!("😀 ссылка ({long}). https://other.example/x"),
+                true,
+                false,
+            ));
+            screen(&mut app, 100, 35);
+            let hits: Vec<_> = app
+                .areas
+                .links
+                .iter()
+                .filter(|(_, url)| url == &long)
+                .cloned()
+                .collect();
+            assert!(hits.len() > 1, "the wrapped URL must be clickable on each row");
+            for (rect, url) in hits {
+                let actions = app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert_eq!(actions, [Action::OpenUrl(url)]);
+                assert_eq!(app.selected, Some(chat));
+            }
+            assert!(
+                app.areas
+                    .links
+                    .iter()
+                    .any(|(_, url)| url == "https://other.example/x")
+            );
+        }
+    }
 
     #[test]
     fn emoji_button_grid_and_categories_are_clickable_in_both_icon_modes() {

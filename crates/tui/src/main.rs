@@ -12,6 +12,7 @@ mod complete;
 mod config;
 mod emoji;
 mod keys;
+mod links;
 mod mpris;
 mod notify;
 mod read_sync;

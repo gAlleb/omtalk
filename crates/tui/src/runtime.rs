@@ -3586,6 +3586,22 @@ async fn perform(action: Action, shared: Shared) {
                 });
             }
         }
+        Action::OpenUrl(url) => {
+            let opened = tokio::process::Command::new("xdg-open")
+                .arg(&url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match opened {
+                Ok(mut child) => {
+                    tokio::spawn(async move {
+                        let _ = child.wait().await;
+                    });
+                }
+                Err(e) => tell(Msg::Status(format!("xdg-open: {e}"))),
+            }
+        }
         Action::Open(path) => {
             // Detached and silent: the viewer must not write over the interface. Waited
             // for aside, so that it leaves no zombie behind.
