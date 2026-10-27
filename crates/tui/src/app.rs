@@ -3496,40 +3496,24 @@ impl App {
                     name: (!new.is_empty()).then(|| new.to_owned()),
                 }])
             }
-            ("/avatar", _) => match self
-                .current()
-                .map(|c| c.account.clone())
-                .or_else(|| self.account_for())
-            {
-                Some(account) => {
-                    let path = line[name.len()..].trim();
-                    match expand_home(path) {
-                        None => Ok(vec![Action::SetAvatar { account, path: None }]),
-                        Some(file) if !file.is_file() => {
-                            Err(trf!("no such file: {}", "нет такого файла: {}", file.display()))
-                        }
-                        Some(file) => Ok(vec![Action::SetAvatar {
-                            account,
-                            path: Some(file),
-                        }]),
-                    }
+            // The account's own: the one chosen with --account, else the active one.
+            ("/avatar", _) => match expand_home(line[name.len()..].trim()) {
+                None => Ok(vec![Action::SetAvatar { account, path: None }]),
+                Some(file) if !file.is_file() => {
+                    Err(trf!("no such file: {}", "нет такого файла: {}", file.display()))
                 }
-                None => Err(tr!("no account", "нет аккаунта").to_owned()),
+                Some(file) => Ok(vec![Action::SetAvatar {
+                    account,
+                    path: Some(file),
+                }]),
             },
-            ("/nickname", _) => match self
-                .current()
-                .map(|c| c.account.clone())
-                .or_else(|| self.account_for())
-            {
-                Some(account) => {
-                    let nick = line[name.len()..].trim();
-                    Ok(vec![Action::SetNickname {
-                        account,
-                        nick: (!nick.is_empty()).then(|| nick.to_owned()),
-                    }])
-                }
-                None => Err(tr!("no account", "нет аккаунта").to_owned()),
-            },
+            ("/nickname", _) => {
+                let nick = line[name.len()..].trim();
+                Ok(vec![Action::SetNickname {
+                    account,
+                    nick: (!nick.is_empty()).then(|| nick.to_owned()),
+                }])
+            }
             ("/name", _) => match self.current().filter(|c| c.is_room()) {
                 Some(chat) => {
                     let new = line[name.len()..].trim().to_owned();
@@ -6260,6 +6244,32 @@ mod tests {
             [Action::SetAvatar { path: None, .. }]
         ));
         assert!(type_text(&mut app, "/avatar /no/such/picture.png").is_empty());
+    }
+
+    #[test]
+    fn avatar_and_nickname_are_the_active_accounts_unless_another_is_named() {
+        let (home, work) = (jid("me@home.org"), jid("me@work.org"));
+        let mut app = App::new(vec![home.clone(), work.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &work,
+            &jid("team@muc.work.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.select(room);
+        // In a chat of the work account: the work account's.
+        assert!(matches!(
+            &type_text(&mut app, "/nickname Стефан")[..],
+            [Action::SetNickname { account, .. }] if *account == work
+        ));
+        // Named: that one, whatever chat is open.
+        assert!(matches!(
+            &type_text(&mut app, "/avatar --account me@home.org")[..],
+            [Action::SetAvatar { account, path: None }] if *account == home
+        ));
+        assert!(matches!(
+            &type_text(&mut app, "/nickname --account me@home.org Стефан")[..],
+            [Action::SetNickname { account, nick: Some(n) }] if *account == home && n == "Стефан"
+        ));
     }
 
     #[test]

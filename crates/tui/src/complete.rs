@@ -336,7 +336,17 @@ pub fn about(name: &str) -> Option<&'static Command> {
 pub fn allows_account(command: &str) -> bool {
     matches!(
         command,
-        "/msg" | "/join" | "/add" | "/remove" | "/accept" | "/refuse" | "/create" | "/keys" | "/services"
+        "/msg"
+            | "/join"
+            | "/add"
+            | "/remove"
+            | "/accept"
+            | "/refuse"
+            | "/create"
+            | "/keys"
+            | "/services"
+            | "/nickname"
+            | "/avatar"
     )
 }
 
@@ -618,6 +628,15 @@ mod tests {
             [format!("{base}/фото/")],
             "hidden ones not unasked"
         );
+        // A picture for one's avatar, after the account named too.
+        assert_eq!(
+            complete(&format!("/avatar {base}/фото/")).unwrap().1,
+            [format!("{base}/фото/кот.png")]
+        );
+        let named = format!("/avatar --account me@home.org {base}/фото/к");
+        let (start, found) = complete(&named).unwrap();
+        assert_eq!(found, [format!("{base}/фото/кот.png")]);
+        assert_eq!(start, "/avatar --account me@home.org ".chars().count());
         assert_eq!(complete("/services ").unwrap().1, ["home.org", "muc.home.org"]);
         assert_eq!(
             complete("/folder Раб").unwrap(),

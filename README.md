@@ -312,7 +312,7 @@ then the recipient as usual:
 ```
 
 The option is available for `/msg`, `/join`, `/add`, `/remove`, `/accept`, `/refuse`,
-`/create`, `/keys`, and `/services`. Unknown accounts are rejected; the input stays
+`/create`, `/keys`, `/services`, `/nickname`, and `/avatar`. Unknown accounts are rejected; the input stays
 editable. `/remove --account ACCOUNT` also needs the contact's address. Commands on
 an existing chat, such as `/invite`, `/leave`, and `/upload`, use that chat's account.
 In message text, `--account` is ordinary text. Opening a chat with `/msg --account`
