@@ -3,6 +3,8 @@ name: Build artifacts
 "on":
   push:
     branches: ["**"]
+    # A release tag also makes the release page, with the binaries on it.
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -47,3 +49,46 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  # Only for a release tag, and only this job may write: the page, its text (the tag's
+  # section of CHANGELOG.md, "## 0.1.10 — date") and the files the build above made.
+  release:
+    needs: linux
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: omtalk-linux-${{ github.sha }}
+
+      - name: Publish the release with its binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '
+            $0 ~ "^## " { if (found) exit; found = ($2 == v); next }
+            found
+          ' CHANGELOG.md > notes.md
+          # A tag without a section fails here rather than publish an empty page.
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          tar -C dist -xzf omtalk-linux.tar.gz
+          files="dist/omtalk-x86_64 dist/omtalk-aarch64 dist/SHA256SUMS LICENSE"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber
+          else
+            gh release create "$TAG" $files --verify-tag --title "omtalk $version" --notes-file notes.md
+          fi
