@@ -15,12 +15,12 @@ pub fn square(image: &DynamicImage) -> DynamicImage {
     image.crop_imm(x, y, side, side)
 }
 
-/// The largest an own avatar is published: what clients show, and well under a
-/// server's stanza size limit (Prosody's is 256 KiB) once in base64.
+/// The largest an avatar is published (one's own, a room's): what clients show, and
+/// well under a server's stanza size limit (Prosody's is 256 KiB) once in base64.
 const OWN_SIDE: u32 = 256;
 const OWN_BYTES: usize = 96 * 1024;
 
-/// The picture at `path` as one's avatar: its middle square, at most [`OWN_SIDE`] a
+/// The picture at `path` as an avatar (one's own, a room's): its middle square, at most [`OWN_SIDE`] a
 /// side, as a PNG; smaller still while the PNG is too large. The PNG and its side.
 pub fn own_avatar(path: &std::path::Path) -> Result<(Vec<u8>, u32), String> {
     let image = square(&image::open(path).map_err(|e| e.to_string())?);

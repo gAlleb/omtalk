@@ -135,6 +135,7 @@ pub async fn step(
                         )
                         .into());
                     }
+                    // As one's own: the middle square, small enough for the server.
                     Some(
                         tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
                             let path = if let Some(rest) = path.strip_prefix("~/") {
@@ -143,12 +144,7 @@ pub async fn step(
                             } else {
                                 path.into()
                             };
-                            let image = image::open(path).map_err(|e| e.to_string())?.thumbnail(512, 512);
-                            let mut png = std::io::Cursor::new(Vec::new());
-                            image
-                                .write_to(&mut png, image::ImageFormat::Png)
-                                .map_err(|e| e.to_string())?;
-                            Ok(png.into_inner())
+                            crate::avatar::own_avatar(&path).map(|(png, _)| png)
                         })
                         .await
                         .map_err(|e| e.to_string())??,
