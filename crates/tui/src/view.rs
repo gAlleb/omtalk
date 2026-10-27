@@ -7955,7 +7955,7 @@ fn recorder_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         tr!("Recording failed", "Запись не удалась")
     };
     let info = app.audio_info.get(&r.path).and_then(|i| i.as_ref().ok());
-    let playback = (&app.playback.path == &r.path).then_some(&app.playback);
+    let playback = (app.playback.path == r.path).then_some(&app.playback);
     let mut rows = vec![
         TextLine::from(truncate(&format!("{}", r.chat), inner.width as usize)),
         TextLine::from(format!("{state}  {}", crate::audio::clock(r.seconds))),

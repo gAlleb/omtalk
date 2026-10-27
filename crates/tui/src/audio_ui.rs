@@ -43,19 +43,18 @@ impl App {
             });
         if let Some(slot) = slot
             && let crate::app::MediaState::Ready(path) = &slot.state
+            && audio::supported(path)
         {
-            if audio::supported(path) {
-                return vec![Action::Audio(match seconds {
-                    Some(s) => audio::Command::Seek(
-                        path.clone(),
-                        self.audio_info
-                            .get(path)
-                            .and_then(|i| i.as_ref().ok())
-                            .map_or(s, |i| s.min(i.seconds)),
-                    ),
-                    None => audio::Command::Toggle(path.clone()),
-                })];
-            }
+            return vec![Action::Audio(match seconds {
+                Some(s) => audio::Command::Seek(
+                    path.clone(),
+                    self.audio_info
+                        .get(path)
+                        .and_then(|i| i.as_ref().ok())
+                        .map_or(s, |i| s.min(i.seconds)),
+                ),
+                None => audio::Command::Toggle(path.clone()),
+            })];
         }
         self.status = tr!(
             "no downloaded audio selected",

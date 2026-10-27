@@ -669,7 +669,7 @@ mod interrupted_download_tests {
             for code in [404, 503] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buf = [0; 2048];
-                socket.read(&mut buf).await.unwrap();
+                let _ = socket.read(&mut buf).await.unwrap();
                 socket
                     .write_all(
                         format!("HTTP/1.1 {code} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -709,7 +709,7 @@ mod automatic_retry_tests {
             for complete in [false, true] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buf = [0; 2048];
-                socket.read(&mut buf).await.unwrap();
+                let _ = socket.read(&mut buf).await.unwrap();
                 let body = if complete { "abcdef" } else { "abc" };
                 socket
                     .write_all(

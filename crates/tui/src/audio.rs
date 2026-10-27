@@ -267,7 +267,13 @@ impl Envelope {
             self.peak = 0.0;
             self.count = 0;
             if self.peaks.len() == 1024 {
-                self.peaks = self.peaks.chunks_exact(2).map(|v| v[0].max(v[1])).collect();
+                self.peaks = self
+                    .peaks
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|v| v[0].max(v[1]))
+                    .collect();
                 self.stride = self.stride.max(256) * 2;
             }
         }
@@ -450,7 +456,7 @@ impl pulseaudio::PlaybackSource for AudioSource {
             return std::task::Poll::Pending;
         }
         let count = (out.len() / 4).min(state.samples.len());
-        for bytes in out[..count * 4].chunks_exact_mut(4) {
+        for bytes in out[..count * 4].as_chunks_mut::<4>().0 {
             bytes.copy_from_slice(&state.samples.pop_front().unwrap().to_le_bytes());
         }
         state.played += count as u64;
@@ -492,8 +498,10 @@ impl Recording {
         params.buffer_attr.fragment_size = RATE * 4 / 50;
         let device = wait(client.create_record_stream(params, move |input: &[u8]| {
             let samples = input
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .map(|v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 })
                 .collect();
             if tx.try_send(samples).is_err() {

@@ -4433,7 +4433,7 @@ mod tests {
         assert!(app.chats[chat].lines.iter().all(|l| l.outgoing && !l.encrypted));
         assert!(app.chats[chat].lines[1].media.is_some());
         let mut restarted = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
-        load_history(&mut restarted, &store, &[me.clone()]);
+        load_history(&mut restarted, &store, std::slice::from_ref(&me));
         let chat = restarted.chats.iter().find(|c| c.jid == me).unwrap();
         assert_eq!(chat.lines.len(), 2);
         assert!(chat.lines.iter().all(|l| l.outgoing));
