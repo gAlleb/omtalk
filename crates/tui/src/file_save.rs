@@ -16,16 +16,31 @@ fn downloads() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let configured = std::env::var("XDG_DOWNLOAD_DIR").ok().or_else(|| {
-        std::fs::read_to_string(crate::config::config_dir().join("user-dirs.dirs"))
-            .ok()
-            .and_then(|text| {
-                text.lines().find_map(|l| {
-                    l.trim()
-                        .strip_prefix("XDG_DOWNLOAD_DIR=")
-                        .map(|s| s.trim_matches('"').to_owned())
-                })
+    let user_dirs = user_dirs_file(&home, std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from));
+    download_dir(
+        &home,
+        std::env::var("XDG_DOWNLOAD_DIR").ok(),
+        std::fs::read_to_string(user_dirs).ok().as_deref(),
+    )
+}
+/// The system's user-dirs.dirs: in the config directory itself, as xdg-user-dirs keeps
+/// it, not in omtalk's own.
+fn user_dirs_file(home: &Path, config_home: Option<PathBuf>) -> PathBuf {
+    config_home
+        .unwrap_or_else(|| home.join(".config"))
+        .join("user-dirs.dirs")
+}
+/// The downloads directory: from the environment, else from user-dirs.dirs, else
+/// ~/Downloads.
+fn download_dir(home: &Path, env: Option<String>, user_dirs: Option<&str>) -> PathBuf {
+    let configured = env.or_else(|| {
+        user_dirs.and_then(|text| {
+            text.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("XDG_DOWNLOAD_DIR=")
+                    .map(|s| s.trim_matches('"').to_owned())
             })
+        })
     });
     configured
         .map(|p| {
@@ -228,6 +243,34 @@ pub async fn copy(source: &Path, target: &Path, overwrite: bool) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_downloads_directory_is_the_systems_from_user_dirs() {
+        let home = Path::new("/home/me");
+        let user_dirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Загрузки\"\n";
+        assert_eq!(
+            download_dir(home, None, Some(user_dirs)),
+            Path::new("/home/me/Загрузки")
+        );
+        assert_eq!(
+            download_dir(home, Some("/data/dl".into()), Some(user_dirs)),
+            Path::new("/data/dl"),
+            "the environment first"
+        );
+        assert_eq!(download_dir(home, None, None), Path::new("/home/me/Downloads"));
+        assert_eq!(
+            user_dirs_file(home, None),
+            Path::new("/home/me/.config/user-dirs.dirs")
+        );
+        assert_eq!(
+            user_dirs_file(home, Some("/xdg".into())),
+            Path::new("/xdg/user-dirs.dirs")
+        );
+        assert_eq!(
+            download_dir(home, Some("relative".into()), None),
+            Path::new("/home/me/Downloads"),
+            "not an absolute path"
+        );
+    }
     #[tokio::test]
     async fn saving_never_overwrites_without_confirmation_and_replacement_is_complete() {
         let dir = tempfile::tempdir().unwrap();
