@@ -419,6 +419,8 @@ pub struct Areas {
     pub emoji_button: Rect,
     pub mic_button: Rect,
     pub audio: Vec<(Rect, crate::audio::Command)>,
+    pub saves: Vec<(Rect, PathBuf)>,
+    pub save_buttons: Vec<(Rect, bool)>,
     pub recorder_buttons: Vec<(Rect, usize)>,
     pub emoji_window: Rect,
     pub emoji_cells: Vec<(Rect, usize)>,
@@ -463,6 +465,12 @@ pub struct Areas {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     OpenUrl(String),
+    SaveFile {
+        id: String,
+        source: PathBuf,
+        target: PathBuf,
+        overwrite: bool,
+    },
     Audio(crate::audio::Command),
     NowPlaying {
         account: BareJid,
@@ -910,6 +918,7 @@ pub struct App {
     pub audio_pending: BTreeSet<PathBuf>,
     pub playback: crate::audio::Playback,
     pub recorder: Option<crate::audio_ui::Recorder>,
+    pub file_save: Option<crate::file_save::SaveFile>,
     pub contacts: BTreeSet<(BareJid, BareJid)>,
     pub focus: Focus,
     pub input: String,
@@ -1060,6 +1069,7 @@ impl App {
             audio_pending: BTreeSet::new(),
             playback: Default::default(),
             recorder: None,
+            file_save: None,
             contacts: BTreeSet::new(),
             focus: Focus::Input,
             input: String::new(),
@@ -2162,6 +2172,15 @@ impl App {
         {
             self.quit = true;
             return vec![Action::Quit];
+        }
+        if (self.file_save.is_some() || self.recorder.is_some())
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+        {
+            return self.handle_key(key);
+        }
+        if self.file_save.is_some() {
+            return self.save_file_key(key);
         }
         if self.recorder.is_some() {
             return self.recorder_key(key);
@@ -3583,6 +3602,10 @@ impl App {
     /// Pasted text goes in at the cursor as it is, line breaks included; in the services
     /// window's form, into the field being edited, on one line.
     pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        if self.file_save.is_some() {
+            self.save_file_paste(text);
+            return Vec::new();
+        }
         if let Some(picker) = self.emoji.as_mut() {
             picker.paste(text);
             return Vec::new();
@@ -4913,6 +4936,17 @@ impl App {
         let (x, y) = (mouse.column, mouse.row);
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         let inside_opt = |r: Option<Rect>| r.is_some_and(inside);
+        if self.file_save.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some((_, save)) = self.areas.save_buttons.iter().find(|(r, _)| inside(*r))
+            {
+                if *save {
+                    return self.save_file_submit();
+                }
+                self.file_save = None;
+            }
+            return Vec::new();
+        }
         if self.recorder.is_some() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, button)) = self.areas.recorder_buttons.iter().find(|(r, _)| inside(*r)) {
@@ -5031,6 +5065,7 @@ impl App {
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
             || self.areas.files.iter().any(|(r, _)| inside(*r))
             || self.areas.audio.iter().any(|(r, _)| inside(*r))
+            || self.areas.saves.iter().any(|(r, _)| inside(*r))
             || self.areas.links.iter().any(|(r, _)| inside(*r))
             || self.areas.fetches.iter().any(|(r, _)| inside(*r))
             || inside_opt(self.areas.older);
@@ -5157,6 +5192,8 @@ impl App {
                     return self.toggle_omemo();
                 } else if inside(self.areas.mute_button) {
                     return self.set_muted(!self.current().is_some_and(|c| c.muted));
+                } else if let Some((_, path)) = self.areas.saves.iter().find(|(r, _)| inside(*r)) {
+                    return self.save_file(path.clone());
                 } else if let Some((_, command)) = self.areas.audio.iter().find(|(r, _)| inside(*r)) {
                     return vec![Action::Audio(command.clone())];
                 } else if inside(self.areas.mic_button) {

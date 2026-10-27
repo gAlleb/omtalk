@@ -13,6 +13,7 @@ mod clipboard;
 mod complete;
 mod config;
 mod emoji;
+mod file_save;
 mod keys;
 mod links;
 mod mpris;

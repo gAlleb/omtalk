@@ -216,7 +216,11 @@ link (XEP-0454). Progress appears during upload, followed by delivery ticks. You
 picture appears immediately without downloading it again.
 
 Shared audio files have an inline player: play/pause, stop, elapsed/total time,
-and a waveform calculated from the audio. Click the waveform to seek. `/play`
+and a waveform calculated from the audio. Click the waveform to seek. Nerd Font
+mode uses play/pause/stop glyphs; text mode keeps ASCII controls. The `open` label
+opens the original file in your configured viewer. The separate `save` label
+opens a path dialog (Tab completes paths, Ctrl+U clears, Ctrl+V pastes). Existing
+files require a second confirmation before replacement. `/play`
 toggles the selected or latest downloaded audio, `/stop` stops it, and
 `/seek SECONDS` seeks. Playback is streamed rather than loading the whole decoded
 file into memory. Supported formats include MP3, M4A/AAC, FLAC, WAV, Ogg Vorbis and

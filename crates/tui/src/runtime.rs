@@ -191,6 +191,11 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
 
 /// What tasks tell the interface.
 enum Msg {
+    Saved {
+        id: String,
+        target: PathBuf,
+        result: Result<(), String>,
+    },
     Audio(crate::audio::Event),
     AudioInfo(PathBuf, Result<crate::audio::Info, String>),
     RoomStep {
@@ -938,6 +943,22 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
+        Msg::Saved { id, target, result } => match result {
+            Ok(()) => {
+                app.status = trf!("saved: {}", "сохранено: {}", target.display());
+                if app.file_save.as_ref().is_some_and(|s| s.id == id) {
+                    app.file_save = None;
+                }
+            }
+            Err(error) => {
+                app.status = trf!("not saved: {error}", "не сохранено: {error}");
+                if let Some(s) = app.file_save.as_mut().filter(|s| s.id == id) {
+                    s.busy = false;
+                    s.error = Some(error);
+                }
+            }
+        },
+
         Msg::AudioInfo(path, result) => {
             app.audio_pending.remove(&path);
             app.audio_info.insert(path, result);
@@ -2563,6 +2584,16 @@ async fn perform(action: Action, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
     match action {
+        Action::SaveFile {
+            id,
+            source,
+            target,
+            overwrite,
+        } => {
+            let result = crate::file_save::copy(&source, &target, overwrite).await;
+            tell(Msg::Saved { id, target, result });
+        }
+
         Action::NowPlaying { account, chat } => {
             let text = crate::mpris::now_playing().await;
             tell(Msg::NowPlaying { account, chat, text });

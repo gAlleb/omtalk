@@ -92,6 +92,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     switch_window(frame, app, area);
     emoji_window(frame, app, area);
     recorder_window(frame, app, area);
+    save_file_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -613,6 +614,15 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 app.areas
                     .message_rows
                     .push((Rect::new(inner.x, y, inner.width, 1), plain));
+                if let Some((path, from, to)) = &row.save {
+                    let from = (*from).min(inner.width as usize) as u16;
+                    let to = (*to).min(inner.width as usize) as u16;
+                    if to > from {
+                        app.areas
+                            .saves
+                            .push((Rect::new(inner.x + from, y, to - from, 1), path.clone()));
+                    }
+                }
                 if let Some((path, indent, wave)) = &row.audio {
                     let indent = (*indent as u16).min(inner.width);
                     let x = inner.x + indent;
@@ -677,7 +687,11 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     } else {
                         0
                     };
-                    let attachment = Rect::new(inner.x + prefix, y, inner.width - prefix, 1);
+                    let end = row
+                        .save
+                        .as_ref()
+                        .map_or(inner.width, |(_, from, _)| (*from as u16).min(inner.width));
+                    let attachment = Rect::new(inner.x + prefix, y, end.saturating_sub(prefix), 1);
                     if let Some(link) = &row.fetch {
                         app.areas.fetches.push((attachment, link.clone()));
                     } else if let Some(path) = &row.open {
@@ -1038,6 +1052,7 @@ pub struct Row {
     pub reactions: bool,
     pub links: Vec<crate::links::Hit>,
     pub audio: Option<(PathBuf, usize, bool)>,
+    pub save: Option<(PathBuf, usize, usize)>,
 }
 
 /// One of the rows a picture covers.
@@ -1063,6 +1078,7 @@ impl From<TextLine<'static>> for Row {
             reactions: false,
             links: Vec::new(),
             audio: None,
+            save: None,
         }
     }
 }
@@ -1267,6 +1283,7 @@ pub fn message_rows(
                         reactions: false,
                         links: Vec::new(),
                         audio: None,
+                        save: None,
                     });
                 }
                 push_delivery(&mut rows, line, room, body_width, gutter, true);
@@ -1293,7 +1310,7 @@ pub fn message_rows(
                     (icons.picture, tr!("open", "открыть").to_owned(), theme::accent())
                 }
                 MediaState::Ready(path) if crate::audio::supported(path) => {
-                    (icons.file, tr!("audio", "аудио").to_owned(), theme::accent())
+                    (icons.file, tr!("open", "открыть").to_owned(), theme::accent())
                 }
                 MediaState::Ready(_) => (icons.file, tr!("open", "открыть").to_owned(), theme::accent()),
                 MediaState::Failed(e) => (
@@ -1306,27 +1323,44 @@ pub fn message_rows(
             if !line.encrypted {
                 spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
             }
+            let path_audio = path.as_ref().filter(|p| crate::audio::supported(p)).cloned();
+            let name = if path_audio.is_some() {
+                let reserved = spans.iter().map(|s| s.content.width()).sum::<usize>()
+                    + icon.width()
+                    + 2
+                    + state.width()
+                    + 2
+                    + tr!("save", "сохранить").width();
+                truncate(&slot.name, width.saturating_sub(reserved))
+            } else {
+                slot.name.clone()
+            };
             spans.push(Span::styled(
-                format!("{icon} {} ", slot.name),
+                format!("{icon} {name} "),
                 Style::default().fg(theme::text()).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(state, Style::default().fg(colour)));
-            let path_audio = path.as_ref().filter(|p| crate::audio::supported(p)).cloned();
+            let save = path_audio.as_ref().map(|path| {
+                spans.push(Span::raw("  "));
+                let from: usize = spans.iter().map(|s| s.content.width()).sum();
+                let label = tr!("save", "сохранить");
+                spans.push(Span::styled(label, Style::default().fg(theme::accent())));
+                (path.clone(), from, from + label.width())
+            });
             rows.push(Row {
                 text: TextLine::from(spans),
                 open: path,
                 picture: None,
                 who: None,
-                fetch: (slot.state == MediaState::Offered).then(|| slot.link.clone()),
+                fetch: (slot.state == MediaState::Offered)
+                    .then(|| slot.link.clone()),
                 line: None,
                 reactions: false,
                 links: Vec::new(),
                 audio: None,
+                save,
             });
             if let Some(path) = path_audio {
-                if let Some(last) = rows.last_mut() {
-                    last.open = None;
-                }
                 let info = audio_info.and_then(|m| m.get(&path));
                 let state = playback.filter(|s| s.path == path);
                 if let Some(Err(error)) = info {
@@ -1338,12 +1372,13 @@ pub fn message_rows(
                         .into(),
                     );
                 } else {
-                    if let Some(last) = rows.last_mut() {
-                        last.open = None;
-                        last.audio = Some((path.clone(), gutter, false));
-                    }
-                    let mut controls: Row =
-                        audio_controls(&pad, info.and_then(|r| r.as_ref().ok()), state).into();
+                    let mut controls: Row = audio_controls(
+                        &pad,
+                        info.and_then(|r| r.as_ref().ok()),
+                        state,
+                        icons.file == theme::nerd().file,
+                    )
+                    .into();
                     controls.audio = Some((path.clone(), gutter, false));
                     rows.push(controls);
                     let width = body_width.min(60);
@@ -7806,16 +7841,26 @@ fn audio_controls(
     pad: &str,
     info: Option<&crate::audio::Info>,
     state: Option<&crate::audio::Playback>,
+    nerd: bool,
 ) -> TextLine<'static> {
     let playing = state.is_some_and(|s| s.playing);
     let position = state.map_or(0.0, |s| s.seconds);
     TextLine::from(vec![
         Span::raw(pad.to_owned()),
         Span::styled(
-            if playing { "[||]" } else { "[ >]" },
+            if nerd {
+                if playing { " \u{f04c}  " } else { " \u{f04b}  " }
+            } else if playing {
+                "[||]"
+            } else {
+                "[ >]"
+            },
             Style::default().fg(theme::accent()),
         ),
-        Span::styled(" [x] ", Style::default().fg(theme::dim())),
+        Span::styled(
+            if nerd { "  \u{f04d}  " } else { " [x] " },
+            Style::default().fg(theme::dim()),
+        ),
         Span::raw(format!(
             "{} / {}",
             crate::audio::clock(position),
@@ -7972,11 +8017,12 @@ mod audio_view_tests {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     #[test]
     fn inline_audio_controls_and_waveform_are_clickable_in_both_layouts() {
-        for compact in [false, true] {
+        for (compact, nerd) in [(false, false), (false, true), (true, false), (true, true)] {
             let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
             let peer: omtalk_xmpp::BareJid = "other@example.org".parse().unwrap();
             let mut app = App::new(vec![me.clone()], KeyModifier::Ctrl, 26, 30);
             app.compact = compact;
+            app.icons = if nerd { theme::nerd() } else { theme::text_icons() };
             let chat = app.chat(&me, &peer, ChatKind::Direct);
             app.select(chat);
             let path = PathBuf::from("/cache/voice.ogg");
@@ -7989,6 +8035,7 @@ mod audio_view_tests {
                 true,
             );
             line.media.as_mut().unwrap().state = MediaState::Ready(path.clone());
+            line.media.as_mut().unwrap().name = format!("{}.ogg", "long-audio-name-".repeat(10));
             app.chats[chat].lines.push(line);
             app.audio_info.insert(
                 path.clone(),
@@ -8001,6 +8048,15 @@ mod audio_view_tests {
             terminal
                 .draw(|f| draw(f, &mut app, &mut Pictures::new()))
                 .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert_eq!(text.contains('\u{f04b}'), nerd);
+            assert_eq!(text.contains("[ >]"), !nerd);
             for command in [audio::Command::Toggle(path.clone()), audio::Command::Stop] {
                 let (rect, _) = app.areas.audio.iter().find(|(_, c)| c == &command).unwrap();
                 let result = app.on_mouse(MouseEvent {
@@ -8018,9 +8074,42 @@ mod audio_view_tests {
                     .any(|(_, c)| matches!(c,audio::Command::Seek(_,s)if *s>4.0&&*s<6.0))
             );
             assert!(
-                app.areas.files.is_empty(),
-                "audio must use its player instead of opening an external viewer"
+                app.areas.files.iter().any(|(_, p)| p == &path),
+                "audio keeps its open control"
             );
+            assert!(
+                app.areas.saves.iter().any(|(_, p)| p == &path),
+                "audio has an independent save control"
+            );
+            let open = app.areas.files.iter().find(|(_, p)| p == &path).unwrap().0;
+            assert_eq!(
+                app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: open.x,
+                    row: open.y,
+                    modifiers: KeyModifiers::NONE
+                }),
+                vec![Action::Open(path.clone())]
+            );
+            let save = app.areas.saves.iter().find(|(_, p)| p == &path).unwrap().0;
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: save.x,
+                row: save.y,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(app.file_save.is_some());
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
+            assert_eq!(app.areas.save_buttons.len(), 2);
+            app.on_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                KeyModifiers::NONE,
+            ));
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
             let rect = app.areas.mic_button;
             let actions = app.on_mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -8037,5 +8126,82 @@ mod audio_view_tests {
                 .unwrap();
             assert_eq!(app.areas.recorder_buttons.len(), 3);
         }
+    }
+}
+
+fn save_file_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(s) = app.file_save.as_ref() else {
+        return;
+    };
+    let width = screen.width.min(80);
+    let height = screen.height.min(10);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = pane(tr!("Save file", "Сохранить файл"), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height < 3 {
+        return;
+    }
+    let room = inner.width.saturating_sub(1) as usize;
+    let mut start = 0;
+    for (i, c) in s.target[..s.cursor].char_indices() {
+        if s.target[i..s.cursor].width() <= room {
+            break;
+        }
+        start = i + c.len_utf8();
+    }
+    let path = truncate(&s.target[start..], inner.width as usize);
+    let mut rows = vec![
+        TextLine::from(tr!(
+            "Destination (edit the full path):",
+            "Куда сохранить (полный путь):"
+        )),
+        TextLine::from(Span::styled(path, Style::default().fg(theme::accent()))),
+    ];
+    if let Some(error) = &s.error {
+        for line in wrap(error, inner.width as usize).into_iter().take(2) {
+            rows.push(TextLine::from(Span::styled(
+                line,
+                Style::default().fg(theme::warn()),
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(rows), inner);
+    if !s.busy {
+        frame.set_cursor_position(Position::new(
+            inner.x + s.target[start..s.cursor].width().min(room) as u16,
+            inner.y + 1,
+        ));
+    }
+    let labels = [
+        if s.busy {
+            tr!("Saving…", "Сохранение…")
+        } else if s.confirm {
+            tr!("Replace", "Заменить")
+        } else {
+            tr!("Save", "Сохранить")
+        },
+        tr!("Cancel", "Отмена"),
+    ];
+    let mut x = inner.x;
+    for (i, label) in labels.into_iter().enumerate() {
+        let label = format!("[{label}]");
+        let width = (label.width() as u16).min(inner.right().saturating_sub(x));
+        if width == 0 {
+            break;
+        }
+        let rect = Rect::new(x, inner.bottom() - 1, width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(theme::accent())),
+            rect,
+        );
+        app.areas.save_buttons.push((rect, i == 0));
+        x += width + 2;
     }
 }
