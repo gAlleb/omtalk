@@ -168,9 +168,10 @@ With an empty input, `Tab` switches focus.
 ### Mouse and clipboard
 
 Drag across messages to select and copy only their text, without borders or adjacent
-panes. On Wayland this uses `wl-copy` for both clipboard and primary selection;
-otherwise it sends OSC 52 to the terminal. The middle button pastes primary;
-Ctrl+V pastes the clipboard through `wl-paste`, including pictures for upload.
+panes. On Wayland this uses `wl-copy` for both clipboard and primary selection, on
+X11 `xclip` (or `xsel`); otherwise it sends OSC 52 to the terminal. The middle button
+pastes primary; Ctrl+V pastes the clipboard through `wl-paste`, `xclip` or `xsel`,
+including pictures for upload (`wl-paste` and `xclip`; `xsel` handles text only).
 
 Prefix+`m` (or `mouse = false`) gives mouse handling to the terminal for its own
 selection and paste. Shift with the mouse temporarily does the same. In tmux, OSC 52

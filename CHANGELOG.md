@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Copy and paste on X11**: without Wayland, omtalk reads and writes the clipboard and the primary selection through `xclip` (pictures too) or `xsel` (text only); before, only copying worked there (OSC 52) and pasting had to go through the terminal. Programs are looked for on PATH, not run to probe.
 - An idle omtalk no longer wakes hundreds of times a second: the audio worker sleeps while nothing plays or records, and a finished voice message lets go of its sound-server stream.
 - Saving a file offers the downloads folder from the system's `~/.config/user-dirs.dirs` (it looked in omtalk's own config folder, so a renamed folder such as «Загрузки» was missed).
 
