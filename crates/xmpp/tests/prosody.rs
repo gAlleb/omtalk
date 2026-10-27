@@ -620,10 +620,35 @@ async fn what_one_client_read_the_others_learn() {
     online(&mut laptop_events, &[&laptop]).await;
     online(&mut phone_events, &[&phone]).await;
 
+    // The node holds no last item for clients that come later (XEP-0490 asks for
+    // send_last_published_item=never): the phone hears only what is published once the
+    // server knows it wants to (+notify, from its presence). Until then, a mark of no
+    // chat of ours, again, till the phone hears one.
+    let warm: BareJid = "warm-up@localhost".parse().unwrap();
+    let mut heard = false;
+    for _ in 0..40 {
+        laptop.read_up_to(&warm, laptop.jid(), "warm-up").await.unwrap();
+        let next = timeout(Duration::from_millis(500), async {
+            loop {
+                let event = phone_events.recv().await.expect("event channel open");
+                if matches!(&event.event, Event::Pep { node, .. } if node == receipts::MDS) {
+                    return;
+                }
+            }
+        });
+        if next.await.is_ok() {
+            heard = true;
+            break;
+        }
+    }
+    assert!(heard, "the phone never heard the account's read marks");
+
     let chat: BareJid = "bob@localhost".parse().unwrap();
     laptop.read_up_to(&chat, laptop.jid(), "archive-7").await.unwrap();
     let read = wait_for(&mut phone_events, |e| match &e.event {
-        Event::Pep { node, items, .. } if node == receipts::MDS => Some(receipts::read_elsewhere(items)),
+        Event::Pep { node, items, .. } if node == receipts::MDS => {
+            Some(receipts::read_elsewhere(items)).filter(|read| read.contains(&chat))
+        }
         _ => None,
     })
     .await;
