@@ -512,6 +512,11 @@ pub enum Action {
         jid: BareJid,
         name: Option<String>,
     },
+    /// One's avatar from the picture at `path` (XEP-0084); `None` takes it away.
+    SetAvatar {
+        account: BareJid,
+        path: Option<PathBuf>,
+    },
     /// The name one gives oneself (XEP-0172); `None` takes it away.
     SetNickname {
         account: BareJid,
@@ -3491,7 +3496,31 @@ impl App {
                     name: (!new.is_empty()).then(|| new.to_owned()),
                 }])
             }
-            ("/nickname", _) => match self.current().map(|c| c.account.clone()).or(self.active.clone()) {
+            ("/avatar", _) => match self
+                .current()
+                .map(|c| c.account.clone())
+                .or_else(|| self.account_for())
+            {
+                Some(account) => {
+                    let path = line[name.len()..].trim();
+                    match expand_home(path) {
+                        None => Ok(vec![Action::SetAvatar { account, path: None }]),
+                        Some(file) if !file.is_file() => {
+                            Err(trf!("no such file: {}", "нет такого файла: {}", file.display()))
+                        }
+                        Some(file) => Ok(vec![Action::SetAvatar {
+                            account,
+                            path: Some(file),
+                        }]),
+                    }
+                }
+                None => Err(tr!("no account", "нет аккаунта").to_owned()),
+            },
+            ("/nickname", _) => match self
+                .current()
+                .map(|c| c.account.clone())
+                .or_else(|| self.account_for())
+            {
                 Some(account) => {
                     let nick = line[name.len()..].trim();
                     Ok(vec![Action::SetNickname {
@@ -6213,6 +6242,24 @@ mod tests {
             matches!(&removed[..], [Action::RemoveContact { jid, .. }] if jid.as_str() == "carol@example.org"),
             "{removed:?}"
         );
+    }
+
+    #[test]
+    fn avatar_takes_a_picture_or_takes_it_away() {
+        let mut app = app();
+        let dir = tempfile::tempdir().unwrap();
+        let picture = dir.path().join("me.png");
+        std::fs::write(&picture, b"png").unwrap();
+        let set = type_text(&mut app, &format!("/avatar {}", picture.display()));
+        assert!(
+            matches!(&set[..], [Action::SetAvatar { path: Some(p), .. }] if *p == picture),
+            "{set:?}"
+        );
+        assert!(matches!(
+            &type_text(&mut app, "/avatar")[..],
+            [Action::SetAvatar { path: None, .. }]
+        ));
+        assert!(type_text(&mut app, "/avatar /no/such/picture.png").is_empty());
     }
 
     #[test]

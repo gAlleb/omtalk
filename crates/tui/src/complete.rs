@@ -248,6 +248,14 @@ pub const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        name: "/avatar",
+        args: ["[PATH]", "[ПУТЬ]"],
+        about: [
+            "your avatar from a picture; none: take it away",
+            "своя аватарка из картинки; без пути — убрать",
+        ],
+    },
+    Command {
         name: "/nickname",
         args: ["[NAME]", "[ИМЯ]"],
         about: [
@@ -393,7 +401,7 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     }
     // The folder's name is all the rest of the line, spaces and all.
     // A path: all the rest of the line, completed from the disk.
-    if let (Some("/upload"), Some(end)) = (command, first_end) {
+    if let (Some("/upload" | "/avatar"), Some(end)) = (command, first_end) {
         let rest = &before[end..];
         let start = end + rest.len() - rest.trim_start().len();
         let found = paths(&before[start..]);

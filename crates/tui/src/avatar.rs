@@ -15,6 +15,30 @@ pub fn square(image: &DynamicImage) -> DynamicImage {
     image.crop_imm(x, y, side, side)
 }
 
+/// The largest an own avatar is published: what clients show, and well under a
+/// server's stanza size limit (Prosody's is 256 KiB) once in base64.
+const OWN_SIDE: u32 = 256;
+const OWN_BYTES: usize = 96 * 1024;
+
+/// The picture at `path` as one's avatar: its middle square, at most [`OWN_SIDE`] a
+/// side, as a PNG; smaller still while the PNG is too large. The PNG and its side.
+pub fn own_avatar(path: &std::path::Path) -> Result<(Vec<u8>, u32), String> {
+    let image = square(&image::open(path).map_err(|e| e.to_string())?);
+    let mut side = image.width().min(OWN_SIDE);
+    loop {
+        let small = image.resize_exact(side, side, image::imageops::FilterType::Lanczos3);
+        let mut png = std::io::Cursor::new(Vec::new());
+        small
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let png = png.into_inner();
+        if png.len() <= OWN_BYTES || side <= 64 {
+            return Ok((png, side));
+        }
+        side = side * 3 / 4;
+    }
+}
+
 /// `image` with what lies outside the inscribed circle (of an ellipse, if it is not
 /// square) made transparent; the edge softened by a pixel.
 pub fn round(image: &DynamicImage) -> RgbaImage {
@@ -110,6 +134,41 @@ pub fn draw_blocks(image: &DynamicImage, area: Rect, buffer: &mut Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ones_avatar_is_the_middle_square_small_enough_for_a_server() {
+        let dir = tempfile::tempdir().unwrap();
+        // A wide photo: its middle, 256 a side.
+        let wide = dir.path().join("wide.png");
+        RgbaImage::from_fn(800, 400, |x, _| Rgba([(x % 256) as u8, 80, 160, 255]))
+            .save(&wide)
+            .unwrap();
+        let (png, side) = own_avatar(&wide).unwrap();
+        let got = image::load_from_memory(&png).unwrap();
+        assert_eq!((side, got.width(), got.height()), (256, 256, 256));
+        // Noise does not compress: made smaller until it fits.
+        let noisy = dir.path().join("noisy.png");
+        let mut seed = 7u32;
+        RgbaImage::from_fn(600, 600, |_, _| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            Rgba(seed.to_le_bytes())
+        })
+        .save(&noisy)
+        .unwrap();
+        let (png, side) = own_avatar(&noisy).unwrap();
+        assert!(
+            png.len() <= OWN_BYTES && side < 256,
+            "{} bytes at {side}",
+            png.len()
+        );
+        // A small one is not blown up.
+        let small = dir.path().join("small.png");
+        RgbaImage::from_pixel(48, 48, Rgba([1, 2, 3, 255]))
+            .save(&small)
+            .unwrap();
+        assert_eq!(own_avatar(&small).unwrap().1, 48);
+        assert!(own_avatar(&dir.path().join("none.png")).is_err());
+    }
 
     #[test]
     fn a_room_notice_shows_the_room_with_the_writer_in_its_corner() {

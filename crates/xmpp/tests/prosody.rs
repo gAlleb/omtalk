@@ -820,6 +820,10 @@ async fn an_avatar_is_published_and_read_by_another_from_pep_and_vcard() {
     assert!(reader.avatar(owner.jid(), "0000").await.is_err(), "not that one");
     // Prosody hands it on as the vCard's photo too, for clients that read only that.
     assert_eq!(reader.vcard_avatar(owner.jid()).await.unwrap(), Some(picture));
+
+    // Taken away: no avatar for the others any more.
+    owner.remove_avatar().await.unwrap();
+    assert_eq!(reader.avatar_id(owner.jid()).await.unwrap(), None);
 }
 
 #[tokio::test]

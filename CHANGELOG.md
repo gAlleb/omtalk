@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`/avatar path`** sets your avatar from a picture: its middle square, at most 256×256, as PNG, made smaller still when it would be too large for a server; Gajim, Monal and Conversations show it at once (XEP-0084). `/avatar` alone takes it away. Tab completes the path.
+
 ## 0.1.10 — 2026-10-27
 
 Voice messages in the terminal: play them with a waveform and record your own. Also copy and paste on X11, and omtalk quits even when the server is gone.

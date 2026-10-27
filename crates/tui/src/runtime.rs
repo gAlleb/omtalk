@@ -3027,6 +3027,38 @@ async fn perform(action: Action, shared: Shared) {
                 text,
             });
         }
+        Action::SetAvatar { account, path } => {
+            let Some((xmpp, _)) = get(&account) else { return };
+            let set = match path {
+                // Read and made small aside: a large photo takes a moment.
+                Some(path) => {
+                    match tokio::task::spawn_blocking(move || crate::avatar::own_avatar(&path)).await {
+                        Ok(Ok((png, side))) => xmpp
+                            .publish_avatar(&png, side as u16, side as u16)
+                            .await
+                            .map(|_| true)
+                            .map_err(|e| e.to_string()),
+                        Ok(Err(e)) => Err(e),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                None => xmpp
+                    .remove_avatar()
+                    .await
+                    .map(|_| false)
+                    .map_err(|e| e.to_string()),
+            };
+            let text = match set {
+                Ok(true) => tr!("your avatar is set", "аватарка поставлена").to_owned(),
+                Ok(false) => tr!("your avatar is taken away", "аватарка убрана").to_owned(),
+                Err(e) => trf!("the avatar did not change: {e}", "аватарка не сменилась: {e}"),
+            };
+            tell(Msg::Notice {
+                account,
+                chat: None,
+                text,
+            });
+        }
         Action::SetNickname { account, nick } => {
             let Some((xmpp, _)) = get(&account) else { return };
             let set = xmpp.set_nickname(nick.as_deref()).await;

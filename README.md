@@ -322,6 +322,8 @@ selects that chat and makes its account active.
 `/refuse` take an address to answer subscription requests. `/name Name` in a direct
 chat sets your private roster name for that contact, shared with your other clients;
 `/name` clears it. `/nickname Name` publishes your own name; without a name it clears it.
+`/avatar path` publishes your avatar from a picture (its middle square, at most 256×256,
+as PNG); `/avatar` alone takes it away. Tab completes the path.
 
 Contacts that declare the XMPP Service Discovery identity `client/bot` are marked
 with a robot head in the chat list and header (`[bot]` with text icons). The identity
@@ -532,6 +534,7 @@ address is given or the description says otherwise.
 | Contacts | `/accept ADDRESS`, `/refuse ADDRESS` | Answer a subscription request |
 | Names | `/name [NAME]` | Set/clear a contact's name; in a room, set its title (title required) |
 | Names | `/nickname [NAME]` | Set/clear your published nickname for the active account |
+| Names | `/avatar [PATH]` | Set your avatar from a picture, or take it away |
 | Input | `/emoji` | Open the emoji picker without changing the draft |
 | Rooms | `/room` | Manage room configuration, affiliations, roles, topic and avatar |
 | Rooms | `/join ADDRESS [NICK]` | Join a room |

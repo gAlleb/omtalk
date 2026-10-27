@@ -121,6 +121,14 @@ impl crate::Account {
         Ok(answer.as_ref().and_then(vcard_photo))
     }
 
+    /// Takes the account's avatar away: an empty metadata item, which clients read as
+    /// "no avatar" (XEP-0084, 4.5).
+    pub async fn remove_avatar(&self) -> Result<(), Error> {
+        let metadata = Element::builder("metadata", METADATA).build();
+        self.publish(METADATA, Some("current"), metadata, Access::Open)
+            .await
+    }
+
     /// Publishes `bytes` (a PNG) as the account's avatar, readable by anyone.
     pub async fn publish_avatar(&self, bytes: &[u8], width: u16, height: u16) -> Result<(), Error> {
         let id = hash(bytes);
