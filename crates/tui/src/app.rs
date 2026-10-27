@@ -2143,6 +2143,14 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // Quitting is global: a dialog must not swallow the configured quit key.
+        if key.code == KeyCode::Char('q')
+            && !self.modifier.is_empty()
+            && key.modifiers.contains(self.modifier)
+        {
+            self.quit = true;
+            return vec![Action::Quit];
+        }
         if let Some(picker) = self.emoji.as_mut()
             && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
@@ -6688,6 +6696,40 @@ mod tests {
         assert_eq!(app.chats[bob].title(), "Бобби", "and theirs again without it");
         app.nickname(&me, &jid("bob@example.org"), None);
         assert_eq!(app.chats[bob].title(), "bob");
+    }
+
+    #[test]
+    fn quit_shortcut_works_even_when_a_dialog_captures_keys() {
+        for dialog in ["settings", "emoji", "switcher", "services", "keys"] {
+            let mut app = App::new(vec!["me@example.org".parse().unwrap()], Modifier::Ctrl, 26, 30);
+            match dialog {
+                "settings" => {
+                    app.open_settings();
+                    assert!(app.settings.is_some());
+                }
+                "emoji" => {
+                    app.emoji = Some(crate::emoji::Picker::new());
+                }
+                "switcher" => {
+                    app.switcher = Some(0);
+                }
+                "services" => {
+                    app.open_services(None);
+                    assert!(app.services.is_some());
+                }
+                "keys" => {
+                    app.open_keys(None);
+                    assert!(app.keys.is_some());
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+                [Action::Quit],
+                "{dialog}"
+            );
+            assert!(app.quit);
+        }
     }
 
     #[test]

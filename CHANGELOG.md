@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The configured quit shortcut works inside dialogs, including settings and the emoji picker.
+
 - Bound account shutdown and room-entry sends when the server is unreachable. Quitting stops accounts concurrently, restores terminal modes before runtime teardown, and tolerates cancelled client receivers. UI event batches are limited so incoming events cannot indefinitely postpone keyboard input.
 
 ## 0.1.9 — 2026-10-27
