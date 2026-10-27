@@ -2016,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "omemo"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "omemo-oracle"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.23.1",
  "serde_json",
@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "omemo-xml"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "omemo",
  "omemo-oracle",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "omemo",
  "omtalk-omemo",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk-media"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk-omemo"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "futures",
  "omemo",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk-store"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "omemo",
  "omemo-xml",
@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk-testkit"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "omemo",
  "omemo-xml",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "omtalk-xmpp"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.22.1",
  "futures",

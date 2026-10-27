@@ -1,24 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.1.10 — 2026-10-27
 
-- The licence text (GPL-3.0, as published by the FSF) is in `LICENSE`; the licence itself is unchanged, GPL-3.0-or-later.
-- **Copy and paste on X11**: without Wayland, omtalk reads and writes the clipboard and the primary selection through `xclip` (pictures too) or `xsel` (text only); before, only copying worked there (OSC 52) and pasting had to go through the terminal. Programs are looked for on PATH, not run to probe.
-- An idle omtalk no longer wakes hundreds of times a second: the audio worker sleeps while nothing plays or records, and a finished voice message lets go of its sound-server stream.
-- Saving a file offers the downloads folder from the system's `~/.config/user-dirs.dirs` (it looked in omtalk's own config folder, so a renamed folder such as «Загрузки» was missed).
-
-- IRC bridge history no longer duplicates live/MAM copies sharing a room archive ID when their sender JIDs or message IDs differ. Existing copies are hidden consistently in history, search and unread counts without deleting original rows or read positions.
-
-- Audio attachments retain a working `open` action and a separate `save` dialog with path completion, clipboard paste and explicit overwrite confirmation. Nerd Font mode uses playback glyphs; text mode retains ASCII controls.
-- Temporary attachment download failures retry up to three times. Failed files have a clickable retry row; duplicate requests are coalesced, and incomplete responses are kept out of the cache.
+Voice messages in the terminal: play them with a waveform and record your own. Also copy and paste on X11, and omtalk quits even when the server is gone.
 
 - Built-in streamed audio playback with play/pause, stop, elapsed/total time and a clickable waveform for seeking. Supports common audio attachments, including Ogg Opus voice messages; outgoing audio is playable before upload completes.
 - Voice-message recording from the microphone button or `/record`, with preview, send/discard and a fixed recipient. Records mono Ogg Opus at 32 kbit/s through the existing upload/OMEMO path. `/play`, `/stop` and `/seek` provide keyboard control.
 - Audio uses the PulseAudio/PipeWire socket directly, with bundled codecs and no external player/recorder or audio client libraries. CMake is a build-only dependency.
-
-- The configured quit shortcut works inside dialogs, including settings and the emoji picker.
-
+- Audio attachments retain a working `open` action and a separate `save` dialog with path completion, clipboard paste and explicit overwrite confirmation. Nerd Font mode uses playback glyphs; text mode retains ASCII controls.
+- Temporary attachment download failures retry up to three times. Failed files have a clickable retry row; duplicate requests are coalesced, and incomplete responses are kept out of the cache.
+- **Copy and paste on X11**: without Wayland, omtalk reads and writes the clipboard and the primary selection through `xclip` (pictures too) or `xsel` (text only); before, only copying worked there (OSC 52) and pasting had to go through the terminal. Programs are looked for on PATH, not run to probe.
 - Bound account shutdown and room-entry sends when the server is unreachable. Quitting stops accounts concurrently, restores terminal modes before runtime teardown, and tolerates cancelled client receivers. UI event batches are limited so incoming events cannot indefinitely postpone keyboard input.
+- The configured quit shortcut works inside dialogs, including settings and the emoji picker.
+- IRC bridge history no longer duplicates live/MAM copies sharing a room archive ID when their sender JIDs or message IDs differ. Existing copies are hidden consistently in history, search and unread counts without deleting original rows or read positions.
+- An idle omtalk no longer wakes hundreds of times a second: the audio worker sleeps while nothing plays or records, and a finished voice message lets go of its sound-server stream.
+- Saving a file offers the downloads folder from the system's `~/.config/user-dirs.dirs` (it looked in omtalk's own config folder, so a renamed folder such as «Загрузки» was missed).
+- The licence text (GPL-3.0, as published by the FSF) is in `LICENSE`; the licence itself is unchanged, GPL-3.0-or-later.
 
 ## 0.1.9 — 2026-10-27
 
