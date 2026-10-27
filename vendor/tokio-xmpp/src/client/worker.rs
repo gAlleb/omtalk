@@ -101,8 +101,8 @@ impl ClientWorker {
             StanzaStreamEvent::Stream(StreamEvent::Suspended) => return,
         };
 
-        let Ok(()) = self.stanza_w2f_tx.send(send_event).await else {
-            panic!("All clients have been dropped.");
-        };
+        // omtalk: dropping an account after a shutdown timeout is normal. Its
+        // receiver may disappear while this send is pending; shutdown_rx ends us.
+        let _ = self.stanza_w2f_tx.send(send_event).await;
     }
 }

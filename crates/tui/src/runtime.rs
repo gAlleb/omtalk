@@ -738,6 +738,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             Some(msg) = rx.recv() => {
                 // Drain what else is waiting, then draw once.
                 let mut next = Some(msg);
+                let mut remaining = 64;
                 while let Some(msg) = next {
                     match msg {
                         // An avatar: round, by the terminal if it shows pictures, else by
@@ -753,6 +754,10 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                         }
                         Msg::Picture { url, image } => drop(pictures.insert(url, picker.new_resize_protocol(image))),
                         msg => apply(&mut app, msg, &shared),
+                    }
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break; // Give keyboard input and quit a turn even during a flood.
                     }
                     next = rx.try_recv().ok();
                 }
@@ -823,9 +828,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
     }
     // Leave cleanly, or rooms keep showing us online for minutes (XEP-0198 parking).
-    for (account, _) in shared.accounts.values() {
-        account.stop().await;
-    }
+    futures::future::join_all(shared.accounts.values().map(|(account, _)| account.stop())).await;
     drop(accounts);
     Ok(())
 }

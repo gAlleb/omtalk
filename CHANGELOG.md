@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Bound account shutdown and room-entry sends when the server is unreachable. Quitting stops accounts concurrently, restores terminal modes before runtime teardown, and tolerates cancelled client receivers. UI event batches are limited so incoming events cannot indefinitely postpone keyboard input.
+
 ## 0.1.9 — 2026-10-27
 
 - Rooms join independently during startup; archive catch-up preserves read positions instead of counting old history as new messages.

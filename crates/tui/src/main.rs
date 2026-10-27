@@ -93,12 +93,14 @@ fn main() {
         eprintln!("cannot take over the terminal: {e}");
         std::process::exit(1);
     }
-    let result = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime")
-        .block_on(runtime::run(options, accounts));
+        .expect("tokio runtime");
+    let result = runtime.block_on(runtime::run(options, accounts));
+    // Give the terminal back before runtime teardown can wait on background work.
     restore_terminal();
+    runtime.shutdown_timeout(std::time::Duration::from_millis(200));
     if let Err(message) = result {
         eprintln!("{message}");
         std::process::exit(1);
@@ -106,7 +108,7 @@ fn main() {
 }
 
 fn restore_terminal() {
-    let _ = disable_raw_mode();
+    // Stop mouse reports while raw mode still consumes them as terminal input.
     let _ = execute!(
         io::stdout(),
         DisableBracketedPaste,
@@ -114,4 +116,5 @@ fn restore_terminal() {
         DisableMouseCapture,
         LeaveAlternateScreen
     );
+    let _ = disable_raw_mode();
 }

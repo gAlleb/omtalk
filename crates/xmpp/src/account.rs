@@ -59,6 +59,7 @@ pub struct Account {
     jid: BareJid,
     commands: mpsc::Sender<Command>,
     iq_timeout: Duration,
+    task: tokio::task::AbortHandle,
     /// The rooms this account entered (or is entering) and has not left: only they may
     /// say who their occupants are and speak in groupchat. Anyone can send a presence
     /// or a groupchat message that looks like a room's.
@@ -77,11 +78,12 @@ impl Account {
         let account = jid.clone();
         let iq_timeout = config.iq_timeout;
         let status: std::sync::Arc<std::sync::Mutex<crate::presence::OwnStatus>> = Default::default();
-        tokio::spawn(supervise(config, account, queue, events, status.clone()));
+        let task = tokio::spawn(supervise(config, account, queue, events, status.clone())).abort_handle();
         Self {
             jid,
             commands,
             iq_timeout,
+            task,
             rooms: Default::default(),
             status,
         }
@@ -199,8 +201,14 @@ impl Account {
     /// Closes the stream and ends the task.
     pub async fn stop(&self) {
         let (reply, done) = oneshot::channel();
-        if self.commands.send(Command::Stop(reply)).await.is_ok() {
-            let _ = done.await;
+        // Stop must also work during login, a full command queue, and a dead socket.
+        let graceful = async {
+            if self.commands.send(Command::Stop(reply)).await.is_ok() {
+                let _ = done.await;
+            }
+        };
+        if tokio::time::timeout(STOP_WAIT, graceful).await.is_err() {
+            self.task.abort();
         }
     }
 
@@ -322,6 +330,8 @@ async fn supervise(
 /// How long a stanza may wait to go out on the stream before the sender is told it is
 /// queued: no connection.
 const SEND_WAIT: Duration = Duration::from_secs(3);
+/// Maximum total graceful shutdown time, including enqueueing the stop request.
+const STOP_WAIT: Duration = Duration::from_secs(2);
 /// How long the server has to acknowledge a stanza sent (XEP-0198). Long: on a network
 /// gone quiet the bytes leave into the socket all the same, and the word comes once the
 /// stream is resumed; till then the message shows as going, which is true.
@@ -468,9 +478,10 @@ async fn run(
             }
             command = commands.recv() => match command {
                 Some(Command::Join { room, presence, reply }) => {
-                    match client.send_stanza((*presence).into()).await {
-                        Ok(_) => drop(joins.insert(room, reply)),
-                        Err(e) => drop(reply.send(Err(Error::Send(e.to_string())))),
+                    match tokio::time::timeout(SEND_WAIT, client.send_stanza((*presence).into())).await {
+                        Ok(Ok(_)) => drop(joins.insert(room, reply)),
+                        Ok(Err(e)) => drop(reply.send(Err(Error::Send(e.to_string())))),
+                        Err(_) => drop(reply.send(Err(Error::Timeout))),
                     }
                 }
                 Some(Command::Archive { to, archive, queryid, query, reply }) => {
@@ -599,7 +610,9 @@ async fn handle(
                     items: Vec::new(),
                 };
                 drop(client.send_iq(None, IqRequest::Get(query.into())).await);
-                let _ = client.send_stanza(status.on(disco::presence()).into()).await;
+                let _ =
+                    tokio::time::timeout(SEND_WAIT, client.send_stanza(status.on(disco::presence()).into()))
+                        .await;
             }
             Some(Event::Online {
                 jid: bound_jid.try_into_full().ok()?,
@@ -613,11 +626,11 @@ async fn handle(
             if let Some(contacts) = roster::push(&iq, own) {
                 // Acknowledged, as RFC 6121 requires; refusing it was a protocol error.
                 let ack = Iq::empty_result(iq.from().cloned().unwrap_or_else(|| own.clone().into()), iq.id());
-                let _ = client.send_stanza(ack.into()).await;
+                let _ = tokio::time::timeout(SEND_WAIT, client.send_stanza(ack.into())).await;
                 return Some(Event::Roster(contacts));
             }
             if let Some(answer) = disco::answer(iq) {
-                let _ = client.send_stanza(answer.into()).await;
+                let _ = tokio::time::timeout(SEND_WAIT, client.send_stanza(answer.into())).await;
             }
             None
         }
@@ -644,5 +657,40 @@ fn message_event(message: Message) -> Event {
             retracted,
         },
         None => Event::Message(Box::new(message)),
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_cancels_an_account_with_a_full_queue_or_an_unanswered_stop() {
+        for full_queue in [false, true] {
+            let (commands, mut queue) = mpsc::channel(1);
+            if full_queue {
+                let (reply, _done) = oneshot::channel();
+                assert!(commands.try_send(Command::Stop(reply)).is_ok());
+            }
+            let task = tokio::spawn(async move {
+                // Model a stalled login (full queue) or stream shutdown (stop received
+                // but no acknowledgement). Keep the queue and reply alive until abort.
+                let _command = if full_queue { None } else { queue.recv().await };
+                std::future::pending::<()>().await;
+                drop(queue);
+            });
+            let account = Account {
+                jid: "me@example.org".parse().unwrap(),
+                commands,
+                iq_timeout: Duration::from_secs(1),
+                task: task.abort_handle(),
+                rooms: Default::default(),
+                status: Default::default(),
+            };
+            tokio::time::timeout(STOP_WAIT + Duration::from_secs(1), account.stop())
+                .await
+                .expect("a dead account must not prevent quitting");
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
     }
 }
