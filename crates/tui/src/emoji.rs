@@ -170,10 +170,13 @@ mod tests {
     #[test]
     fn catalog_keeps_whole_sequences_and_searches_russian_and_english() {
         let entries = catalog();
-        assert!(entries.len() > 3000, "a full catalog, not only common reactions");
+        assert!(
+            (300..=400).contains(&entries.len()),
+            "keep the everyday picker compact"
+        );
         let unique: std::collections::BTreeSet<_> = entries.iter().map(|e| e.symbol).collect();
         assert_eq!(unique.len(), entries.len());
-        for symbol in ["👨‍👩‍👧‍👦", "👍🏽", "🇷🇺", "❤️"] {
+        for symbol in ["😀", "👍", "🇷🇺", "❤️"] {
             assert!(unique.contains(symbol));
         }
         let mut picker = Picker::new();

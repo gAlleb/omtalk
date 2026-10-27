@@ -5506,7 +5506,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_inserts_a_whole_family_at_the_cursor_without_sending_or_losing_the_draft() {
+    fn emoji_inserts_a_whole_sequence_at_the_cursor_without_sending_or_losing_the_draft() {
         let mut app = app();
         let me = jid("me@example.org");
         let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
@@ -5514,15 +5514,15 @@ mod tests {
         app.input = "до после".into();
         app.cursor = 3;
         app.open_emoji();
-        let family = "👨‍👩‍👧‍👦";
+        let sequence = "❤️";
         let index = crate::emoji::catalog()
             .iter()
-            .position(|e| e.symbol == family)
+            .position(|e| e.symbol == sequence)
             .unwrap();
         app.emoji.as_mut().unwrap().matches = vec![index];
         let actions = app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.input, format!("до {family}после"));
-        assert_eq!(app.cursor, 3 + family.chars().count());
+        assert_eq!(app.input, format!("до {sequence}после"));
+        assert_eq!(app.cursor, 3 + sequence.chars().count());
         assert!(app.emoji.is_none());
         assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
         assert!(app.chats[chat].lines.is_empty());

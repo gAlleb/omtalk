@@ -20,6 +20,7 @@ mod runtime;
 mod services;
 mod settings;
 mod styling;
+mod terminal_backend;
 mod theme;
 mod view;
 

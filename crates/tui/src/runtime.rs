@@ -9,6 +9,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::terminal_backend::StableBackend;
 use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
 use omemo::OwnKeys;
@@ -18,7 +19,6 @@ use omtalk_xmpp::services::{CommandAction, CommandStep};
 use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Jid, Server, muc};
 use omtalk_xmpp::{avatar, receipts};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use xmpp_parsers::message::{Lang, Message};
@@ -651,7 +651,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     // its answers; plain block characters where it speaks none, as Alacritty.
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let mut pictures = Pictures::new();
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| e.to_string())?;
+    let mut terminal = Terminal::new(StableBackend::new(io::stdout())).map_err(|e| e.to_string())?;
     terminal.clear().map_err(|e| e.to_string())?;
     let mut input = EventStream::new();
     // A message in the status line fades after a while; a new one starts the clock again.

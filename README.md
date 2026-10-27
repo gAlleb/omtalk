@@ -142,7 +142,8 @@ is sent if no player is playing or its title is unavailable.
 
 
 The smile button beside the attachment and notification controls (or `/emoji`)
-opens an offline picker with 3,944 Unicode Emoji 17.0 sequences. Arrows select;
+opens an offline picker with 375 common Unicode emoji. Skin-tone and gender
+duplicates are left out. Arrows select;
 Enter or a click inserts the whole emoji at the input cursor without sending.
 Esc closes it and preserves the draft. Tab/Shift+Tab or the category buttons switch
 groups; PageUp/PageDown move through the grid. Type or paste to search Russian or
