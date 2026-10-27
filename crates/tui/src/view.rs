@@ -641,13 +641,18 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                             }
                         }
                     } else {
+                        let (play_width, stop_at, stop_width) = if app.icons.file == theme::nerd().file {
+                            (3, 3, 2)
+                        } else {
+                            (4, 5, 3)
+                        };
                         app.areas.audio.push((
-                            Rect::new(x, y, width.min(4), 1),
+                            Rect::new(x, y, width.min(play_width), 1),
                             crate::audio::Command::Toggle(path.clone()),
                         ));
-                        if width > 5 {
+                        if width > stop_at {
                             app.areas.audio.push((
-                                Rect::new(x + 5, y, (width - 5).min(3), 1),
+                                Rect::new(x + stop_at, y, (width - stop_at).min(stop_width), 1),
                                 crate::audio::Command::Stop,
                             ));
                         }
@@ -7869,7 +7874,7 @@ fn audio_controls(
         Span::raw(pad.to_owned()),
         Span::styled(
             if nerd {
-                if playing { " \u{f04c}  " } else { " \u{f04b}  " }
+                if playing { " \u{f04c} " } else { " \u{f04b} " }
             } else if playing {
                 "[||]"
             } else {
@@ -7878,7 +7883,7 @@ fn audio_controls(
             Style::default().fg(theme::accent()),
         ),
         Span::styled(
-            if nerd { "  \u{f04d}  " } else { " [x] " },
+            if nerd { "\u{f04d}  " } else { " [x] " },
             Style::default().fg(theme::dim()),
         ),
         Span::raw(format!(
