@@ -392,6 +392,9 @@ impl Playing {
         }
         Ok(())
     }
+    fn paused(&self) -> bool {
+        self.buffer.lock().unwrap().paused
+    }
     fn snapshot(&self) -> Playback {
         let b = self.buffer.lock().unwrap();
         Playback {
@@ -628,10 +631,44 @@ fn worker(rx: mpsc::Receiver<Command>, report: impl Fn(Event)) {
     let mut last = Instant::now();
     let mut shown: Option<Playback> = None;
     loop {
-        let command = match rx.recv_timeout(Duration::from_millis(2)) {
-            Ok(c) => Some(c),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(_) => break,
+        // Nothing to feed or drain (no sound, or it is paused): the state is told, a
+        // finished stream let go, and the worker sleeps until the next command, so an
+        // idle omtalk does not wake hundreds of times a second.
+        let idle = |playing: &Option<Playing>, recording: &Option<Recording>| {
+            recording.is_none() && playing.as_ref().is_none_or(Playing::paused)
+        };
+        if idle(&playing, &recording) || last.elapsed() >= Duration::from_millis(100) {
+            last = Instant::now();
+            if let Some(p) = &playing {
+                let snapshot = p.snapshot();
+                if shown.as_ref() != Some(&snapshot) {
+                    report(Event::Playback(snapshot.clone()));
+                    shown = Some(snapshot.clone());
+                }
+                if snapshot.stopped {
+                    playing = None;
+                }
+            }
+            if let Some(r) = &recording {
+                report(Event::Recorded {
+                    path: r.path.clone(),
+                    seconds: r.seconds(),
+                    level: r.level,
+                    done: false,
+                });
+            }
+        }
+        let command = if idle(&playing, &recording) {
+            match rx.recv() {
+                Ok(c) => Some(c),
+                Err(_) => break,
+            }
+        } else {
+            match rx.recv_timeout(Duration::from_millis(2)) {
+                Ok(c) => Some(c),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(_) => break,
+            }
         };
         let result: Result<(), String> = (|| {
             match command {
@@ -740,24 +777,6 @@ fn worker(rx: mpsc::Receiver<Command>, report: impl Fn(Event)) {
                 let _ = std::fs::remove_file(path);
             }
             report(Event::Error(e));
-        }
-        if last.elapsed() >= Duration::from_millis(100) {
-            last = Instant::now();
-            if let Some(p) = &playing {
-                let snapshot = p.snapshot();
-                if shown.as_ref() != Some(&snapshot) {
-                    report(Event::Playback(snapshot.clone()));
-                    shown = Some(snapshot);
-                }
-            }
-            if let Some(r) = &recording {
-                report(Event::Recorded {
-                    path: r.path.clone(),
-                    seconds: r.seconds(),
-                    level: r.level,
-                    done: false,
-                });
-            }
         }
     }
     drop(playing);
