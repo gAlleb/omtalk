@@ -3513,7 +3513,11 @@ mod tests {
             let cell = app.areas.emoji_cells[0].0;
             let actions = app.on_mouse(click(cell));
             assert_eq!(app.input, format!("dr{symbol}aft"));
-            assert!(app.emoji.is_none());
+            assert!(app.emoji.is_some());
+            assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
+            let actions = app.on_mouse(click(cell));
+            assert_eq!(app.input, format!("dr{symbol}{symbol}aft"));
+            assert_eq!(app.emoji.as_ref().unwrap().query, "grinning face");
             assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
         }
     }

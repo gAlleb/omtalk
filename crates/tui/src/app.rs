@@ -4847,8 +4847,12 @@ impl App {
                 Vec::new()
             }
             crate::emoji::Outcome::Insert(text) => {
-                self.emoji = None;
-                self.on_paste(text)
+                // Insert into the draft rather than the picker's search, then
+                // restore its category, query and selection for another choice.
+                let picker = self.emoji.take();
+                let actions = self.on_paste(text);
+                self.emoji = picker;
+                actions
             }
         }
     }
@@ -5523,7 +5527,12 @@ mod tests {
         let actions = app.on_key(key(KeyCode::Enter));
         assert_eq!(app.input, format!("до {sequence}после"));
         assert_eq!(app.cursor, 3 + sequence.chars().count());
-        assert!(app.emoji.is_none());
+        assert!(app.emoji.is_some());
+        assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
+        let actions = app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.input, format!("до {sequence}{sequence}после"));
+        assert_eq!(app.cursor, 3 + 2 * sequence.chars().count());
+        assert!(app.emoji.is_some());
         assert!(!actions.iter().any(|a| matches!(a, Action::Send { .. })));
         assert!(app.chats[chat].lines.is_empty());
         let draft = app.input.clone();
