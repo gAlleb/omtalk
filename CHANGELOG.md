@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.9 — 2026-10-27
+
+- Rooms join independently during startup; archive catch-up preserves read positions instead of counting old history as new messages.
+- `/room` opens room management: the server's full configuration form, owners/administrators/members/bans, affiliations, moderator and voice roles, kicks, topic and room avatar. Available actions depend on server permissions.
+- Visiting unread chats with modifier+N returns to the original chat after the unread round trip.
+- `:` opens a searchable contact and room switcher. `::text` sends `:text`; `//text` sends `/text`.
+- `/np` shares the playing MPRIS track through `playerctl`. The hidden `/om` command sends `ॐ असतो मा सद्गमय`.
+- An offline emoji picker beside the attachment and mute buttons, or `/emoji`: 375 common emoji, Russian/English search, categories, mouse and arrow navigation. Selecting inserts into the draft and keeps the picker open for more selections; Esc closes it.
+- Wide and compound terminal cells are drawn with explicit cursor positioning to prevent emoji from corrupting the interface.
+- HTTP/HTTPS links open in the default browser with an ordinary left click, including wrapped links. Uses `xdg-open`, independently of the file viewer setting.
+- Touchpad history scrolling keeps focus on messages, preventing accompanying arrow events from switching chats. Optional diagnostics: `OMTALK_SCROLL_LOG`.
+- GitHub Actions builds downloadable Linux artifacts after a push; a newer push cancels an unfinished build for the same branch.
+
 - Per-chat notification preferences in `/settings chat`: inherit, all messages or mentions only, plus independent sound on/off/inherit. Mute overrides every signal. Choices persist locally per account and chat, including IRC bridges.
 - Contacts declaring the standard XMPP `client/bot` identity get a robot icon in the chat list and header. Discovery is limited to viewed contacts and remembered locally; names are not used to guess.
 - Jump to the first unread chat with modifier+N or prefix+N, including folded groups. The direct key is configurable through `unread_shortcut` or settings; Ctrl+A and reply on prefix+A are unchanged.
