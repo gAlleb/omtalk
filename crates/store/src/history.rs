@@ -129,17 +129,42 @@ pub struct ChatSummary {
     pub last_at: i64,
 }
 
+/// Archive stanza IDs identify a message within one account/chat even when a
+/// bridge changes its sender JID or omits the message ID in its MAM copy. Keep
+/// original rows intact: local read frontiers use their stable rowids.
+pub(crate) const MIGRATION_ARCHIVE_ID: &str = "
+CREATE INDEX messages_by_archive ON messages(account, chat, archive_id);
+CREATE VIEW message_history AS
+SELECT m.rowid AS rowid, m.account, m.chat, m.sender, m.nick, m.outgoing,
+       m.encrypted, m.body, m.at,
+       COALESCE(NULLIF(m.id, ''), (
+           SELECT NULLIF(d.id, '') FROM messages d
+           WHERE d.account=m.account AND d.chat=m.chat AND d.archive_id=m.archive_id
+             AND NULLIF(d.id, '') IS NOT NULL
+           ORDER BY d.rowid LIMIT 1
+       )) AS id,
+       m.delivery, m.failure, m.shared, m.reply_to, m.archive_id, m.untrusted, m.edited
+FROM messages m
+WHERE NULLIF(m.archive_id, '') IS NULL OR NOT EXISTS (
+    SELECT 1 FROM messages d
+    WHERE d.account=m.account AND d.chat=m.chat AND d.archive_id=m.archive_id
+      AND d.rowid<m.rowid
+);
+";
+
 impl Store {
     /// Saves a message; a chat closed before opens again with it.
     pub fn save_message(&self, account: &BareJid, message: &StoredMessage) -> Result<(), Error> {
         self.reopen_chat(account, &message.chat)?;
-        // A message that has an id is kept once: the archive read again, a carbon and
-        // its original, bring it more than once.
+        // Client IDs are scoped to their sender; archive IDs to this account/chat.
+        // Bridges can change the sender or omit the client ID in their MAM copy.
         self.db.lock().unwrap().execute(
             "INSERT INTO messages (account, chat, sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
-             WHERE ?9 IS NULL OR NOT EXISTS (
-                 SELECT 1 FROM messages WHERE account = ?1 AND chat = ?2 AND sender = ?3 AND id = ?9
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM messages WHERE account = ?1 AND chat = ?2 AND
+                 ((NULLIF(?14, '') IS NOT NULL AND archive_id = ?14) OR
+                  (NULLIF(?9, '') IS NOT NULL AND sender = ?3 AND id = ?9))
              )",
             params![
                 account.as_str(),
@@ -163,6 +188,15 @@ impl Store {
                 message.edited,
             ],
         )?;
+        // If MAM arrived first without a message ID, retain the live ID for replies
+        // and markers without inserting another row or changing the read position.
+        if let Some(archive) = message.archive_id.as_deref().filter(|id| !id.is_empty()) {
+            self.db.lock().unwrap().execute(
+                "UPDATE messages SET id=COALESCE(NULLIF(id,''),NULLIF(?4,'')), shared=MAX(shared,?5), reply_to=COALESCE(reply_to,?6)
+                 WHERE rowid=(SELECT MIN(rowid) FROM messages WHERE account=?1 AND chat=?2 AND archive_id=?3)",
+                params![account.as_str(),message.chat.as_str(),archive,message.id,message.shared_file,message.reply_to],
+            )?;
+        }
         if let (Some(id), Some(archive_id)) = (&message.id, &message.archive_id) {
             self.set_archive_id(account, &message.chat, id, message.outgoing, archive_id)?;
         }
@@ -328,7 +362,7 @@ impl Store {
     ) -> Result<Vec<StoredMessage>, Error> {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(&format!(
-            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited FROM messages {rest}"
+            "SELECT sender, nick, outgoing, encrypted, body, at, id, delivery, failure, shared, reply_to, archive_id, untrusted, edited FROM message_history {rest}"
         ))?;
         let rows = query.query_map(params, |r| {
             Ok((
@@ -398,7 +432,7 @@ impl Store {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT at FROM messages WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 LIMIT 1",
+                "SELECT at FROM message_history WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 LIMIT 1",
                 params![account.as_str(), chat.as_str(), archive_id],
                 |r| r.get(0),
             )
@@ -409,7 +443,7 @@ impl Store {
     /// when it was read up to then.
     pub fn incoming_after(&self, account: &BareJid, chat: &BareJid, at: i64) -> Result<usize, Error> {
         let count: i64 = self.db.lock().unwrap().query_row(
-            "SELECT COUNT(*) FROM messages WHERE account = ?1 AND chat = ?2 AND outgoing = 0 AND at > ?3",
+            "SELECT COUNT(*) FROM message_history WHERE account = ?1 AND chat = ?2 AND outgoing = 0 AND at > ?3",
             params![account.as_str(), chat.as_str(), at],
             |r| r.get(0),
         )?;
@@ -431,7 +465,7 @@ impl Store {
         let db = self.db.lock().unwrap();
         let mut query = db.prepare(
             "SELECT chat, MAX(at) FROM (
-                 SELECT chat, at FROM messages WHERE account = ?1
+                 SELECT chat, at FROM message_history WHERE account = ?1
                  UNION ALL SELECT chat, 0 FROM known_chats WHERE account = ?1
              ) GROUP BY chat ORDER BY MAX(at) DESC",
         )?;
@@ -506,6 +540,105 @@ mod tests {
             untrusted: false,
             edited: false,
         }
+    }
+
+    #[test]
+    fn bridge_live_and_archive_copies_share_the_room_archive_id_in_both_orders() {
+        for archive_first in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("history.db")).unwrap();
+            let me = jid("me@example.org");
+            let room = jid("#usue%irc.example.org@bridge.example.org");
+            let mut live = message(room.as_str(), "same real message", 102);
+            live.sender = jid("xff_%irc.example.org@bridge.example.org");
+            live.nick = Some("xff_".into());
+            live.encrypted = false;
+            live.id = Some("live-id".into());
+            live.archive_id = Some("room-id".into());
+            let mut archived = live.clone();
+            archived.sender = room.clone();
+            archived.at = 100;
+            archived.id = None;
+            let (first, second) = if archive_first {
+                (&archived, &live)
+            } else {
+                (&live, &archived)
+            };
+            store.save_message(&me, first).unwrap();
+            store.save_message(&me, second).unwrap();
+            let kept = store.recent_messages(&me, &room, 10).unwrap();
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].id.as_deref(), Some("live-id"));
+            let mut repeated = live.clone();
+            repeated.id = Some("another-send".into());
+            repeated.archive_id = Some("another-room-id".into());
+            store.save_message(&me, &repeated).unwrap();
+            assert_eq!(
+                store.recent_messages(&me, &room, 10).unwrap().len(),
+                2,
+                "identical text with another archive ID is a real message"
+            );
+            store.save_message(&jid("other@example.org"), &live).unwrap();
+            assert_eq!(
+                store
+                    .recent_messages(&jid("other@example.org"), &room, 10)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn old_duplicate_rows_are_hidden_without_deleting_data_or_read_frontiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let store = Store::open(&path).unwrap();
+        let me = jid("me@example.org");
+        let room = jid("#usue%irc.example.org@bridge.example.org");
+        // Model an older database: MAM omitted the ID, live used another sender and
+        // a timestamp two seconds later. Both rows have the same trusted archive ID.
+        for (sender, id, at) in [
+            (room.as_str(), None, 100),
+            ("xff_%irc.example.org@bridge.example.org", Some("live-id"), 102),
+        ] {
+            store.db.lock().unwrap().execute("INSERT INTO messages(account,chat,sender,nick,outgoing,encrypted,body,at,id,archive_id) VALUES(?1,?2,?3,'xff_',0,0,'same message',?4,?5,'room-id')",params![me.as_str(),room.as_str(),sender,at,id]).unwrap();
+        }
+        let bodies = store.recent_messages(&me, &room, 10).unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].id.as_deref(), Some("live-id"));
+        assert_eq!(store.older_messages(&me, &room, 0, 10).unwrap().len(), 1);
+        assert_eq!(store.search(&me, &room, "same message", 10).unwrap().len(), 1);
+        assert_eq!(store.incoming_after(&me, &room, 99).unwrap(), 1);
+        let rowid: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT MAX(rowid) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        store
+            .keep(&format!("read-local/{me}/{room}"), Some(&format!("102/{rowid}")))
+            .unwrap();
+        assert_eq!(store.unread_after_mark(&me, &room, None).unwrap(), Some(0));
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP VIEW message_history; DROP INDEX messages_by_archive; PRAGMA user_version=16;",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.recent_messages(&me, &room, 10).unwrap().len(), 1);
+        assert_eq!(store.unread_after_mark(&me, &room, None).unwrap(), Some(0));
+        let raw: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, 2, "keep original data and rowids intact");
     }
 
     #[test]

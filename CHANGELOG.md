@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- IRC bridge history no longer duplicates live/MAM copies sharing a room archive ID when their sender JIDs or message IDs differ. Existing copies are hidden consistently in history, search and unread counts without deleting original rows or read positions.
+
 - Audio attachments retain a working `open` action and a separate `save` dialog with path completion, clipboard paste and explicit overwrite confirmation. Nerd Font mode uses playback glyphs; text mode retains ASCII controls.
 - Temporary attachment download failures retry up to three times. Failed files have a clickable retry row; duplicate requests are coalesced, and incomplete responses are kept out of the cache.
 

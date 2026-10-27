@@ -49,7 +49,7 @@ impl Store {
         let db = self.db.lock().unwrap();
         let cursor: Option<(i64, i64)> = db
             .query_row(
-                "SELECT at, rowid FROM messages WHERE account = ?1 AND chat = ?2 AND outgoing = ?5 AND
+                "SELECT at, rowid FROM message_history WHERE account = ?1 AND chat = ?2 AND outgoing = ?5 AND
              ((?3 IS NOT NULL AND id = ?3) OR (?4 IS NOT NULL AND archive_id = ?4) OR
               (?3 IS NULL AND ?4 IS NULL AND at = ?6)) ORDER BY at DESC, rowid DESC LIMIT 1",
                 params![
@@ -77,7 +77,7 @@ impl Store {
         }
         let db = self.db.lock().unwrap();
         let cursor = db.query_row(
-            "SELECT at, rowid FROM messages WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 ORDER BY at DESC, rowid DESC LIMIT 1",
+            "SELECT at, rowid FROM message_history WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 ORDER BY at DESC, rowid DESC LIMIT 1",
             params![account.as_str(), chat.as_str(), id], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
         if let Some(cursor) = cursor {
@@ -97,7 +97,7 @@ impl Store {
         let db = self.db.lock().unwrap();
         let remote: Option<(i64, i64)> = match marker.filter(|id| !id.is_empty()) {
             Some(id) => db.query_row(
-                "SELECT at, rowid FROM messages WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 ORDER BY at DESC, rowid DESC LIMIT 1",
+                "SELECT at, rowid FROM message_history WHERE account = ?1 AND chat = ?2 AND archive_id = ?3 ORDER BY at DESC, rowid DESC LIMIT 1",
                 params![account.as_str(), chat.as_str(), id], |r| Ok((r.get(0)?, r.get(1)?)),
             ).optional()?,
             None => None,
@@ -106,7 +106,7 @@ impl Store {
             return Ok(None);
         };
         let count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM messages WHERE account = ?1 AND chat = ?2 AND outgoing = 0 AND (at, rowid) > (?3, ?4)",
+            "SELECT COUNT(*) FROM message_history WHERE account = ?1 AND chat = ?2 AND outgoing = 0 AND (at, rowid) > (?3, ?4)",
             params![account.as_str(), chat.as_str(), at, row], |r| r.get(0),
         )?;
         Ok(Some(count as usize))

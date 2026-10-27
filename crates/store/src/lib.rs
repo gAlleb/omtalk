@@ -102,6 +102,7 @@ const MIGRATIONS: &[&str] = &[
     history::MIGRATION_EDITED,
     reactions::MIGRATION,
     kept::MIGRATION,
+    history::MIGRATION_ARCHIVE_ID,
 ];
 
 #[derive(Clone)]

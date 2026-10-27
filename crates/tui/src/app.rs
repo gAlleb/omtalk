@@ -4892,11 +4892,36 @@ impl App {
         if before.is_some() {
             chat.older_before = before;
         }
-        let known: BTreeSet<String> = chat.lines.iter().filter_map(|l| l.id.clone()).collect();
-        let mut older: Vec<Line> = lines
-            .into_iter()
-            .filter(|l| l.id.as_ref().is_none_or(|id| !known.contains(id)))
-            .collect();
+        let mut older: Vec<Line> = Vec::new();
+        let room = chat.is_room();
+        for line in lines {
+            let existing = chat.lines.iter_mut().chain(older.iter_mut()).find(|kept| {
+                !kept.notice
+                    && !line.notice
+                    && (line
+                        .archive_id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .is_some_and(|id| kept.archive_id.as_deref() == Some(id))
+                        || (line.outgoing == kept.outgoing
+                            && (!room || line.who == kept.who)
+                            && line
+                                .id
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .is_some_and(|id| kept.id.as_deref() == Some(id))))
+            });
+            if let Some(existing) = existing {
+                if existing.id.is_none() {
+                    existing.id = line.id;
+                }
+                if existing.archive_id.is_none() {
+                    existing.archive_id = line.archive_id;
+                }
+            } else {
+                older.push(line);
+            }
+        }
         older.append(&mut chat.lines);
         chat.lines = older;
     }
@@ -6871,6 +6896,45 @@ mod tests {
     fn type_keys(app: &mut App, text: &str) {
         for c in text.chars() {
             app.on_key(key(KeyCode::Char(c)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod room_history_identity_tests {
+    use super::*;
+    #[test]
+    fn older_pages_merge_archive_ids_with_different_message_ids_without_merging_real_repeats() {
+        for archive_first in [false, true] {
+            let me: BareJid = "me@example.org".parse().unwrap();
+            let room: BareJid = "#usue%irc.example.org@bridge.example.org".parse().unwrap();
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+            let mut live = Line::message(102, "xff_".into(), "same message".into(), false, false);
+            live.id = Some("live-id".into());
+            live.archive_id = Some("room-id".into());
+            let mut archived = live.clone();
+            archived.id = None;
+            archived.at = 100;
+            let (first, page) = if archive_first {
+                (archived.clone(), live.clone())
+            } else {
+                (live.clone(), archived.clone())
+            };
+            app.chats[chat].lines.push(first);
+            app.older(&me, &room, vec![page], None, false);
+            assert_eq!(app.chats[chat].lines.len(), 1);
+            assert_eq!(app.chats[chat].lines[0].id.as_deref(), Some("live-id"));
+            let mut repeated = archived;
+            repeated.archive_id = Some("another-room-id".into());
+            app.older(&me, &room, vec![repeated], None, false);
+            assert_eq!(app.chats[chat].lines.len(), 2);
+            // Different room writers may reuse a client-provided message ID.
+            let mut another = live;
+            another.archive_id = None;
+            another.who = "someone-else".into();
+            app.older(&me, &room, vec![another], None, false);
+            assert_eq!(app.chats[chat].lines.len(), 3);
         }
     }
 }
