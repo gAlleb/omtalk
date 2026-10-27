@@ -219,3 +219,42 @@ async fn own_iq_queued_before_login_matches_the_servers_reply() {
         "the server stored and acknowledged it, but the client returned {result:?}"
     );
 }
+
+/// Quitting must not depend on an IQ, a room join, or a message being acknowledged.
+#[tokio::test(flavor = "multi_thread")]
+async fn quitting_with_pending_work_on_a_frozen_connection_is_bounded() {
+    let open = Arc::new(AtomicBool::new(true));
+    let addr = proxy(open.clone()).await;
+    let (mut accounts, mut events) = Accounts::new();
+    let account = accounts.add(config("u79", &addr)).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !matches!(events.recv().await.unwrap().event, Event::Online { .. }) {}
+    })
+    .await
+    .expect("login before freezing the connection");
+    open.store(false, Ordering::SeqCst);
+    let work = {
+        let account = account.clone();
+        tokio::spawn(async move {
+            let room = "quit-outage@muc.localhost".parse().unwrap();
+            let message = Message::chat(Some("u80@localhost".parse().unwrap()))
+                .with_body(Lang::default(), "pending during outage".into());
+            let _ = tokio::join!(
+                account.join(&room, "test"),
+                account.send(message),
+                account.get(None, xmpp_parsers::ping::Ping)
+            );
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !matches!(events.recv().await.unwrap().event, Event::Disconnected { .. }) {}
+    })
+    .await
+    .expect("the frozen server must be reported offline");
+    let start = Instant::now();
+    tokio::time::timeout(Duration::from_secs(3), account.stop())
+        .await
+        .expect("quitting must not wait for the server");
+    eprintln!("stopped frozen account in {:?}", start.elapsed());
+    work.abort();
+}
