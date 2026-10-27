@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- An idle omtalk no longer wakes hundreds of times a second: the audio worker sleeps while nothing plays or records, and a finished voice message lets go of its sound-server stream.
+- Saving a file offers the downloads folder from the system's `~/.config/user-dirs.dirs` (it looked in omtalk's own config folder, so a renamed folder such as «Загрузки» was missed).
+
 - IRC bridge history no longer duplicates live/MAM copies sharing a room archive ID when their sender JIDs or message IDs differ. Existing copies are hidden consistently in history, search and unread counts without deleting original rows or read positions.
 
 - Audio attachments retain a working `open` action and a separate `save` dialog with path completion, clipboard paste and explicit overwrite confirmation. Nerd Font mode uses playback glyphs; text mode retains ASCII controls.
