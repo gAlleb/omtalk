@@ -1301,6 +1301,14 @@ pub fn message_rows(
                     trf!("downloading {percent}%", "загружается {percent}%"),
                     theme::dim(),
                 ),
+                MediaState::Retrying(attempt) => (
+                    icons.file,
+                    trf!(
+                        "retrying download ({attempt}/3)…",
+                        "повтор загрузки ({attempt}/3)…"
+                    ),
+                    theme::warn(),
+                ),
                 MediaState::Loading => (
                     if slot.image { icons.picture } else { icons.file },
                     tr!("downloading…", "загружается…").to_owned(),
@@ -1352,7 +1360,7 @@ pub fn message_rows(
                 open: path,
                 picture: None,
                 who: None,
-                fetch: (slot.state == MediaState::Offered)
+                fetch: matches!(slot.state, MediaState::Offered | MediaState::Failed(_))
                     .then(|| slot.link.clone()),
                 line: None,
                 reactions: false,
@@ -1360,6 +1368,18 @@ pub fn message_rows(
                 audio: None,
                 save,
             });
+            if matches!(slot.state, MediaState::Failed(_)) {
+                let mut retry: Row = TextLine::from(vec![
+                    Span::raw(pad.clone()),
+                    Span::styled(
+                        tr!("[retry download]", "[повторить загрузку]"),
+                        Style::default().fg(theme::accent()),
+                    ),
+                ])
+                .into();
+                retry.fetch = Some(slot.link.clone());
+                rows.push(retry);
+            }
             if let Some(path) = path_audio {
                 let info = audio_info.and_then(|m| m.get(&path));
                 let state = playback.filter(|s| s.path == path);
@@ -8203,5 +8223,44 @@ fn save_file_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         );
         app.areas.save_buttons.push((rect, i == 0));
         x += width + 2;
+    }
+}
+
+#[cfg(test)]
+mod download_retry_view_tests {
+    use super::*;
+    #[test]
+    fn failed_download_has_a_separate_clickable_retry_row() {
+        use crate::app::{Action, ChatKind, MediaState};
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
+        let peer = "other@example.org".parse().unwrap();
+        let mut app = App::new(vec![me.clone()], crate::config::Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &peer, ChatKind::Direct);
+        app.select(chat);
+        let link = "https://upload.example.org/file.png";
+        let mut line = crate::app::Line::message_sharing(1, "other".into(), link.into(), true, false, true);
+        line.media.as_mut().unwrap().state = MediaState::Failed("error decoding response body".into());
+        app.chats[chat].lines.push(line);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+            .unwrap();
+        assert_eq!(app.areas.fetches.len(), 2);
+        let rect = app.areas.fetches.last().unwrap().0;
+        assert_eq!(
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE
+            }),
+            vec![Action::Fetch(link.into())]
+        );
+        app.media_done(link, MediaState::Retrying(2));
+        terminal
+            .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+            .unwrap();
+        assert!(app.areas.fetches.is_empty());
     }
 }

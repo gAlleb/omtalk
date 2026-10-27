@@ -98,6 +98,7 @@ pub enum MediaState {
     Loading,
     /// Coming down, this far (percent).
     Downloading(u8),
+    Retrying(u8),
     Ready(PathBuf),
     Failed(String),
 }

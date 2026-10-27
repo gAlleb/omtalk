@@ -3658,12 +3658,6 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::Fetch(link) => {
-            if let Some(media) = omtalk_media::Media::shared(&link) {
-                tell(Msg::Media {
-                    url: media.url().to_owned(),
-                    state: MediaState::Loading,
-                });
-            }
             fetch_media(link, shared.clone()).await;
         }
         Action::BotInfo { account, jid } => {
@@ -4031,6 +4025,19 @@ async fn fetch_media(link: String, shared: Shared) {
     let Some(media) = omtalk_media::Media::shared(&link) else {
         return;
     };
+    static ACTIVE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::LazyLock::new(Default::default);
+    struct Flight(PathBuf);
+    impl Drop for Flight {
+        fn drop(&mut self) {
+            ACTIVE.lock().unwrap().remove(&self.0);
+        }
+    }
+    let key = media.cache_path(&shared.cache);
+    if !ACTIVE.lock().unwrap().insert(key.clone()) {
+        return;
+    }
+    let _flight = Flight(key);
     let (tx, url) = (shared.tx.clone(), media.url().to_owned());
     let last = std::sync::atomic::AtomicU8::new(0);
     let progress = move |got: u64, total: Option<u64>| {
@@ -4046,9 +4053,21 @@ async fn fetch_media(link: String, shared: Shared) {
             });
         }
     };
-    let state = match media.fetch_with(&shared.cache, progress).await {
+    if media.cached(&shared.cache).is_none() {
+        let _ = shared.tx.send(Msg::Media {
+            url: media.url().to_owned(),
+            state: MediaState::Loading,
+        });
+    }
+    let retrying = |attempt| {
+        let _ = shared.tx.send(Msg::Media {
+            url: media.url().to_owned(),
+            state: MediaState::Retrying(attempt),
+        });
+    };
+    let state = match media.fetch_with_retry(&shared.cache, progress, retrying).await {
         Ok(path) => MediaState::Ready(path),
-        Err(e) => MediaState::Failed(e.to_string()),
+        Err(error) => MediaState::Failed(error.to_string()),
     };
     let _ = shared.tx.send(Msg::Media {
         url: media.url().to_owned(),

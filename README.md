@@ -238,6 +238,11 @@ required. `PULSE_SINK` and `PULSE_SOURCE` can override the default devices. Pure
 ALSA-only sessions are not supported. Building the bundled Opus codec requires
 CMake (included in `mise.toml`); the distributed binaries include the codec.
 
+Temporary download failures retry automatically, up to three attempts. A failed
+attachment has a separate clickable “retry download” row. Invalid encryption keys,
+size limits and permanent HTTP errors are not retried automatically; repeated
+clicks do not start duplicate downloads. Partial responses never become cached files.
+
 HTTP/HTTPS links in messages open in the default browser with an ordinary left
 click, without Shift. Wrapped links remain clickable on every visible fragment.
 The browser is opened with `xdg-open`, independently of the file `viewer` setting.

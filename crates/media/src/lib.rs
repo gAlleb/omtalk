@@ -17,6 +17,8 @@ pub const MAX_SIZE: u64 = 50 * 1024 * 1024;
 pub enum Error {
     #[error("download failed: {0}")]
     Download(String),
+    #[error("download failed: {0}")]
+    TemporaryDownload(String),
     #[error("upload failed: {0}")]
     Upload(String),
     #[error("the file is larger than {} MB", MAX_SIZE / 1024 / 1024)]
@@ -25,6 +27,41 @@ pub enum Error {
     Decrypt,
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl Error {
+    /// Retrying cannot fix invalid keys, size limits, disk errors or permanent HTTP errors.
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::TemporaryDownload(_))
+    }
+}
+fn download_error(error: reqwest::Error) -> Error {
+    let transient = error.is_connect()
+        || error.is_timeout()
+        || error.is_body()
+        || error.is_decode()
+        || error
+            .status()
+            .is_some_and(|s| s.is_server_error() || s.as_u16() == 429 || s.as_u16() == 408);
+    use std::error::Error as _;
+    let mut text = error.to_string();
+    let mut source = error.source();
+    for _ in 0..3 {
+        let Some(cause) = source else {
+            break;
+        };
+        let detail = cause.to_string();
+        if !text.ends_with(&detail) {
+            text.push_str(": ");
+            text.push_str(&detail);
+        }
+        source = cause.source();
+    }
+    if transient {
+        Error::TemporaryDownload(text)
+    } else {
+        Error::Download(text)
+    }
 }
 
 /// A shared file a message points at.
@@ -179,6 +216,26 @@ impl Media {
         self.fetch_with(cache_dir, |_, _| {}).await
     }
 
+    /// Fetch with at most three attempts for transient transport/server failures.
+    /// `retrying` is called before the bounded backoff with the next attempt number.
+    pub async fn fetch_with_retry(
+        &self,
+        cache_dir: &Path,
+        progress: impl Fn(u64, Option<u64>),
+        retrying: impl Fn(u8),
+    ) -> Result<PathBuf, Error> {
+        for attempt in 1..=3 {
+            match self.fetch_with(cache_dir, &progress).await {
+                Err(error) if error.retryable() && attempt < 3 => {
+                    retrying(attempt + 1);
+                    tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("the final attempt returns its result")
+    }
+
     /// [`Media::fetch`], telling `progress` how much came of how much (if the server says).
     pub async fn fetch_with(
         &self,
@@ -197,9 +254,19 @@ impl Media {
             tokio::fs::create_dir_all(dir).await?;
         }
         // Written aside and renamed, so a half-written file is never taken for a whole one.
-        let partial = path.with_extension("part");
-        tokio::fs::write(&partial, &data).await?;
-        tokio::fs::rename(&partial, &path).await?;
+        let partial = path.with_file_name(format!(
+            ".{}.part",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        if let Err(error) = async {
+            tokio::fs::write(&partial, &data).await?;
+            tokio::fs::rename(&partial, &path).await
+        }
+        .await
+        {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(error.into());
+        }
         Ok(path)
     }
 }
@@ -213,23 +280,19 @@ async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<
         .connect_timeout(std::time::Duration::from_secs(20))
         .read_timeout(std::time::Duration::from_secs(60))
         .build()
-        .map_err(|e| Error::Download(e.to_string()))?;
+        .map_err(download_error)?;
     let mut response = client
         .get(url)
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| Error::Download(e.to_string()))?;
+        .map_err(download_error)?;
     let total = response.content_length();
     if total.is_some_and(|len| len > MAX_SIZE) {
         return Err(Error::TooLarge);
     }
     let mut data = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| Error::Download(e.to_string()))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(download_error)? {
         data.extend_from_slice(&chunk);
         progress(data.len() as u64, total);
         // The announced length can lie; count what actually arrives.
@@ -560,5 +623,115 @@ mod tests {
         let seen = seen.into_inner().unwrap();
         assert!(seen.len() > 1, "in steps: {seen:?}");
         assert_eq!(seen.last(), Some(&(body.len() as u64, Some(body.len() as u64))));
+    }
+}
+
+#[cfg(test)]
+mod interrupted_download_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[tokio::test]
+    async fn interrupted_response_is_retryable_and_never_becomes_a_cached_file() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for complete in [false, true] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 2048];
+                let _ = socket.read(&mut buf).await.unwrap();
+                let body = if complete { "abcdef" } else { "abc" };
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n{body}")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let cache = tempfile::tempdir().unwrap();
+        let media = Media::Plain {
+            url: format!("http://{address}/voice.part"),
+        };
+        let error = media.fetch(cache.path()).await.unwrap_err();
+        assert!(error.retryable(), "{error}");
+        assert!(media.cached(cache.path()).is_none());
+        let path = media.fetch(cache.path()).await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"abcdef");
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn permanent_http_errors_are_not_retried_but_server_errors_are_retryable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for code in [404, 503] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 2048];
+                socket.read(&mut buf).await.unwrap();
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 {code} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        assert!(
+            !download(&format!("http://{address}/file"), |_, _| {})
+                .await
+                .unwrap_err()
+                .retryable()
+        );
+        assert!(
+            download(&format!("http://{address}/file"), |_, _| {})
+                .await
+                .unwrap_err()
+                .retryable()
+        );
+        assert!(!Error::Decrypt.retryable());
+        assert!(!Error::TooLarge.retryable());
+        server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod automatic_retry_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[tokio::test]
+    async fn automatic_retry_recovers_a_truncated_audio_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for complete in [false, true] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 2048];
+                socket.read(&mut buf).await.unwrap();
+                let body = if complete { "abcdef" } else { "abc" };
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n{body}")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let cache = tempfile::tempdir().unwrap();
+        let media = Media::Plain {
+            url: format!("http://{address}/voice.ogg"),
+        };
+        let retries = std::sync::Mutex::new(Vec::new());
+        let path = media
+            .fetch_with_retry(cache.path(), |_, _| {}, |n| retries.lock().unwrap().push(n))
+            .await
+            .unwrap();
+        assert_eq!(*retries.lock().unwrap(), [2]);
+        assert_eq!(std::fs::read(path).unwrap(), b"abcdef");
+        server.await.unwrap();
     }
 }

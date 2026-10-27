@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Audio attachments retain a working `open` action and a separate `save` dialog with path completion, clipboard paste and explicit overwrite confirmation. Nerd Font mode uses playback glyphs; text mode retains ASCII controls.
+- Temporary attachment download failures retry up to three times. Failed files have a clickable retry row; duplicate requests are coalesced, and incomplete responses are kept out of the cache.
 
 - Built-in streamed audio playback with play/pause, stop, elapsed/total time and a clickable waveform for seeking. Supports common audio attachments, including Ogg Opus voice messages; outgoing audio is playable before upload completes.
 - Voice-message recording from the microphone button or `/record`, with preview, send/discard and a fixed recipient. Records mono Ogg Opus at 32 kbit/s through the existing upload/OMEMO path. `/play`, `/stop` and `/seek` provide keyboard control.
