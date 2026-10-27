@@ -30,6 +30,8 @@ accounts, and keyboard and mouse controls.
 
 ![The settings window in omtalk: interface, notifications and this chat's own notifications](docs/screenshot-settings.webp)
 
+![A direct chat in omtalk with the emoji picker open: categories, search, the contact's avatar and OMEMO keys](docs/screenshot-emoji.webp)
+
 ## Install and first run
 
 ### Linux binaries
