@@ -91,7 +91,9 @@ same `mise run dist` task. Download `omtalk-linux-<commit>` from the run's Artif
 its tarball contains both executables and `SHA256SUMS`. Several commits in one
 push produce one build of the final commit; a newer push cancels an unfinished
 run for the same branch. Artifacts are retained for 14 days. Manual runs are also
-available from the Actions page.
+available from the Actions page. A pushed `v…` tag also publishes its GitHub release
+page: the tag's section of `CHANGELOG.md` as the text, with both binaries,
+`SHA256SUMS` and `LICENSE` attached.
 
 ## Controls
 
