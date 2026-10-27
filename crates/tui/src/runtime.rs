@@ -191,6 +191,8 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
 
 /// What tasks tell the interface.
 enum Msg {
+    Audio(crate::audio::Event),
+    AudioInfo(PathBuf, Result<crate::audio::Info, String>),
     RoomStep {
         token: String,
         account: BareJid,
@@ -503,6 +505,10 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         store: store.clone(),
         tx,
     };
+    let audio_tx = shared.tx.clone();
+    let audio = crate::audio::Engine::new(move |event| {
+        let _ = audio_tx.send(Msg::Audio(event));
+    });
     let mut jids = Vec::new();
     for mut config in configs {
         let jid = config.jid.clone();
@@ -772,6 +778,13 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
 
         for action in actions {
+            if let Action::Upload { path, .. } = &action {
+                analyse_audio(&mut app, path, &shared);
+            }
+            if let Action::Audio(command) = &action {
+                audio.send(command.clone());
+                continue;
+            }
             if action == Action::Quit {
                 break;
             }
@@ -827,6 +840,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             break;
         }
     }
+    audio.send(crate::audio::Command::Quit);
     // Leave cleanly, or rooms keep showing us online for minutes (XEP-0198 parking).
     futures::future::join_all(shared.accounts.values().map(|(account, _)| account.stop())).await;
     drop(accounts);
@@ -924,6 +938,39 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
+        Msg::AudioInfo(path, result) => {
+            app.audio_pending.remove(&path);
+            app.audio_info.insert(path, result);
+        }
+        Msg::Audio(crate::audio::Event::Playback(state)) => app.playback = state,
+        Msg::Audio(crate::audio::Event::Error(error)) => {
+            app.playback.playing = false;
+            app.playback.stopped = true;
+            app.status = trf!("audio: {error}", "аудио: {error}");
+            if let Some(r) = app.recorder.as_mut() {
+                r.error = Some(error);
+                r.recording = false;
+                r.busy = false;
+            }
+        }
+        Msg::Audio(crate::audio::Event::Recorded {
+            path,
+            seconds,
+            level,
+            done,
+        }) => {
+            if let Some(r) = app.recorder.as_mut().filter(|r| r.path == path) {
+                r.seconds = seconds;
+                r.level = level;
+                r.recording = !done;
+                r.ready = done;
+                r.busy = false;
+                if done {
+                    analyse_audio(app, &path, shared);
+                }
+            }
+        }
+
         Msg::NowPlaying { account, chat, text } => match text {
             Ok(text) => {
                 if let Some(index) = app
@@ -1022,6 +1069,9 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             }
         }
         Msg::Media { url, state } => {
+            if let MediaState::Ready(path) = &state {
+                analyse_audio(app, path, shared);
+            }
             // A picture is decoded aside: large ones take a moment.
             if let MediaState::Ready(path) = &state
                 && (omtalk_media::Media::Plain { url: url.clone() }).is_image()
@@ -2328,6 +2378,10 @@ fn content_type(name: &str) -> Option<&'static str> {
         "txt" => "text/plain",
         "mp4" => "video/mp4",
         "ogg" | "opus" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" | "wave" => "audio/wav",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
         "m4a" => "audio/mp4",
         _ => return None,
     })
@@ -2514,7 +2568,10 @@ async fn perform(action: Action, shared: Shared) {
             tell(Msg::NowPlaying { account, chat, text });
         }
         // Written by the loop, which keeps what the runtime uses.
-        Action::Setting { .. } | Action::SetMuted { .. } | Action::SetChatNotify { .. } => {}
+        Action::Audio(_)
+        | Action::Setting { .. }
+        | Action::SetMuted { .. }
+        | Action::SetChatNotify { .. } => {}
         Action::Send {
             account,
             to,
@@ -3780,6 +3837,28 @@ fn save_own(shared: &Shared, account: &BareJid, chat: &BareJid, text: &str, id: 
 }
 
 /// History and preference changes use the same recognition/download policy as live messages.
+fn analyse_audio(app: &mut App, path: &std::path::Path, shared: &Shared) {
+    if !crate::audio::supported(path)
+        || app.audio_info.contains_key(path)
+        || !app.audio_pending.insert(path.to_owned())
+    {
+        return;
+    }
+    let path = path.to_owned();
+    let tx = shared.tx.clone();
+    tokio::spawn(async move {
+        static SCANS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let Ok(_permit) = SCANS.acquire().await else {
+            return;
+        };
+        let scan = path.clone();
+        let info = tokio::task::spawn_blocking(move || crate::audio::inspect(&scan))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        let _ = tx.send(Msg::AudioInfo(path, info));
+    });
+}
+
 fn prepare_media(lines: &mut [Line], shared: &Shared) {
     let mut links = Vec::new();
     for line in lines {

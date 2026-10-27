@@ -91,6 +91,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, pictures: &mut Pictures) {
     search_window(frame, app, area);
     switch_window(frame, app, area);
     emoji_window(frame, app, area);
+    recorder_window(frame, app, area);
 }
 
 fn strip(frame: &mut Frame, area: Rect, arrow: &str) {
@@ -545,6 +546,8 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     peer: peer.as_deref(),
                     own_name: own_name.as_deref(),
                     room: chat.is_room(),
+                    audio_info: Some(&app.audio_info),
+                    playback: Some(&app.playback),
                 },
             );
             // Above the oldest message, while older ones may be had: a click (or
@@ -610,6 +613,36 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 app.areas
                     .message_rows
                     .push((Rect::new(inner.x, y, inner.width, 1), plain));
+                if let Some((path, indent, wave)) = &row.audio {
+                    let indent = (*indent as u16).min(inner.width);
+                    let x = inner.x + indent;
+                    let width = inner.width - indent;
+                    if *wave {
+                        if let Some(Ok(info)) = app.audio_info.get(path) {
+                            let width = width.min(60);
+                            for col in 0..width {
+                                app.areas.audio.push((
+                                    Rect::new(x + col, y, 1, 1),
+                                    crate::audio::Command::Seek(
+                                        path.clone(),
+                                        info.seconds * col as f64 / width.saturating_sub(1).max(1) as f64,
+                                    ),
+                                ));
+                            }
+                        }
+                    } else {
+                        app.areas.audio.push((
+                            Rect::new(x, y, width.min(4), 1),
+                            crate::audio::Command::Toggle(path.clone()),
+                        ));
+                        if width > 5 {
+                            app.areas.audio.push((
+                                Rect::new(x + 5, y, (width - 5).min(3), 1),
+                                crate::audio::Command::Stop,
+                            ));
+                        }
+                    }
+                }
                 if let Some(picture) = &row.picture {
                     // A picture is drawn whole from its first row, or not at all: when
                     // scrolled half out of sight, its first visible row names it.
@@ -1004,6 +1037,7 @@ pub struct Row {
     pub line: Option<usize>,
     pub reactions: bool,
     pub links: Vec<crate::links::Hit>,
+    pub audio: Option<(PathBuf, usize, bool)>,
 }
 
 /// One of the rows a picture covers.
@@ -1028,6 +1062,7 @@ impl From<TextLine<'static>> for Row {
             line: None,
             reactions: false,
             links: Vec::new(),
+            audio: None,
         }
     }
 }
@@ -1047,6 +1082,8 @@ pub struct Look<'a> {
     pub own_name: Option<&'a str>,
     /// A room: one's messages there are in once the room sends them round.
     pub room: bool,
+    pub audio_info: Option<&'a std::collections::BTreeMap<PathBuf, Result<crate::audio::Info, String>>>,
+    pub playback: Option<&'a crate::audio::Playback>,
 }
 
 pub fn message_rows(
@@ -1063,6 +1100,8 @@ pub fn message_rows(
         peer,
         own_name,
         room,
+        audio_info,
+        playback,
     } = look;
     // In a direct chat the other side goes by the name the chat list has for them (the
     // roster's, the one they gave themselves), not by what the message came with.
@@ -1227,6 +1266,7 @@ pub fn message_rows(
                         line: None,
                         reactions: false,
                         links: Vec::new(),
+                        audio: None,
                     });
                 }
                 push_delivery(&mut rows, line, room, body_width, gutter, true);
@@ -1252,6 +1292,9 @@ pub fn message_rows(
                 MediaState::Ready(_) if slot.image => {
                     (icons.picture, tr!("open", "открыть").to_owned(), theme::accent())
                 }
+                MediaState::Ready(path) if crate::audio::supported(path) => {
+                    (icons.file, tr!("audio", "аудио").to_owned(), theme::accent())
+                }
                 MediaState::Ready(_) => (icons.file, tr!("open", "открыть").to_owned(), theme::accent()),
                 MediaState::Failed(e) => (
                     icons.file,
@@ -1268,6 +1311,7 @@ pub fn message_rows(
                 Style::default().fg(theme::text()).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(state, Style::default().fg(colour)));
+            let path_audio = path.as_ref().filter(|p| crate::audio::supported(p)).cloned();
             rows.push(Row {
                 text: TextLine::from(spans),
                 open: path,
@@ -1277,7 +1321,38 @@ pub fn message_rows(
                 line: None,
                 reactions: false,
                 links: Vec::new(),
+                audio: None,
             });
+            if let Some(path) = path_audio {
+                if let Some(last) = rows.last_mut() {
+                    last.open = None;
+                }
+                let info = audio_info.and_then(|m| m.get(&path));
+                let state = playback.filter(|s| s.path == path);
+                if let Some(Err(error)) = info {
+                    rows.push(
+                        TextLine::from(vec![
+                            Span::raw(pad.clone()),
+                            Span::styled(format!("audio: {error}"), Style::default().fg(theme::warn())),
+                        ])
+                        .into(),
+                    );
+                } else {
+                    if let Some(last) = rows.last_mut() {
+                        last.open = None;
+                        last.audio = Some((path.clone(), gutter, false));
+                    }
+                    let mut controls: Row =
+                        audio_controls(&pad, info.and_then(|r| r.as_ref().ok()), state).into();
+                    controls.audio = Some((path.clone(), gutter, false));
+                    rows.push(controls);
+                    let width = body_width.min(60);
+                    let mut wave: Row =
+                        audio_wave(&pad, width, info.and_then(|r| r.as_ref().ok()), state).into();
+                    wave.audio = Some((path, gutter, true));
+                    rows.push(wave);
+                }
+            }
             push_delivery(&mut rows, line, room, body_width, gutter, false);
             push_reactions(&mut rows, line, body_width, &pad);
             continue;
@@ -1697,6 +1772,15 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         String::new()
     };
+    let mic = if can_mute {
+        if app.icons == theme::text_icons() {
+            " mic "
+        } else {
+            " \u{f130} "
+        }
+    } else {
+        ""
+    };
     let mute = if can_mute {
         format!(
             " {} ",
@@ -1720,7 +1804,8 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     ]
     .into_iter()
     .find(|h| {
-        button.width() + attach.width() + mute.width() + emoji.width() + h.width() + 5 <= area.width as usize
+        button.width() + attach.width() + mute.width() + emoji.width() + mic.width() + h.width() + 5
+            <= area.width as usize
     })
     .unwrap_or("");
     let block = Block::default()
@@ -1734,6 +1819,7 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         .title(Span::styled(attach.clone(), Style::default().fg(theme::accent())))
         .title(Span::styled(mute.clone(), Style::default().fg(theme::dim())))
         .title(Span::styled(emoji.clone(), Style::default().fg(theme::accent())))
+        .title(Span::styled(mic, Style::default().fg(theme::accent())))
         .title(
             TextLine::from(Span::styled(hint, Style::default().fg(theme::dim()))).alignment(Alignment::Right),
         );
@@ -1763,6 +1849,9 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
         1,
     )
     .intersection(area);
+
+    app.areas.mic_button =
+        Rect::new(app.areas.emoji_button.right() + 1, area.y, mic.width() as u16, 1).intersection(area);
 
     if app.input.is_empty() {
         let hint = if app.current().is_some() {
@@ -7710,5 +7799,243 @@ mod tests {
             app.delivery_from(&me, &jid("home.org"), "m2", Delivery::Failed("x".into()))
                 .is_some()
         );
+    }
+}
+
+fn audio_controls(
+    pad: &str,
+    info: Option<&crate::audio::Info>,
+    state: Option<&crate::audio::Playback>,
+) -> TextLine<'static> {
+    let playing = state.is_some_and(|s| s.playing);
+    let position = state.map_or(0.0, |s| s.seconds);
+    TextLine::from(vec![
+        Span::raw(pad.to_owned()),
+        Span::styled(
+            if playing { "[||]" } else { "[ >]" },
+            Style::default().fg(theme::accent()),
+        ),
+        Span::styled(" [x] ", Style::default().fg(theme::dim())),
+        Span::raw(format!(
+            "{} / {}",
+            crate::audio::clock(position),
+            info.map_or_else(|| "…".into(), |i| crate::audio::clock(i.seconds))
+        )),
+    ])
+}
+fn audio_wave(
+    pad: &str,
+    width: usize,
+    info: Option<&crate::audio::Info>,
+    state: Option<&crate::audio::Playback>,
+) -> TextLine<'static> {
+    let mut spans = vec![Span::raw(pad.to_owned())];
+    let progress = info
+        .filter(|i| i.seconds > 0.0)
+        .map_or(0.0, |i| state.map_or(0.0, |s| s.seconds / i.seconds))
+        .clamp(0.0, 1.0);
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    for col in 0..width {
+        let level = info.filter(|i| !i.peaks.is_empty()).map_or(0, |i| {
+            let start = col * i.peaks.len() / width.max(1);
+            let end = ((col + 1) * i.peaks.len() / width.max(1))
+                .max(start + 1)
+                .min(i.peaks.len());
+            i.peaks[start.min(i.peaks.len() - 1)..end]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0) as usize
+        });
+        let played = (col as f64) < progress * width as f64;
+        spans.push(Span::styled(
+            BARS[level.min(7)].to_string(),
+            Style::default().fg(if played { theme::accent() } else { theme::dim() }),
+        ));
+    }
+    TextLine::from(spans)
+}
+fn recorder_window(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(r) = app.recorder.as_ref() else {
+        return;
+    };
+    app.areas.audio.clear();
+    let width = screen.width.min(64);
+    let height = screen.height.min(12);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = pane(tr!("Voice message", "Голосовое сообщение"), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let state = if r.recording {
+        tr!("Recording…", "Запись…")
+    } else if r.busy {
+        tr!("Finishing…", "Завершение…")
+    } else if r.ready {
+        tr!("Listen before sending", "Прослушай перед отправкой")
+    } else {
+        tr!("Recording failed", "Запись не удалась")
+    };
+    let info = app.audio_info.get(&r.path).and_then(|i| i.as_ref().ok());
+    let playback = (&app.playback.path == &r.path).then_some(&app.playback);
+    let mut rows = vec![
+        TextLine::from(truncate(&format!("{}", r.chat), inner.width as usize)),
+        TextLine::from(format!("{state}  {}", crate::audio::clock(r.seconds))),
+    ];
+    if r.recording {
+        rows.push(TextLine::from(Span::styled(
+            format!(
+                "{}{}",
+                "█".repeat(r.level as usize),
+                "░".repeat(8 - r.level as usize)
+            ),
+            Style::default().fg(theme::accent()),
+        )));
+    } else {
+        rows.push(audio_wave("", inner.width as usize, info, playback));
+    }
+    if let Some(error) = &r.error {
+        rows.push(TextLine::from(Span::styled(
+            truncate(error, inner.width as usize),
+            Style::default().fg(theme::warn()),
+        )));
+    }
+    if r.ready {
+        rows.push(TextLine::from(format!(
+            "{} / {}",
+            crate::audio::clock(playback.map_or(0.0, |p| p.seconds)),
+            crate::audio::clock(r.seconds)
+        )));
+    }
+    frame.render_widget(Paragraph::new(rows), inner);
+    let labels = [
+        if r.recording {
+            tr!("Stop", "Стоп")
+        } else {
+            tr!("Play / Pause", "Играть / Пауза")
+        },
+        tr!("Send", "Отправить"),
+        tr!("Discard", "Удалить"),
+    ];
+    let y = inner.bottom().saturating_sub(2);
+    let mut x = inner.x;
+    for (index, label) in labels.into_iter().enumerate() {
+        let label = format!("[{label}]");
+        let width = (label.width() as u16).min(inner.right().saturating_sub(x));
+        if width == 0 {
+            break;
+        }
+        let rect = Rect::new(x, y, width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(if r.button == index {
+                Style::default().fg(theme::background()).bg(theme::accent())
+            } else {
+                Style::default().fg(theme::text())
+            }),
+            rect,
+        );
+        app.areas.recorder_buttons.push((rect, index));
+        x += width + 1;
+    }
+    if r.ready
+        && inner.height > 3
+        && let Some(info) = info
+    {
+        for col in 0..inner.width {
+            app.areas.audio.push((
+                Rect::new(inner.x + col, inner.y + 2, 1, 1),
+                crate::audio::Command::Seek(
+                    r.path.clone(),
+                    info.seconds * col as f64 / inner.width.saturating_sub(1).max(1) as f64,
+                ),
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod audio_view_tests {
+    use super::*;
+    use crate::{
+        app::{Action, ChatKind, MediaState},
+        audio,
+        config::Modifier as KeyModifier,
+    };
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    #[test]
+    fn inline_audio_controls_and_waveform_are_clickable_in_both_layouts() {
+        for compact in [false, true] {
+            let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
+            let peer: omtalk_xmpp::BareJid = "other@example.org".parse().unwrap();
+            let mut app = App::new(vec![me.clone()], KeyModifier::Ctrl, 26, 30);
+            app.compact = compact;
+            let chat = app.chat(&me, &peer, ChatKind::Direct);
+            app.select(chat);
+            let path = PathBuf::from("/cache/voice.ogg");
+            let mut line = crate::app::Line::message_sharing(
+                1,
+                "other".into(),
+                "https://upload.example.org/voice.ogg".into(),
+                true,
+                false,
+                true,
+            );
+            line.media.as_mut().unwrap().state = MediaState::Ready(path.clone());
+            app.chats[chat].lines.push(line);
+            app.audio_info.insert(
+                path.clone(),
+                Ok(audio::Info {
+                    seconds: 10.0,
+                    peaks: vec![0, 2, 5, 7],
+                }),
+            );
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
+            for command in [audio::Command::Toggle(path.clone()), audio::Command::Stop] {
+                let (rect, _) = app.areas.audio.iter().find(|(_, c)| c == &command).unwrap();
+                let result = app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert_eq!(result, vec![Action::Audio(command)]);
+            }
+            assert!(
+                app.areas
+                    .audio
+                    .iter()
+                    .any(|(_, c)| matches!(c,audio::Command::Seek(_,s)if *s>4.0&&*s<6.0))
+            );
+            assert!(
+                app.areas.files.is_empty(),
+                "audio must use its player instead of opening an external viewer"
+            );
+            let rect = app.areas.mic_button;
+            let actions = app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::Audio(audio::Command::Record(_))]
+            ));
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
+            assert_eq!(app.areas.recorder_buttons.len(), 3);
+        }
     }
 }

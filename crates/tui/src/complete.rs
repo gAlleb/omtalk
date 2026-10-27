@@ -292,6 +292,32 @@ pub const COMMANDS: &[Command] = &[
             "удалить контакт (открытого чата или по адресу)",
         ],
     },
+    Command {
+        name: "/record",
+        args: ["", ""],
+        about: ["record a voice message", "записать голосовое сообщение"],
+    },
+    Command {
+        name: "/play",
+        args: ["", ""],
+        about: [
+            "play/pause selected or latest audio",
+            "играть/пауза выбранного или последнего аудио",
+        ],
+    },
+    Command {
+        name: "/stop",
+        args: ["", ""],
+        about: ["stop audio playback", "остановить аудио"],
+    },
+    Command {
+        name: "/seek",
+        args: ["SECONDS", "СЕКУНДЫ"],
+        about: [
+            "seek in selected or latest audio",
+            "перемотать выбранное или последнее аудио",
+        ],
+    },
 ];
 
 pub fn about(name: &str) -> Option<&'static Command> {
@@ -527,7 +553,8 @@ mod tests {
                 "/reply ",
                 "/react ",
                 "/reactions ",
-                "/remove "
+                "/remove ",
+                "/record "
             ]
         );
         assert_eq!(

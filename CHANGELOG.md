@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Built-in streamed audio playback with play/pause, stop, elapsed/total time and a clickable waveform for seeking. Supports common audio attachments, including Ogg Opus voice messages; outgoing audio is playable before upload completes.
+- Voice-message recording from the microphone button or `/record`, with preview, send/discard and a fixed recipient. Records mono Ogg Opus at 32 kbit/s through the existing upload/OMEMO path. `/play`, `/stop` and `/seek` provide keyboard control.
+- Audio uses the PulseAudio/PipeWire socket directly, with bundled codecs and no external player/recorder or audio client libraries. CMake is a build-only dependency.
+
 - The configured quit shortcut works inside dialogs, including settings and the emoji picker.
 
 - Bound account shutdown and room-entry sends when the server is unreachable. Quitting stops accounts concurrently, restores terminal modes before runtime teardown, and tolerates cancelled client receivers. UI event batches are limited so incoming events cannot indefinitely postpone keyboard input.

@@ -215,6 +215,25 @@ pictures can be sent with Ctrl+V. Uploads use the server's HTTP upload service
 link (XEP-0454). Progress appears during upload, followed by delivery ticks. Your own
 picture appears immediately without downloading it again.
 
+Shared audio files have an inline player: play/pause, stop, elapsed/total time,
+and a waveform calculated from the audio. Click the waveform to seek. `/play`
+toggles the selected or latest downloaded audio, `/stop` stops it, and
+`/seek SECONDS` seeks. Playback is streamed rather than loading the whole decoded
+file into memory. Supported formats include MP3, M4A/AAC, FLAC, WAV, Ogg Vorbis and
+Ogg Opus; unavailable codecs and damaged files show an error without closing the chat.
+
+The microphone button, or `/record`, starts a voice-message draft for the current
+chat. Stop the recording, listen, then send or discard it; Esc discards it.
+Tab/arrow keys select buttons and Enter activates them. Recordings are mono Ogg
+Opus at 32 kbit/s, limited to ten minutes, and use the normal file-upload/OMEMO
+path. Changing chats does not change the recording's recipient.
+
+Audio connects directly to the local PulseAudio server or PipeWire's PulseAudio
+compatibility socket. No external player, recorder, `libpulse` or `libasound` is
+required. `PULSE_SINK` and `PULSE_SOURCE` can override the default devices. Pure
+ALSA-only sessions are not supported. Building the bundled Opus codec requires
+CMake (included in `mise.toml`); the distributed binaries include the codec.
+
 HTTP/HTTPS links in messages open in the default browser with an ordinary left
 click, without Shift. Wrapped links remain clickable on every visible fragment.
 The browser is opened with `xdg-open`, independently of the file `viewer` setting.

@@ -23,7 +23,7 @@ jobs:
 
       - uses: jdx/mise-action@v5
         with:
-          install_args: rust zig github:rust-cross/cargo-zigbuild
+          install_args: rust zig cmake github:rust-cross/cargo-zigbuild
 
       - uses: actions/cache@v5
         with:

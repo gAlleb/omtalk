@@ -6,6 +6,8 @@
 #[macro_use]
 mod lang;
 mod app;
+mod audio;
+mod audio_ui;
 mod avatar;
 mod clipboard;
 mod complete;

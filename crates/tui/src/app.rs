@@ -417,6 +417,9 @@ pub struct Areas {
     /// The paperclip: send a file.
     pub attach_button: Rect,
     pub emoji_button: Rect,
+    pub mic_button: Rect,
+    pub audio: Vec<(Rect, crate::audio::Command)>,
+    pub recorder_buttons: Vec<(Rect, usize)>,
     pub emoji_window: Rect,
     pub emoji_cells: Vec<(Rect, usize)>,
     pub emoji_categories: Vec<(Rect, usize)>,
@@ -460,6 +463,7 @@ pub struct Areas {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     OpenUrl(String),
+    Audio(crate::audio::Command),
     NowPlaying {
         account: BareJid,
         chat: BareJid,
@@ -902,6 +906,10 @@ pub struct App {
     unread_return: Option<(BareJid, BareJid)>,
     pub switcher: Option<usize>,
     pub emoji: Option<crate::emoji::Picker>,
+    pub audio_info: BTreeMap<PathBuf, Result<crate::audio::Info, String>>,
+    pub audio_pending: BTreeSet<PathBuf>,
+    pub playback: crate::audio::Playback,
+    pub recorder: Option<crate::audio_ui::Recorder>,
     pub contacts: BTreeSet<(BareJid, BareJid)>,
     pub focus: Focus,
     pub input: String,
@@ -1048,6 +1056,10 @@ impl App {
             unread_return: None,
             switcher: None,
             emoji: None,
+            audio_info: BTreeMap::new(),
+            audio_pending: BTreeSet::new(),
+            playback: Default::default(),
+            recorder: None,
             contacts: BTreeSet::new(),
             focus: Focus::Input,
             input: String::new(),
@@ -2151,6 +2163,9 @@ impl App {
             self.quit = true;
             return vec![Action::Quit];
         }
+        if self.recorder.is_some() {
+            return self.recorder_key(key);
+        }
         if let Some(picker) = self.emoji.as_mut()
             && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
@@ -2973,6 +2988,7 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let local_audio = crate::audio::supported(&path).then(|| path.clone());
         let action = Action::Upload {
             account: chat.account.clone(),
             to: chat.jid.clone(),
@@ -2989,6 +3005,15 @@ impl App {
             encrypted,
             true,
         );
+        if let Some(path) = local_audio {
+            line.media = Some(MediaSlot {
+                url: format!("local-audio:{id}"),
+                link: String::new(),
+                name: line.text.clone(),
+                image: false,
+                state: MediaState::Ready(path),
+            });
+        }
         line.id = Some(id);
         line.delivery = Some(Delivery::Uploading(0));
         self.chats[index].scroll = 0;
@@ -3148,6 +3173,19 @@ impl App {
         let Some(account) = account else { return Vec::new() };
         let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
         let result = match (name, jid(0)) {
+            ("/play", _) if rest.is_empty() => return self.audio_command(None),
+            ("/stop", _) if rest.is_empty() => return vec![Action::Audio(crate::audio::Command::Stop)],
+            ("/seek", _) => {
+                if let Ok(seconds) = rest.parse::<f64>()
+                    && seconds.is_finite()
+                    && seconds >= 0.0
+                {
+                    return self.audio_command(Some(seconds));
+                }
+                self.status = tr!("usage: /seek SECONDS", "пример: /seek СЕКУНДЫ").into();
+                return Vec::new();
+            }
+            ("/record", _) if rest.is_empty() => return self.record_voice(),
             ("/emoji", _) if rest.is_empty() => return self.open_emoji(),
             ("/room", _) if rest.is_empty() => return self.open_room_admin(None),
             ("/om", _) if rest.is_empty() => {
@@ -4875,6 +4913,17 @@ impl App {
         let (x, y) = (mouse.column, mouse.row);
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         let inside_opt = |r: Option<Rect>| r.is_some_and(inside);
+        if self.recorder.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((_, button)) = self.areas.recorder_buttons.iter().find(|(r, _)| inside(*r)) {
+                    return self.recorder_button(*button);
+                }
+                if let Some((_, command)) = self.areas.audio.iter().find(|(r, _)| inside(*r)) {
+                    return vec![Action::Audio(command.clone())];
+                }
+            }
+            return Vec::new();
+        }
         if let Some(picker) = self.emoji.as_mut() {
             let outcome = match mouse.kind {
                 MouseEventKind::ScrollUp => picker.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
@@ -4981,6 +5030,7 @@ impl App {
         // Selecting text in the conversation: a drag from a place that is not a link.
         let on_link = self.areas.nicks.iter().any(|(r, _)| inside(*r))
             || self.areas.files.iter().any(|(r, _)| inside(*r))
+            || self.areas.audio.iter().any(|(r, _)| inside(*r))
             || self.areas.links.iter().any(|(r, _)| inside(*r))
             || self.areas.fetches.iter().any(|(r, _)| inside(*r))
             || inside_opt(self.areas.older);
@@ -5107,6 +5157,10 @@ impl App {
                     return self.toggle_omemo();
                 } else if inside(self.areas.mute_button) {
                     return self.set_muted(!self.current().is_some_and(|c| c.muted));
+                } else if let Some((_, command)) = self.areas.audio.iter().find(|(r, _)| inside(*r)) {
+                    return vec![Action::Audio(command.clone())];
+                } else if inside(self.areas.mic_button) {
+                    return self.record_voice();
                 } else if inside(self.areas.emoji_button) {
                     return self.open_emoji();
                 } else if inside(self.areas.attach_button) {

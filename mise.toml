@@ -1,4 +1,6 @@
 [tools]
+# Build-only: bundled Opus. No external player/recorder is needed at runtime.
+cmake = "3.31.10"
 rust = "1.99.1"
 uv = "0.13.4"
 # Only for building for other machines (`mise run build-arm`): zig is the C compiler and
