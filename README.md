@@ -26,9 +26,9 @@ accounts, and keyboard and mouse controls.
 - [Development and testing](#development-and-testing)
 - [License](#license)
 
-![A group chat in omtalk: folders on the left, a shared picture, the room's avatar and topic on the right](docs/screenshot-room.webp)
+![A group chat in omtalk: folders on the left, a shared picture and a voice message with its waveform, the room's avatar and topic on the right](docs/screenshot-room.webp)
 
-![A direct chat in omtalk: read ticks, a reaction, the contact's avatar and OMEMO keys](docs/screenshot-chat.webp)
+![The settings window in omtalk: interface, notifications and this chat's own notifications](docs/screenshot-settings.webp)
 
 ## Install and first run
 
