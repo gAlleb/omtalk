@@ -4680,6 +4680,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn startup_read_marker_for_a_room_created_after_sync() {
+        use super::*;
+        use crate::config::Modifier;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("history.db")).unwrap();
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let room: BareJid = "chat5@muc.example.org".parse().unwrap();
+        let message = |at: i64| Incoming {
+            peer: room.clone(),
+            sender: "bob@example.org".parse().unwrap(),
+            nick: Some("bob".into()),
+            device: None,
+            direction: Direction::Incoming,
+            encrypted: false,
+            text: Some(format!("message {at}")),
+            at: Some(at),
+            not_for_this_device: false,
+            id: Some(format!("m{at}")),
+            markable: false,
+            archive_id: Some(format!("a{at}")),
+            untrusted: false,
+            reply_to: None,
+            replaces: None,
+            shared_file: false,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&me);
+        app.select(server);
+        // A room bookmarked on the other laptop does not exist locally yet.
+        assert!(!app.chats.iter().any(|c| c.jid == room));
+        apply(
+            &mut app,
+            Msg::ReadMarks {
+                account: me.clone(),
+                marks: vec![(room.clone(), "a500".into())],
+            },
+            &shared,
+        );
+        let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+        for at in 401..506 {
+            let message = message(at);
+            keep(&shared, &me, &message);
+            apply(
+                &mut app,
+                Msg::Incoming {
+                    account: me.clone(),
+                    message,
+                    at,
+                },
+                &shared,
+            );
+            assert_eq!(
+                app.chats[chat].unread,
+                usize::try_from((at - 500).max(0)).unwrap(),
+                "after archive message {at}, already-read history must not appear unread"
+            );
+        }
+        assert_eq!(app.chats[chat].unread, 5, "only messages 501–505 are unread");
+    }
+
     #[test]
     fn an_irc_chat_read_locally_stays_read_after_restart_without_live_archive_ids() {
         use crate::app::{App, ChatKind};

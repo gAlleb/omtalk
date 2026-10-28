@@ -1042,6 +1042,8 @@ pub struct App {
     /// Read frontiers to persist before waiting for another event, including messages
     /// that a bridge sent without an archive stanza-id.
     pub local_reads: BTreeMap<(BareJid, BareJid), omtalk_store::ReadPoint>,
+    /// Server read positions received before their chats are discovered.
+    pending_read_marks: BTreeMap<(BareJid, BareJid), (String, Option<usize>)>,
     /// The names contacts gave themselves (XEP-0172), after the roster's.
     pub nicknames: BTreeMap<(BareJid, BareJid), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
@@ -1155,6 +1157,7 @@ impl App {
             chat_notify: BTreeMap::new(),
             bot_checks: BTreeSet::new(),
             local_reads: BTreeMap::new(),
+            pending_read_marks: BTreeMap::new(),
         }
     }
 
@@ -1230,6 +1233,13 @@ impl App {
             return index;
         }
         let mut chat = Chat::new(account.clone(), jid.clone(), kind);
+        if let Some((id, after)) = self.pending_read_marks.remove(&(account.clone(), jid.clone())) {
+            chat.read_mark = Some(id);
+            chat.read_mark_here = after.is_some();
+            if let Some(after) = after {
+                chat.unread = after;
+            }
+        }
         if let Some(&on) = self.omemo_choice.get(&(account.clone(), jid.clone())) {
             chat.omemo = on;
         }
@@ -1833,6 +1843,8 @@ impl App {
                 .iter()
                 .position(|c| &c.account == account && c.jid == jid)
             else {
+                self.pending_read_marks
+                    .insert((account.clone(), jid), (id, after));
                 continue;
             };
             let chat = &mut self.chats[index];
@@ -6122,6 +6134,36 @@ mod tests {
             [Action::SetStatus(OwnStatus::default())]
         );
         assert_eq!(app.own_status, OwnStatus::default());
+    }
+
+    #[test]
+    fn undiscovered_chats_keep_the_latest_read_mark_per_account() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let other = jid("other@example.org");
+        let room = jid("new@muc.example.org");
+        app.read_marks(&me, vec![(room.clone(), "old".into(), Some(9))]);
+        app.read_marks(&me, vec![(room.clone(), "latest".into(), None)]);
+        app.read_marks(&other, vec![(room.clone(), "other".into(), Some(2))]);
+        assert!(!app.chats.iter().any(|c| c.jid == room));
+
+        let mine = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+        assert_eq!(app.chats[mine].read_mark.as_deref(), Some("latest"));
+        assert!(!app.chats[mine].read_mark_here);
+        assert_eq!(app.chats[mine].unread, 0);
+        let theirs = app.chat(&other, &room, ChatKind::Room { nick: "other".into() });
+        assert_eq!(app.chats[theirs].read_mark.as_deref(), Some("other"));
+        assert!(app.chats[theirs].read_mark_here);
+        assert_eq!(app.chats[theirs].unread, 2);
+
+        // A later update goes straight to the existing chat. Closing and reopening
+        // must not resurrect the earlier pending mark.
+        app.read_marks(&other, vec![(room.clone(), "newer".into(), Some(0))]);
+        assert_eq!(app.chats[theirs].read_mark.as_deref(), Some("newer"));
+        assert_eq!(app.chats[theirs].unread, 0);
+        app.remove_chat(theirs);
+        let reopened = app.chat(&other, &room, ChatKind::Room { nick: "other".into() });
+        assert!(app.chats[reopened].read_mark.is_none());
     }
 
     #[test]
