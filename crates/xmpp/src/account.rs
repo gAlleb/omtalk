@@ -404,14 +404,6 @@ async fn run(
             biased;
             event = client.next() => match event {
                 Some(event) => {
-                    if let ClientEvent::Stanza(Stanza::Presence(presence))=&event {
-                        crate::diagnostics::room_presence("wire",own,||format!("from={:?} type={:?} muc_x={} muc_item={} parsed={:?}",
-                            presence.from,presence.type_,
-                            presence.payloads.iter().any(|x|x.is("x",xmpp_parsers::ns::MUC_USER)),
-                            presence.payloads.iter().find(|x|x.is("x",xmpp_parsers::ns::MUC_USER)).is_some_and(|x|x.get_child("item",xmpp_parsers::ns::MUC_USER).is_some()),
-                            muc::occupant(presence).map(|o|(o.room,o.nick,o.present,o.is_self,o.new_nick))));
-                    }
-                    if let ClientEvent::Online{resumed,..}=&event {crate::diagnostics::room_presence("wire-session",own,||format!("resumed={resumed}"));}
                     heard = tokio::time::Instant::now();
                     if let ClientEvent::Online { .. } = &event {
                         lost = false;

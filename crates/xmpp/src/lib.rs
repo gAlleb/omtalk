@@ -11,7 +11,6 @@ pub mod bookmarks;
 pub mod chatstates;
 mod config;
 pub mod corrections;
-pub mod diagnostics;
 mod disco;
 mod error;
 mod event;
