@@ -89,6 +89,9 @@ pub struct MediaSlot {
     pub name: String,
     pub image: bool,
     pub state: MediaState,
+    /// An ordinary link to a picture, shown as one (`image_links`): the link stays in
+    /// sight above it, unlike a file shared as such.
+    pub preview: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +114,7 @@ impl MediaSlot {
             name: media.name(),
             image: media.is_image(),
             state: MediaState::Loading,
+            preview: false,
         }
     }
 }
@@ -124,7 +128,10 @@ impl Line {
         if !enabled {
             self.media = None;
         } else if self.media.is_none() {
-            self.media = omtalk_media::Media::image_link(&self.text).map(|m| MediaSlot::new(&self.text, m));
+            self.media = omtalk_media::Media::image_link(&self.text).map(|m| MediaSlot {
+                preview: true,
+                ..MediaSlot::new(&self.text, m)
+            });
         }
     }
 
@@ -3037,6 +3044,7 @@ impl App {
                 name: line.text.clone(),
                 image: false,
                 state: MediaState::Ready(path),
+                preview: false,
             });
         }
         line.id = Some(id);

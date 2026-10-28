@@ -1254,14 +1254,41 @@ pub fn message_rows(
             rows.push(header);
         }
         let marker = icons.plain_mark;
+        // A picture from an ordinary link: the link first, as the message it is, then
+        // the picture under it.
+        if let Some(slot) = line.media.as_ref().filter(|s| s.preview) {
+            let text_width = if line.encrypted {
+                body_width
+            } else {
+                body_width.saturating_sub(marker.width()).max(1)
+            };
+            let mut first = true;
+            for styled in styled_wrap(&slot.link, text_width, Style::default().fg(theme::text())) {
+                let mut spans = vec![Span::raw(pad.clone())];
+                if !line.encrypted {
+                    spans.push(Span::styled(
+                        if first {
+                            marker.to_owned()
+                        } else {
+                            " ".repeat(marker.width())
+                        },
+                        Style::default().fg(theme::warn()),
+                    ));
+                }
+                spans.extend(styled);
+                rows.push(TextLine::from(spans).into());
+                first = false;
+            }
+        }
         if let Some(slot) = &line.media {
             let path = match &slot.state {
                 MediaState::Ready(path) => Some(path.clone()),
                 _ => None,
             };
             if slot.image && path.is_some() && ready(&slot.url) {
-                // A picture's rows hold no text: its time and name on a row of their own.
-                if !line.encrypted {
+                // A picture's rows hold no text: its time and name on a row of their own
+                // (for a link's picture, the link's row has them already).
+                if !slot.preview && !line.encrypted {
                     rows.push(
                         TextLine::from(vec![
                             Span::raw(pad.clone()),
@@ -1269,7 +1296,7 @@ pub fn message_rows(
                         ])
                         .into(),
                     );
-                } else if heads.last().is_some_and(|(at, _)| *at == rows.len()) {
+                } else if !slot.preview && heads.last().is_some_and(|(at, _)| *at == rows.len()) {
                     rows.push(TextLine::from(pad.clone()).into());
                 }
                 for row in 0..PICTURE_ROWS {
@@ -1333,7 +1360,7 @@ pub fn message_rows(
                 ),
             };
             let mut spans = vec![Span::raw(pad.clone())];
-            if !line.encrypted {
+            if !line.encrypted && !slot.preview {
                 spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
             }
             let path_audio = path.as_ref().filter(|p| crate::audio::supported(p)).cloned();
@@ -7758,6 +7785,40 @@ mod tests {
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn a_pictures_link_stays_in_sight_above_its_preview() {
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(bob);
+        let link = "https://example.org/photos/sunset.jpg";
+        let mut line = Line::message(1_700_000_000, "bob".into(), link.into(), false, false);
+        line.set_image_links(true);
+        assert!(line.media.as_ref().is_some_and(|m| m.preview));
+        app.push(bob, line);
+        for compact in [false, true] {
+            app.compact = compact;
+            let text = screen(&mut app, 180, 20);
+            let rows: Vec<&str> = text.lines().collect();
+            let at = rows.iter().position(|r| r.contains(link)).expect(&text);
+            let file = rows
+                .iter()
+                .position(|r| r.contains("sunset.jpg") && !r.contains(link))
+                .expect(&text);
+            assert!(at < file, "the link above the picture\n{text}");
+            assert_eq!(
+                text.matches(app.icons.plain_mark).count(),
+                1,
+                "the unencrypted mark once\n{text}"
+            );
+            // A click on it opens it, as any link.
+            assert!(app.areas.links.iter().any(|(_, url)| url == link), "{text}");
+        }
+        // A file shared as such shows no link above it.
+        let shared = Line::message_sharing(1, "bob".into(), link.into(), true, false, true);
+        assert!(shared.media.as_ref().is_some_and(|m| !m.preview));
     }
 
     #[test]

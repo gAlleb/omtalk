@@ -260,6 +260,7 @@ preview in Alacritty.
 Ordinary HTTPS image links can also be shown inline: enable “Preview image links”
 in `/settings`, or set `[ui] image_links = true`. Off by default. The message must
 contain only a link ending in `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, or `.bmp`.
+The link stays visible and clickable above the picture.
 Previews also apply to local history; `auto_download = false` keeps downloads manual.
 This preference does not change the display of files sent as attachments.
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- With image-link previews on, the link stays in sight above its picture and opens on a click; it was replaced by the picture.
 - A room's avatar set in `/room` is prepared as your own: its middle square (avatars are drawn round), at most 256×256, made smaller when it would be too large for the server. It was shrunk to 512 on its longer side, uncropped and of any size.
 - `/nickname` and `/avatar` choose their account as the other commands do (the active one) and take `--account` for another.
 - **`/avatar path`** sets your avatar from a picture: its middle square, at most 256×256, as PNG, made smaller still when it would be too large for a server; Gajim, Monal and Conversations show it at once (XEP-0084). `/avatar` alone takes it away. Tab completes the path.
