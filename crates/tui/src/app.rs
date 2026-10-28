@@ -1952,7 +1952,10 @@ impl App {
     fn push_archived(&mut self, index: usize, line: Line) {
         let seen = self.selected == Some(index) && self.focused;
         let chat = &mut self.chats[index];
-        if !seen && !line.notice && !line.outgoing {
+        // The archive comes oldest first: while the message another client read up to
+        // has not come, what comes is before it, read there, not new.
+        let read_elsewhere = chat.read_mark.is_some() && !chat.read_mark_here;
+        if !seen && !line.notice && !line.outgoing && !read_elsewhere {
             chat.unread += 1;
         }
         let at = chat
@@ -6160,6 +6163,47 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::Displayed { .. }))
         );
+    }
+
+    #[test]
+    fn a_rooms_archive_read_elsewhere_never_counts_as_new_while_it_comes() {
+        let mut app = app();
+        let me = jid("me@example.org");
+        let room = app.chat(
+            &me,
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        let other = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
+        app.select(other);
+        // Read up to r5 on the other laptop; r5 is not here yet.
+        app.read_marks(&me, vec![(jid("team@muc.example.org"), "r5".into(), None)]);
+        let mut seen = Vec::new();
+        for i in 1..=8 {
+            let id = format!("r{i}");
+            let archived = Incoming {
+                peer: jid("team@muc.example.org"),
+                sender: jid("bob@example.org"),
+                nick: Some("bob".into()),
+                device: Some(1),
+                direction: Direction::Incoming,
+                encrypted: true,
+                text: Some(format!("сообщение {i}")),
+                at: Some(i),
+                not_for_this_device: false,
+                id: Some(id.clone()),
+                markable: false,
+                archive_id: Some(id),
+                untrusted: false,
+                reply_to: None,
+                replaces: None,
+                shared_file: false,
+            };
+            app.on_incoming(&me, &archived, 100);
+            seen.push(app.chats[room].unread);
+        }
+        // Read there up to r5: nothing new before it, then r6, r7, r8 one by one.
+        assert_eq!(seen, [0, 0, 0, 0, 0, 1, 2, 3]);
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **A room's archive read on another device no longer counts as new while it comes in.** The archive comes oldest first; until the message read up to elsewhere arrives, what comes is read already. Before, the count climbed with every page (to hundreds in a busy room) and dropped only when that message came.
+- On login what is read is asked first, for up to three seconds, before rooms and the archive are caught up, so the first pages are counted right too; a slow answer does not hold the rooms up.
 - With image-link previews on, the link stays in sight above its picture and opens on a click; it was replaced by the picture.
 - A room's avatar set in `/room` is prepared as your own: its middle square (avatars are drawn round), at most 256×256, made smaller when it would be too large for the server. It was shrunk to 512 on its longer side, uncropped and of any size.
 - `/nickname` and `/avatar` choose their account as the other commands do (the active one) and take `--account` for another.
