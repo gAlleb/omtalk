@@ -1414,6 +1414,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             text,
         } => app.server_notice(&account, text, now()),
         Msg::Connection { account, state } => {
+            omtalk_xmpp::diagnostics::room_presence("ui-connection", &account, || format!("state={state:?}"));
             let index = app.server_chat(&account);
             if app.connection.get(&account) != Some(&state) {
                 app.notice(Some(index), state.words(), now());
@@ -1482,6 +1483,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             status,
             mark,
         } => {
+            omtalk_xmpp::diagnostics::room_presence("ui-before", &account, || {
+                format!(
+                    "room={room} nick={nick:?} present={present} new_nick={new_nick:?} chat_exists={} listed={}",
+                    app.chats.iter().any(|c| c.account == account && c.jid == room),
+                    app.chats
+                        .iter()
+                        .find(|c| c.account == account && c.jid == room)
+                        .is_some_and(|c| c.occupants.contains_key(&nick))
+                )
+            });
             // A nick changed: the same person, a new name, said in the room.
             if let Some(new) = new_nick
                 && let Some(index) = app
@@ -1490,6 +1501,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     .position(|c| c.account == account && c.jid == room)
             {
                 app.rename_occupant(index, &nick, &new, now());
+                omtalk_xmpp::diagnostics::room_presence("ui-renamed", &account, || {
+                    format!(
+                        "room={room} old={nick:?} new={new:?} old_listed={} new_listed={}",
+                        app.chats[index].occupants.contains_key(&nick),
+                        app.chats[index].occupants.contains_key(&new)
+                    )
+                });
                 return;
             }
             // Entering, the room tells who is there before it confirms the entry: the
@@ -1514,12 +1532,19 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                         Some(mark) => chat.occupant_mark.insert(nick.clone(), mark),
                         None => chat.occupant_mark.remove(&nick),
                     };
-                    chat.occupants.insert(nick, real);
+                    chat.occupants.insert(nick.clone(), real);
                 } else {
                     chat.occupant_status.remove(&nick);
                     chat.occupant_mark.remove(&nick);
                     chat.occupants.remove(&nick);
                 }
+                omtalk_xmpp::diagnostics::room_presence("ui-after", &account, || {
+                    format!(
+                        "room={room} nick={nick:?} listed={} count={}",
+                        chat.occupants.contains_key(&nick),
+                        chat.occupants.len()
+                    )
+                });
             }
         }
     }
@@ -1928,6 +1953,15 @@ fn counted(
 /// With OMTALK_LOG set, each presence that comes into that file too, with what omtalk
 /// makes of it: for finding out why a room's participants do not show.
 fn trace_presence(account: &BareJid, presence: &xmpp_parsers::presence::Presence, xmpp: &Account) {
+    omtalk_xmpp::diagnostics::room_presence("pump", account, || {
+        format!(
+            "from={:?} type={:?} tracked={} parsed={:?}",
+            presence.from,
+            presence.type_,
+            presence.from.as_ref().is_some_and(|f| xmpp.in_room(&f.to_bare())),
+            muc::occupant(presence).map(|o| (o.room, o.nick, o.present, o.is_self, o.new_nick))
+        )
+    });
     use std::io::Write;
     let Some(path) = std::env::var_os("OMTALK_LOG") else {
         return;
@@ -4304,7 +4338,7 @@ mod tests {
             shared.store.remember_room(&me, room, "me").unwrap();
         }
         let pump = tokio::spawn(pump(events, shared.clone()));
-        let startup = tokio::spawn(come_online(me, account.clone(), omemo, shared));
+        let startup = tokio::spawn(come_online(me.clone(), account.clone(), omemo, shared.clone()));
         timeout(Duration::from_secs(5), async {
             loop {
                 if matches!(rx.recv().await, Some(Msg::Joined { room, .. }) if room == ready) {
@@ -4318,6 +4352,46 @@ mod tests {
             !startup.is_finished(),
             "the other room is still waiting for its self-presence"
         );
+        // A real unavailable from another client must traverse Account -> pump ->
+        // apply and remove the IRC-style nick without any roster-reset changes.
+        account.make_private(&ready).await.unwrap();
+        account
+            .set_affiliation(&ready, silent.jid(), omtalk_xmpp::Affiliation::Member)
+            .await
+            .unwrap();
+        let mut app = App::new(vec![me.clone()], crate::config::Modifier::Ctrl, 26, 30);
+        let index = app.chat(&me, &ready, ChatKind::Room { nick: "me".into() });
+        app.select(index);
+        silent.join(&ready, "xsmart").await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = rx.recv().await.unwrap();
+                let found =
+                    matches!(&msg,Msg::Occupant{room,nick,present:true,..}if room==&ready&&nick=="xsmart");
+                apply(&mut app, msg, &shared);
+                if found {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("join presence reaches UI");
+        assert!(app.chats[index].occupants.contains_key("xsmart"));
+        silent.leave(&ready, "xsmart").await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = rx.recv().await.unwrap();
+                let found =
+                    matches!(&msg,Msg::Occupant{room,nick,present:false,..}if room==&ready&&nick=="xsmart");
+                apply(&mut app, msg, &shared);
+                if found {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("departure presence reaches UI");
+        assert!(!app.chats[index].occupants.contains_key("xsmart"));
         startup.abort();
         pump.abort();
         account.leave(&ready, "me").await.unwrap();

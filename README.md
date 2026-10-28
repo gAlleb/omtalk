@@ -613,6 +613,14 @@ Server discovery uses SRV. `--host HOST [--port PORT]` selects STARTTLS manually
 | `tests/prosody` | a disposable Prosody 13 for integration tests |
 | `tests/oracle` | the reference device on python-omemo; `crates/omemo/tests/oracle.rs` checks against it byte for byte |
 
+### Presence diagnostics
+
+To diagnose a participant that remains listed after leaving, start
+`OMTALK_PRESENCE_LOG=/tmp/omtalk-presence.log omtalk`. This optional trace records
+presence reception, room routing and the roster before/after its update, plus
+connection changes. It does not record message bodies or keyboard input. The file
+rotates at 1 MiB, retaining one `.1` file; newly created logs have owner-only access.
+
 ## License
 
 GPL-3.0-or-later: the GNU General Public License, version 3 or any later version. The
