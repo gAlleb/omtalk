@@ -1951,13 +1951,19 @@ fn trace_presence(account: &BareJid, presence: &xmpp_parsers::presence::Presence
 /// After every new login: personal catch-up, room entry and read positions proceed
 /// independently, so a slow archive or publication cannot hold the rooms up.
 async fn come_online(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
+    // What is read first, so that the archive coming next counts only what came after
+    // it; but a slow answer must not hold the rooms up (READ_MARKS_FIRST), and what it
+    // missed the second reading at the end puts right.
+    let _ = tokio::time::timeout(READ_MARKS_FIRST, sync_read_marks(&account, &xmpp, &shared)).await;
     tokio::join!(
         come_online_messages(account.clone(), xmpp.clone(), omemo.clone(), shared.clone()),
         come_online_rooms(&account, &xmpp, &omemo, &shared),
-        sync_read_marks(&account, &xmpp, &shared),
     );
     sync_read_marks(&account, &xmpp, &shared).await;
 }
+
+/// How long the archive waits on login for what is read.
+const READ_MARKS_FIRST: std::time::Duration = std::time::Duration::from_secs(3);
 
 async fn come_online_messages(account: BareJid, xmpp: Account, omemo: Arc<Omemo>, shared: Shared) {
     let tell = |msg| drop(shared.tx.send(msg));
