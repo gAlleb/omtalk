@@ -2714,15 +2714,21 @@ fn reaction_details(frame: &mut Frame, app: &mut App, screen: Rect) {
 fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
     let Some(picker) = app.picker else { return };
     // Each reaction in a cell of four: an emoji is two wide, some draw wider than said.
-    let width = (crate::app::QUICK_REACTIONS.len() * 4 + 2) as u16;
-    let height = 3;
-    let x = picker.x.min(screen.right().saturating_sub(width));
+    let columns = screen.width.saturating_sub(2).min(24) / 4;
+    if columns == 0 || screen.height < 3 {
+        return;
+    }
+    let width = columns * 4 + 2;
+    let rows = crate::app::QUICK_REACTIONS.len().div_ceil(columns as usize) as u16;
+    let height = (rows + 2).min(screen.height);
+    let x = picker.x.clamp(screen.x, screen.right() - width);
     let y = if picker.y >= screen.y + height {
         picker.y - height
     } else {
         picker.y + 1
     };
-    let area = Rect::new(x, y, width.min(screen.width), height);
+    let y = y.clamp(screen.y, screen.bottom() - height);
+    let area = Rect::new(x, y, width, height);
     clear(frame, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2730,8 +2736,13 @@ fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     for (i, reaction) in crate::app::QUICK_REACTIONS.iter().enumerate() {
-        let place = Rect::new(inner.x + (i * 4) as u16, inner.y, 4, 1);
-        if place.right() > inner.right() {
+        let place = Rect::new(
+            inner.x + (i % columns as usize) as u16 * 4,
+            inner.y + (i / columns as usize) as u16,
+            4,
+            1,
+        );
+        if place.bottom() > inner.bottom() {
             break;
         }
         frame.render_widget(Paragraph::new(format!(" {reaction}")), place);
@@ -6757,7 +6768,12 @@ mod tests {
         app.on_mouse(at(MouseEventKind::Down(MouseButton::Right), row.x + 4, row.y));
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("👍") && text.contains("🙏"), "{text}");
-        let &(button, reaction) = &app.areas.reaction_buttons[2];
+        assert_eq!(app.areas.reaction_buttons.len(), 12);
+        assert_eq!(
+            app.areas.reaction_buttons[6].0.y,
+            app.areas.reaction_buttons[0].0.y + 1
+        );
+        let &(button, reaction) = &app.areas.reaction_buttons[8];
         let sent = app.on_mouse(at(
             MouseEventKind::Down(MouseButton::Left),
             button.x + 1,
@@ -6777,6 +6793,38 @@ mod tests {
                 .is_empty()
         );
         assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn all_quick_reactions_remain_clickable_at_screen_edges_and_in_narrow_windows() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chat = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
+        app.select(chat);
+        let mut line = crate::app::Line::message(1, "bob".into(), "message".into(), false, false);
+        line.id = Some("message-id".into());
+        app.chats[chat].lines.push(line);
+        for (width, height) in [(100, 20), (22, 10)] {
+            for (x, y) in [(0, 0), (width - 1, height - 1)] {
+                app.picker = Some(crate::app::Picker { chat, line: 0, x, y });
+                screen(&mut app, width, height);
+                assert_eq!(app.areas.reaction_buttons.len(), 12);
+                let buttons = app.areas.reaction_buttons.clone();
+                for (rect, _) in &buttons {
+                    assert!(rect.right() <= width && rect.bottom() <= height);
+                }
+                let (last, _) = buttons.last().unwrap();
+                let actions = app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: last.x + 1,
+                    row: last.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert!(matches!(&actions[..], [Action::React { id, .. }] if id == "message-id"));
+                assert!(app.picker.is_none());
+            }
+        }
     }
 
     #[test]

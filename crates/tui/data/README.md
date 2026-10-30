@@ -1,9 +1,11 @@
 # Emoji catalog
 
-`emoji.tsv` contains 375 everyday fully-qualified sequences from Unicode Emoji 17.0,
+`emoji.tsv` contains 991 everyday fully-qualified sequences from Unicode Emoji 17.0,
 selected in `common-emoji.txt` without skin-tone or gender duplicates,
 ordered by the Unicode catalog, with Russian CLDR 48 names and search keywords.
 Columns: group index, emoji sequence, English name, Russian name, Russian keywords.
+The selection includes all faces and emotions, animals and plants, food and drink,
+and activities, plus expanded gestures, transport, weather, music and tools.
 All data is included in the binary; the picker does not access the network.
 
 Sources (Unicode, Inc.; see `UNICODE-LICENSE.txt`):

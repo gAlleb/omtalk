@@ -171,14 +171,16 @@ mod tests {
     fn catalog_keeps_whole_sequences_and_searches_russian_and_english() {
         let entries = catalog();
         assert!(
-            (300..=400).contains(&entries.len()),
-            "keep the everyday picker compact"
+            (900..=1000).contains(&entries.len()),
+            "keep the expanded everyday selection without variant duplicates"
         );
         let unique: std::collections::BTreeSet<_> = entries.iter().map(|e| e.symbol).collect();
         assert_eq!(unique.len(), entries.len());
-        for symbol in ["😀", "👍", "🇷🇺", "❤️"] {
+        for symbol in ["😀", "👍", "🇷🇺", "❤️", "🫠", "🦦", "🪿", "🧬", "🙂‍↔️"]
+        {
             assert!(unique.contains(symbol));
         }
+        assert!(entries.iter().all(|e| !e.russian.is_empty()));
         let mut picker = Picker::new();
         picker.paste("кошка");
         assert!(picker.matches.iter().any(|i| entries[*i].symbol == "🐈"));
