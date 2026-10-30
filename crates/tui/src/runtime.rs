@@ -1330,6 +1330,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if fresh {
                 app.online.retain(|(a, _), _| *a != account);
                 app.bot_checks.retain(|(a, _)| *a != account);
+                // A new session gets a complete room roster. A nick absent from it
+                // has left while we were away; keeping the old map would retain it.
+                for chat in app.chats.iter_mut().filter(|c| c.account == account) {
+                    chat.occupants.clear();
+                    chat.occupant_status.clear();
+                    chat.occupant_mark.clear();
+                }
                 if let Some(peer) = app
                     .current()
                     .filter(|c| c.kind == ChatKind::Direct && c.account == account)
@@ -1541,6 +1548,14 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
         }
         match &event {
             Event::Online { resumed, jid } => {
+                // Clear the nickname cache before catch-up or room entry can use it.
+                if let Err(e) = omemo.handle(&event).await {
+                    tell(Msg::Notice {
+                        account: account.clone(),
+                        chat: None,
+                        text: e.to_string(),
+                    });
+                }
                 tell(Msg::Bound {
                     account: account.clone(),
                     resource: jid.resource().to_string(),
@@ -1574,6 +1589,7 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         shared.clone(),
                     ));
                 }
+                continue;
             }
             Event::Reachable => tell(Msg::Connection {
                 account: account.clone(),
@@ -4137,6 +4153,89 @@ mod tests {
         let mut reset = App::new(vec![me], Modifier::Ctrl, 26, 30);
         restore_chat_notify(&store, &mut reset);
         assert!(reset.chat_notify.is_empty());
+    }
+
+    #[test]
+    fn a_new_session_rebuilds_room_rosters_but_a_resumed_one_keeps_them() {
+        use super::*;
+        use crate::config::Modifier;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: Store::open(&dir.path().join("state.db")).unwrap(),
+            tx,
+        };
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let other: BareJid = "other@example.org".parse().unwrap();
+        let room: BareJid = "#usue%irc.example.org@bridge.example.org".parse().unwrap();
+        let second: BareJid = "chat@conference.example.org".parse().unwrap();
+        for fresh in [false, true] {
+            let mut app = App::new(vec![me.clone(), other.clone()], Modifier::Ctrl, 26, 30);
+            let mut chats = Vec::new();
+            for (account, jid) in [(&me, &room), (&me, &second), (&other, &room)] {
+                let index = app.chat(account, jid, ChatKind::Room { nick: "me".into() });
+                let chat = &mut app.chats[index];
+                chat.occupants
+                    .insert("V_for_Vendetta".into(), Some(other.clone()));
+                chat.occupant_status
+                    .insert("V_for_Vendetta".into(), Default::default());
+                chat.occupant_mark.insert("V_for_Vendetta".into(), "@");
+                chat.members.push(other.clone());
+                chat.lines
+                    .push(Line::message(1, "nick".into(), "history".into(), false, false));
+                chat.unread = 3;
+                chat.read_mark = Some("read-before-sleep".into());
+                chats.push(index);
+            }
+            apply(
+                &mut app,
+                Msg::Bound {
+                    account: me.clone(),
+                    resource: "same-device".into(),
+                    fresh,
+                },
+                &shared,
+            );
+            for (i, index) in chats.iter().enumerate() {
+                let chat = &app.chats[*index];
+                let cleared = fresh && i < 2;
+                assert_eq!(chat.occupants.is_empty(), cleared);
+                assert_eq!(chat.occupant_status.is_empty(), cleared);
+                assert_eq!(chat.occupant_mark.is_empty(), cleared);
+                assert_eq!(chat.members, vec![other.clone()], "membership is not presence");
+                assert_eq!(chat.lines.len(), 1);
+                assert_eq!(chat.unread, 3);
+                assert_eq!(chat.read_mark.as_deref(), Some("read-before-sleep"));
+            }
+            // The new snapshot contains only the replacement nick, with no leave
+            // for the old one: exactly what happens after sleeping through a QUIT.
+            apply(
+                &mut app,
+                Msg::Occupant {
+                    account: me.clone(),
+                    room: room.clone(),
+                    nick: "V_for_Vendetta_".into(),
+                    real: None,
+                    present: true,
+                    new_nick: None,
+                    status: Default::default(),
+                    mark: None,
+                },
+                &shared,
+            );
+            let occupants = &app.chats[chats[0]].occupants;
+            assert!(occupants.contains_key("V_for_Vendetta_"));
+            assert_eq!(occupants.contains_key("V_for_Vendetta"), !fresh);
+            assert_eq!(occupants.len(), if fresh { 1 } else { 2 });
+        }
     }
 
     #[test]

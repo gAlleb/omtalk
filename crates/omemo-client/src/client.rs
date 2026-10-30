@@ -219,6 +219,12 @@ impl Omemo {
     /// Handles an event of this account. Returns the decrypted message, if the event was one.
     pub async fn handle(&self, event: &Event) -> Result<Option<Incoming>, Error> {
         match event {
+            Event::Online { resumed: false, .. } => {
+                // Presence from a new session rebuilds the room rosters. Old nick
+                // mappings must not survive a departure missed while disconnected.
+                self.occupants.lock().await.clear();
+                Ok(None)
+            }
             Event::Pep {
                 from, node, items, ..
             } if node == DEVICE_LIST_NODE => {
@@ -1224,6 +1230,45 @@ mod tests {
             parse_device_list(&[other]).is_empty(),
             "someone else's: just no devices"
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_session_discards_old_nick_mappings_but_resumption_keeps_them() {
+        let mut config = omtalk_xmpp::AccountConfig::new("me@localhost".parse().unwrap(), "unused");
+        config.server = omtalk_xmpp::Server::StartTls {
+            host: "127.0.0.1".into(),
+            port: 9,
+        };
+        let (mut accounts, _events) = omtalk_xmpp::Accounts::new();
+        let account = accounts.add(config).await;
+        let omemo = Omemo::new(account, State::new(omemo::OwnKeys::generate(0).unwrap()));
+        let real: BareJid = "departed@example.org".parse().unwrap();
+        let rooms: Vec<BareJid> = ["one@muc.localhost", "two@muc.localhost"]
+            .into_iter()
+            .map(|r| r.parse().unwrap())
+            .collect();
+        for room in &rooms {
+            omemo
+                .occupants
+                .lock()
+                .await
+                .insert(room.clone(), [("old-nick".into(), real.clone())].into());
+        }
+        let online = |resumed| Event::Online {
+            jid: "me@localhost/device".parse().unwrap(),
+            resumed,
+        };
+        omemo.handle(&online(true)).await.unwrap();
+        for room in &rooms {
+            assert_eq!(omemo.occupants(room).await.get("old-nick"), Some(&real));
+        }
+        omemo.handle(&online(false)).await.unwrap();
+        for room in &rooms {
+            assert!(
+                omemo.occupants(room).await.is_empty(),
+                "a departed nickname must not resolve to the previous session's JID"
+            );
+        }
     }
 
     fn encrypted(payload: bool) -> xml::Encrypted {
