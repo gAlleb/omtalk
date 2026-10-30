@@ -176,11 +176,14 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<_> = entries.iter().map(|e| e.symbol).collect();
         assert_eq!(unique.len(), entries.len());
-        for symbol in ["😀", "👍", "🇷🇺", "❤️", "🫠", "🦦", "🪿", "🧬", "🙂‍↔️"]
-        {
+        for symbol in ["😀", "👍", "🇷🇺", "❤️", "🫠", "🦦", "🪿", "🧬"] {
             assert!(unique.contains(symbol));
         }
         assert!(entries.iter().all(|e| !e.russian.is_empty()));
+        assert!(
+            entries.iter().all(|e| !e.symbol.contains('\u{200d}')),
+            "ZWJ sequences are unreliable in the supported terminal chain"
+        );
         let mut picker = Picker::new();
         picker.paste("кошка");
         assert!(picker.matches.iter().any(|i| entries[*i].symbol == "🐈"));

@@ -24,7 +24,15 @@ impl<W: Write> Backend for StableBackend<W> {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         let mut run = Vec::new();
+        let mut covered = None;
         for (x, y, cell) in content {
+            // Ratatui may emit trailing clears after a VS16 grapheme when it
+            // replaces text. We clear before drawing it below; writing into its
+            // second column afterwards would erase the whole glyph in tmux.
+            if covered.is_some_and(|(end, row)| y == row && x < end) {
+                continue;
+            }
+            covered = None;
             // Image protocols declare their own width and may carry escape sequences.
             // Keep those cells in the original backend's output path.
             let guard = !matches!(cell.diff_option, CellDiffOption::ForcedWidth(_))
@@ -46,6 +54,7 @@ impl<W: Write> Backend for StableBackend<W> {
             self.inner
                 .draw((0..cell.cell_width()).map(|offset| (x.saturating_add(offset), y, &blank)))?;
             self.inner.draw(std::iter::once((x, y, cell)))?;
+            covered = Some((x.saturating_add(cell.cell_width()), y));
         }
         if !run.is_empty() {
             self.inner.draw(run.into_iter())?;
@@ -137,6 +146,34 @@ mod tests {
         let mut fixed = Vec::new();
         StableBackend::new(&mut fixed).draw(cells.into_iter()).unwrap();
         assert_eq!(narrow_terminal(&fixed), ['❤', ' ', '│']);
+    }
+
+    #[test]
+    fn a_vs16_emoji_replacing_text_is_not_erased_by_a_trailing_diff_clear() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Style;
+        let area = Rect::new(0, 0, 3, 1);
+        let mut previous = Buffer::empty(area);
+        previous.set_string(0, 0, "AB│", Style::default());
+        let mut next = Buffer::empty(area);
+        next.set_string(0, 0, "❤️│", Style::default());
+        let diff = previous.diff(&next);
+        assert!(
+            diff.iter().any(|(x, _, _)| *x == 1),
+            "reproduce Ratatui's trailing clear"
+        );
+        let mut output = Vec::new();
+        StableBackend::new(&mut output).draw(diff.into_iter()).unwrap();
+        // In a wide terminal, a write to the covered column erases the whole
+        // grapheme. There must be no such write after the heart was drawn.
+        let text = String::from_utf8(output).unwrap();
+        let after_heart = text.split_once("❤️").unwrap().1;
+        assert!(!after_heart.contains("\x1b[1;2H"), "{text:?}");
+        assert!(
+            text[..text.find("❤️").unwrap()].contains("  "),
+            "old text must be cleared before the glyph instead"
+        );
     }
 
     #[test]
