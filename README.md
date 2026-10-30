@@ -140,7 +140,7 @@ disables the direct shortcut. Prefix+N remains available.
 
 Type `:` in an empty input to find a contact or open room by name or JID; use
 Up/Down and Enter to open it, Esc to cancel. `::text` sends `:text`, and
-`//settings` sends `/settings`. `/np` sends `/me np: Artist - Title` as an action from the first
+`//settings` sends `/settings`. `/np` sends `/me np: Artist — Title` as an action from the first
 playing MPRIS player (players sorted by name); requires `playerctl`. Nothing
 is sent if no player is playing or its title is unavailable.
 

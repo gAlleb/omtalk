@@ -45,7 +45,7 @@ fn format_track(artist: &str, title: &str) -> Option<String> {
     Some(if artist.trim().is_empty() {
         format!("/me np: {title}")
     } else {
-        format!("/me np: {} - {title}", artist.trim())
+        format!("/me np: {} — {title}", artist.trim())
     })
 }
 
@@ -55,7 +55,7 @@ mod tests {
     fn metadata_requires_a_title_and_allows_no_artist() {
         assert_eq!(
             super::format_track(" Artist ", " Title ").as_deref(),
-            Some("/me np: Artist - Title")
+            Some("/me np: Artist — Title")
         );
         assert_eq!(super::format_track("", "Title").as_deref(), Some("/me np: Title"));
         assert_eq!(super::format_track("Artist", " "), None);
