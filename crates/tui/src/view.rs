@@ -7749,7 +7749,7 @@ mod tests {
     }
 
     #[test]
-    fn up_and_down_go_through_what_was_sent_as_in_a_shell() {
+    fn up_and_down_go_through_sent_lines_and_saved_drafts() {
         use crossterm::event::{KeyCode, KeyEvent};
         let mut app = app_with_chat();
         app.focus = Focus::Input;
@@ -7774,8 +7774,12 @@ mod tests {
         key(&mut app, KeyCode::Down);
         assert_eq!(app.input, "второе");
         key(&mut app, KeyCode::Down);
-        assert_eq!(app.input, "черно", "past the newest: the draft again");
+        assert_eq!(app.input, "черно", "the draft is the newest history entry");
         assert_eq!(app.cursor, 5);
+        key(&mut app, KeyCode::Down);
+        assert!(app.input.is_empty(), "past the draft: an empty input");
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.input, "черно", "the unsent draft stays in history");
 
         // Several lines: the arrows move between them first.
         app.input = "раз\nдва".into();
@@ -7787,7 +7791,10 @@ mod tests {
             "to the line above"
         );
         key(&mut app, KeyCode::Up);
-        assert_eq!(app.input, "второе", "from the first line: the history");
+        assert_eq!(
+            app.input, "черно",
+            "from the first line: the previous saved draft"
+        );
     }
 
     #[test]

@@ -159,7 +159,9 @@ English names and Russian keywords. Data sources and the Unicode license are in
 
 The input line edits like a shell: Ctrl+W/U/K cut a word, to the start, or to the end;
 Ctrl+Y pastes what was cut; Ctrl+A/E move to the start/end; Ctrl+←/→ or Alt+B/F move by
-words. `↑`/`↓` recall messages and commands sent since startup; in multiline text they
+words. `↑`/`↓` recall messages, commands, and unsent drafts since startup. Leaving
+the current draft with an arrow saves it in that history; `↓` past the newest entry
+opens an empty line, and `↑` retrieves the saved draft. In multiline text the arrows
 move between lines first. Alt+Enter (or Shift+Enter where supported) starts a new line.
 Pasted multiline text is sent as one message, with indentation kept; the input grows
 up to eight lines.

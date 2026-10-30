@@ -1004,11 +1004,10 @@ pub struct App {
     /// Avatars drawn here with block characters (a terminal without pictures): the
     /// square picture by its key; with pictures, they are among the view's pictures.
     pub avatar_blocks: BTreeMap<String, image::DynamicImage>,
-    /// What was sent from the input line since omtalk started (messages and commands),
-    /// oldest first: ↑ and ↓ go through it, as in a shell.
+    /// Submitted lines and drafts saved when leaving the input via ↑/↓, oldest first.
     pub sent: Vec<String>,
-    /// Which of `sent` the input line shows now, and the draft it replaced.
-    pub recall: Option<(usize, String)>,
+    /// Which history entry the input shows; past the newest is an empty line.
+    pub recall: Option<usize>,
     /// The last command was refused or answered with how to use it: the line typed goes
     /// back into the input, to be put right instead of typed again.
     pub refused: bool,
@@ -2933,7 +2932,7 @@ impl App {
     }
 
     /// ↑ (`up`) or ↓ in the input line: within a text of several lines, to the line above
-    /// or below; from its first line up (its last down), through what was sent before.
+    /// or below; from its first line up (its last down), through the input history.
     fn recall_key(&mut self, up: bool) {
         let chars: Vec<char> = self.input.chars().collect();
         let line_start = |at: usize| chars[..at].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
@@ -2956,25 +2955,36 @@ impl App {
             self.cursor = (end + 1 + column).min(next_end);
             return;
         }
+        // Paste, completion and emoji insertion can edit a recalled line without
+        // going through input_key. Keep that edited text as a new draft too.
+        if self
+            .recall
+            .is_some_and(|at| self.sent.get(at) != Some(&self.input))
+        {
+            self.recall = None;
+        }
         let shown = match (self.recall.take(), up) {
-            (None, true) if !self.sent.is_empty() => {
+            (None, up) => {
+                let previous = self.sent.len().checked_sub(1);
                 let draft = std::mem::take(&mut self.input);
-                Some((self.sent.len() - 1, draft))
+                self.remember_input(draft);
+                if up {
+                    previous.or_else(|| self.sent.len().checked_sub(1))
+                } else {
+                    None
+                }
             }
-            (None, _) => None,
-            (Some((at, draft)), true) => Some((at.saturating_sub(1), draft)),
-            (Some((at, draft)), false) if at + 1 < self.sent.len() => Some((at + 1, draft)),
-            // Past the newest: back to what was being written.
-            (Some((_, draft)), false) => {
-                self.input = draft;
-                self.cursor = self.input.chars().count();
-                None
-            }
+            (Some(at), true) => Some(at.saturating_sub(1)),
+            (Some(at), false) => (at + 1 < self.sent.len()).then_some(at + 1),
         };
-        if let Some((at, draft)) = shown {
-            self.input = self.sent[at].clone();
-            self.cursor = self.input.chars().count();
-            self.recall = Some((at, draft));
+        self.input = shown.map(|at| self.sent[at].clone()).unwrap_or_default();
+        self.cursor = self.input.chars().count();
+        self.recall = shown;
+    }
+
+    fn remember_input(&mut self, input: String) {
+        if !input.trim().is_empty() && self.sent.last() != Some(&input) {
+            self.sent.push(input);
         }
     }
 
@@ -2994,10 +3004,7 @@ impl App {
             return Vec::new();
         }
         // Kept for ↑, once: the same line twice in a row is one entry.
-        let kept = input.trim().to_owned();
-        if self.sent.last() != Some(&kept) {
-            self.sent.push(kept);
-        }
+        self.remember_input(input.trim().to_owned());
         let escaped = input.starts_with("//") || input.starts_with("::");
         if escaped {
             input.remove(0);
@@ -7017,6 +7024,73 @@ mod tests {
         app.quit_asked = Some(std::time::Instant::now() - QUIT_AGAIN * 2);
         assert!(app.on_key(ctrl_c).is_empty());
         assert!(!app.quit);
+    }
+
+    #[test]
+    fn input_history_keeps_unsent_drafts_and_ends_with_an_empty_line() {
+        let mut app = app();
+        app.sent = vec!["oldest".into(), "previous".into()];
+        type_keys(&mut app, "не отправлено");
+        for (code, expected) in [
+            (KeyCode::Up, "previous"),
+            (KeyCode::Up, "oldest"),
+            (KeyCode::Up, "oldest"),
+            (KeyCode::Down, "previous"),
+            (KeyCode::Down, "не отправлено"),
+            (KeyCode::Down, ""),
+            (KeyCode::Down, ""),
+            (KeyCode::Up, "не отправлено"),
+            (KeyCode::Down, ""),
+        ] {
+            assert!(app.on_key(key(code)).is_empty(), "history never sends a draft");
+            assert_eq!(app.input, expected);
+            assert_eq!(app.cursor, expected.chars().count());
+        }
+        assert_eq!(app.sent, ["oldest", "previous", "не отправлено"]);
+    }
+
+    #[test]
+    fn input_history_can_store_the_first_draft_and_edited_recalled_text() {
+        let mut app = app();
+        type_keys(&mut app, "черновик");
+        assert!(app.on_key(key(KeyCode::Down)).is_empty());
+        assert!(app.input.is_empty());
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.input, "черновик");
+        // Editing a recalled draft creates a new entry; its original stays available.
+        app.on_paste("!");
+        app.on_key(key(KeyCode::Down));
+        assert!(app.input.is_empty());
+        for expected in ["черновик!", "черновик"] {
+            app.on_key(key(KeyCode::Up));
+            assert_eq!(app.input, expected);
+        }
+        assert_eq!(app.sent, ["черновик", "черновик!"]);
+        // Submitting the newest recalled line does not duplicate it in history.
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.sent, ["черновик", "черновик!"]);
+    }
+
+    #[test]
+    fn multiline_input_moves_between_lines_before_saving_the_whole_draft() {
+        let mut app = app();
+        app.sent = vec!["previous".into()];
+        let draft = "  первая\nвторая  ";
+        app.on_paste(draft);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.input, draft);
+        assert!(app.cursor < draft.find('\n').unwrap());
+        assert_eq!(app.sent, ["previous"]);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.input, "previous");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.input, draft, "keep whitespace in an unsent draft");
+        app.on_key(key(KeyCode::Down));
+        assert!(app.input.is_empty());
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.input, draft, "the draft survives leaving history");
+        assert_eq!(app.sent, ["previous", draft]);
     }
 
     #[test]
