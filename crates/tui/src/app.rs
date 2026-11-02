@@ -2237,6 +2237,9 @@ impl App {
             return self.emoji_outcome(outcome);
         }
         if let Some(cursor) = self.switcher {
+            let read = key.code == KeyCode::Char('r')
+                && (self.leader_pending
+                    || (!self.modifier.is_empty() && key.modifiers.contains(self.modifier)));
             match key.code {
                 KeyCode::Up => {
                     self.switcher = Some(cursor.saturating_sub(1));
@@ -2246,13 +2249,14 @@ impl App {
                     self.switcher = Some((cursor + 1).min(self.switch_targets().len().saturating_sub(1)));
                     return Vec::new();
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter | KeyCode::Char('r') if key.code == KeyCode::Enter || read => {
                     let target = self.switch_targets().get(cursor).cloned();
+                    self.leader_pending = false;
                     self.switcher = None;
                     self.input.clear();
                     self.cursor = 0;
                     if let Some((account, jid, _)) = target {
-                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        if read || key.modifiers.contains(KeyModifiers::SHIFT) {
                             return self
                                 .chats
                                 .iter()
@@ -2268,6 +2272,7 @@ impl App {
                     return Vec::new();
                 }
                 KeyCode::Esc => {
+                    self.leader_pending = false;
                     self.switcher = None;
                     self.input.clear();
                     self.cursor = 0;

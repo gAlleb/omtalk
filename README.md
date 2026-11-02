@@ -140,8 +140,9 @@ disables the direct shortcut. Prefix+N remains available.
 
 Right-click a room or direct chat in the chat list to mark its messages as read
 without opening it. The current conversation and draft stay in place. From the
-`:` search, select a result with Up/Down and press Shift+Enter to mark it read
-instead of opening it. Read state is saved and synced as when opening a chat;
+`:` search, select a result with Up/Down and press modifier+R (Ctrl+R by default)
+or prefix then R to mark it read instead of opening it. The search shows the
+configured shortcut. Read state is saved and synced as when opening a chat;
 the read-marker setting still controls whether the sender is notified.
 
 Type `:` in an empty input to find a contact or open room by name or JID; use

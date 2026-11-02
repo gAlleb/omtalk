@@ -2540,9 +2540,15 @@ fn switch_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         " Перейти: {} ",
         app.input.strip_prefix(':').unwrap_or_default()
     );
-    let block = pane(&title, true).title_bottom(tr!(
-        " ↑↓ · Enter: open · Shift+Enter: mark read · Esc ",
-        " ↑↓ · Enter: открыть · Shift+Enter: прочитано · Esc "
+    let read_key = match app.modifier {
+        KeyModifiers::CONTROL => "Ctrl+R".into(),
+        KeyModifiers::ALT => "Alt+R".into(),
+        KeyModifiers::SUPER => "Super+R".into(),
+        _ => format!("{} R", leader_label(app)),
+    };
+    let block = pane(&title, true).title_bottom(trf!(
+        " ↑↓ · Enter: open · {read_key}: mark read · Esc ",
+        " ↑↓ · Enter: открыть · {read_key}: прочитано · Esc "
     ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3914,9 +3920,9 @@ mod tests {
                     assert_eq!(app.switch_targets().len(), 2);
                     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
                     let text = screen(&mut app, 120, 35);
-                    assert!(text.contains("Shift+Enter"), "{text}");
+                    assert!(text.contains("Ctrl+R"), "{text}");
                     let actions = if method == "search-key" {
-                        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+                        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
                     } else {
                         let row = app.areas.switch_rows[1].0;
                         app.on_mouse(MouseEvent {
@@ -3958,6 +3964,77 @@ mod tests {
     }
 
     #[test]
+    fn search_read_shortcuts_follow_modifier_and_prefix_even_when_already_read() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for (modifier, flags, label) in [
+            (Modifier::Ctrl, KeyModifiers::CONTROL, "Ctrl+R"),
+            (Modifier::Alt, KeyModifiers::ALT, "Alt+R"),
+            (Modifier::Super, KeyModifiers::SUPER, "Super+R"),
+            (Modifier::None, KeyModifiers::NONE, "F6 R"),
+        ] {
+            let me = jid("me@example.org");
+            let mut app = App::new(vec![me.clone()], modifier, 26, 30);
+            app.leader = (KeyCode::F(6), KeyModifiers::NONE);
+            let current = app.server_chat(&me);
+            app.select(current);
+            let target = app.chat(&me, &jid("target@example.org"), ChatKind::Direct);
+            let mut line = Line::message(1, "bob".into(), "hello".into(), false, false);
+            line.archive_id = Some("archive".into());
+            app.push(target, line);
+            let show_right = app.show_right;
+            app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+            app.on_key(KeyEvent::new(app.leader.0, app.leader.1));
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(
+                !app.leader_pending && app.switcher.is_none(),
+                "Esc also cancels the prefix"
+            );
+            for via_prefix in [false, true] {
+                if flags.is_empty() && !via_prefix {
+                    continue;
+                }
+                // A repeated acknowledgement must not become navigation.
+                for _ in 0..2 {
+                    for c in ":target".chars() {
+                        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                    }
+                    let text = screen(&mut app, 120, 35);
+                    assert!(text.contains(label), "{text}");
+                    // Plain letters, including r, still filter the search.
+                    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+                    assert_eq!(app.input, ":targetr");
+                    assert!(app.switcher.is_some());
+                    app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                    if via_prefix {
+                        app.on_key(KeyEvent::new(app.leader.0, app.leader.1));
+                    }
+                    let actions = app.on_key(KeyEvent::new(
+                        KeyCode::Char('r'),
+                        if via_prefix { KeyModifiers::NONE } else { flags },
+                    ));
+                    assert!(actions.iter().all(|a| matches!(a, Action::Displayed { .. })));
+                    assert_eq!(app.chats[target].unread, 0);
+                    assert_eq!(app.selected, Some(current));
+                    assert!(app.switcher.is_none() && !app.leader_pending);
+                    assert_eq!(
+                        app.show_right, show_right,
+                        "R must not toggle the pane during search"
+                    );
+                }
+            }
+            // Enter still opens the chat; outside search, prefix+R still toggles the pane.
+            for c in ":target".chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(app.selected, Some(target));
+            app.on_key(KeyEvent::new(app.leader.0, app.leader.1));
+            app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+            assert_eq!(app.show_right, !show_right);
+        }
+    }
+
+    #[test]
     fn marking_a_search_contact_without_a_chat_does_not_open_or_create_it() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let me = jid("me@example.org");
@@ -3969,7 +4046,7 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         assert!(
-            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+            app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
                 .is_empty()
         );
         assert_eq!(app.chats.len(), 1);
