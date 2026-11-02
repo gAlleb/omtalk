@@ -2541,8 +2541,8 @@ fn switch_window(frame: &mut Frame, app: &mut App, screen: Rect) {
         app.input.strip_prefix(':').unwrap_or_default()
     );
     let block = pane(&title, true).title_bottom(tr!(
-        " ↑↓ · Enter · Esc · :: text ",
-        " ↑↓ · Enter · Esc · :: текст "
+        " ↑↓ · Enter: open · Shift+Enter: mark read · Esc ",
+        " ↑↓ · Enter: открыть · Shift+Enter: прочитано · Esc "
     ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3856,6 +3856,125 @@ mod tests {
         assert!(
             matches!(&actions[..], [Action::Services { request: crate::services::Request::Room { node, .. }, .. }] if node == "config")
         );
+    }
+
+    #[test]
+    fn chats_can_be_marked_read_by_mouse_or_search_without_opening_them() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        for method in ["sidebar", "search-key", "search-mouse"] {
+            for room in [false, true] {
+                let me = jid("me@example.org");
+                let other = jid("other@example.org");
+                let peer = jid("target@example.org");
+                let mut app = App::new(vec![me.clone(), other.clone()], Modifier::Ctrl, 26, 30);
+                let current = app.chat(&me, &jid("current@example.org"), ChatKind::Direct);
+                app.select(current);
+                for at in 0..100 {
+                    app.push(
+                        current,
+                        Line::message(at, "alice".into(), "history".into(), false, false),
+                    );
+                }
+                let kind = if room {
+                    ChatKind::Room { nick: "me".into() }
+                } else {
+                    ChatKind::Direct
+                };
+                let target = app.chat(&other, &peer, kind.clone());
+                let untouched = app.chat(&me, &peer, kind);
+                for index in [target, untouched] {
+                    let mut line = Line::message(42, "bob".into(), "hello".into(), false, false);
+                    line.archive_id = Some("archive".into());
+                    app.push(index, line);
+                }
+                let active = app.active.clone();
+                let focus = app.focus;
+                app.chats[current].scroll = 5;
+                app.chats[current].new_since = Some(10);
+                let actions = if method == "sidebar" {
+                    app.input = "unfinished draft".into();
+                    app.cursor = 4;
+                    screen(&mut app, 120, 35);
+                    let row = app.areas.chat_rows.iter().find(|(_, i)| *i == target).unwrap().0;
+                    let actions = app.on_mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Right),
+                        column: row.x,
+                        row: row.y,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    assert_eq!(app.input, "unfinished draft");
+                    assert_eq!(app.cursor, 4);
+                    actions
+                } else {
+                    app.collapsed.insert(crate::app::Group::Account(other.clone()));
+                    for c in ":target".chars() {
+                        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                    }
+                    // Same JID in two accounts: only the selected result is read.
+                    assert_eq!(app.switch_targets().len(), 2);
+                    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                    let text = screen(&mut app, 120, 35);
+                    assert!(text.contains("Shift+Enter"), "{text}");
+                    let actions = if method == "search-key" {
+                        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+                    } else {
+                        let row = app.areas.switch_rows[1].0;
+                        app.on_mouse(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Right),
+                            column: row.x,
+                            row: row.y,
+                            modifiers: KeyModifiers::NONE,
+                        })
+                    };
+                    assert!(app.collapsed.contains(&crate::app::Group::Account(other.clone())));
+                    assert!(app.switcher.is_none() && app.input.is_empty());
+                    actions
+                };
+                assert_eq!(
+                    actions,
+                    [Action::Displayed {
+                        account: other.clone(),
+                        to: peer,
+                        room,
+                        marker: None,
+                        archive_id: Some("archive".into()),
+                    }],
+                    "no history, avatar, device or member requests"
+                );
+                assert_eq!(app.selected, Some(current));
+                assert_eq!(app.active, active);
+                assert_eq!(app.focus, focus);
+                assert_eq!(app.chats[current].scroll, 5);
+                assert_eq!(app.chats[current].new_since, Some(10));
+                assert_eq!(app.chats[target].unread, 0);
+                assert_eq!(app.chats[untouched].unread, 1);
+                app.push(
+                    target,
+                    Line::message(43, "bob".into(), "new".into(), false, false),
+                );
+                assert_eq!(app.chats[target].unread, 1, "later messages remain unread");
+            }
+        }
+    }
+
+    #[test]
+    fn marking_a_search_contact_without_a_chat_does_not_open_or_create_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let server = app.server_chat(&me);
+        app.select(server);
+        app.contacts.insert((me, jid("offline@example.org")));
+        for c in ":offline".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+                .is_empty()
+        );
+        assert_eq!(app.chats.len(), 1);
+        assert_eq!(app.selected, Some(server));
+        assert!(app.input.is_empty());
     }
 
     #[test]

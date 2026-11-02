@@ -138,6 +138,12 @@ Choosing another chat manually cancels the return point. Change the key in `/set
 `[ui] unread_shortcut = "f8"`. `"modifier+n"` follows the main modifier; `"none"`
 disables the direct shortcut. Prefix+N remains available.
 
+Right-click a room or direct chat in the chat list to mark its messages as read
+without opening it. The current conversation and draft stay in place. From the
+`:` search, select a result with Up/Down and press Shift+Enter to mark it read
+instead of opening it. Read state is saved and synced as when opening a chat;
+the read-marker setting still controls whether the sender is notified.
+
 Type `:` in an empty input to find a contact or open room by name or JID; use
 Up/Down and Enter to open it, Esc to cancel. `::text` sends `:text`, and
 `//settings` sends `/settings`. `/np` sends `/me np: Artist — Title` as an action from the first

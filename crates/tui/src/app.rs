@@ -1790,6 +1790,22 @@ impl App {
         if !self.focused {
             return Vec::new();
         }
+        self.read_through_latest(index)
+    }
+
+    /// Explicitly acknowledge a chat without opening it or disturbing the draft.
+    pub fn mark_chat_read(&mut self, index: usize) -> Vec<Action> {
+        let Some(chat) = self.chats.get_mut(index).filter(|c| c.kind != ChatKind::Server) else {
+            return Vec::new();
+        };
+        chat.unread = 0;
+        chat.new_since = None;
+        self.status = trf!("marked read: {}", "отмечено прочитанным: {}", chat.title());
+        // A deliberate acknowledgement does not depend on terminal focus events.
+        self.read_through_latest(index)
+    }
+
+    fn read_through_latest(&mut self, index: usize) -> Vec<Action> {
         let chat = &mut self.chats[index];
         if let Some(line) = chat.lines.iter().rev().find(|l| !l.notice) {
             self.local_reads.insert(
@@ -2236,6 +2252,14 @@ impl App {
                     self.input.clear();
                     self.cursor = 0;
                     if let Some((account, jid, _)) = target {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            return self
+                                .chats
+                                .iter()
+                                .position(|c| c.account == account && c.jid == jid)
+                                .map(|index| self.mark_chat_read(index))
+                                .unwrap_or_default();
+                        }
                         let index = self.chat(&account, &jid, ChatKind::Direct);
                         self.collapsed.remove(&Group::Account(account));
                         self.collapsed.remove(&self.group_of(index));
@@ -5052,6 +5076,12 @@ impl App {
             return self.emoji_outcome(outcome);
         }
         if self.switcher.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Right)
+                && let Some((_, index)) = self.areas.switch_rows.iter().find(|(r, _)| inside(*r))
+            {
+                self.switcher = Some(*index);
+                return self.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+            }
             let code = match mouse.kind {
                 MouseEventKind::ScrollUp => Some(KeyCode::Up),
                 MouseEventKind::ScrollDown => Some(KeyCode::Down),
@@ -5191,6 +5221,12 @@ impl App {
             MouseEventKind::Down(MouseButton::Middle) => {
                 self.focus = Focus::Input;
                 return vec![Action::PastePrimary];
+            }
+            // A right click acknowledges a chat without opening the conversation.
+            MouseEventKind::Down(MouseButton::Right)
+                if let Some(&(_, index)) = self.areas.chat_rows.iter().find(|(r, _)| inside(*r)) =>
+            {
+                return self.mark_chat_read(index);
             }
             MouseEventKind::Down(MouseButton::Right)
                 if self.current().is_some_and(|c| c.is_room())
@@ -5807,6 +5843,56 @@ mod tests {
         app.on_key(key(KeyCode::Char(':')));
         app.on_key(key(KeyCode::Esc));
         assert!(app.input.is_empty() && app.switcher.is_none());
+    }
+
+    #[test]
+    fn explicit_read_uses_the_existing_receipt_policy_and_never_moves_a_remote_mark_back() {
+        for room in [false, true] {
+            for read_markers in [false, true] {
+                let mut app = app();
+                let me = jid("me@example.org");
+                let peer = jid("chat@example.org");
+                let server = app.server_chat(&me);
+                app.select(server);
+                let kind = if room {
+                    ChatKind::Room { nick: "me".into() }
+                } else {
+                    ChatKind::Direct
+                };
+                let index = app.chat(&me, &peer, kind);
+                let mut line = Line::message(42, "bob".into(), "hello".into(), false, false);
+                line.id = Some("message".into());
+                line.archive_id = Some("archive".into());
+                app.chats[index].lines.push(line);
+                app.chats[index].markable = Some("message".into());
+                app.chats[index].unread = 1;
+                app.chats[index].new_since = Some(42);
+                app.read_markers = read_markers;
+                app.focused = false; // explicit intent works even without a focus event
+                assert_eq!(
+                    app.mark_chat_read(index),
+                    [Action::Displayed {
+                        account: me.clone(),
+                        to: peer.clone(),
+                        room,
+                        marker: (read_markers && !room).then(|| "message".into()),
+                        archive_id: Some("archive".into()),
+                    }]
+                );
+                assert_eq!(app.selected, Some(server));
+                assert_eq!(app.chats[index].unread, 0);
+                assert_eq!(app.chats[index].new_since, None);
+                assert_eq!(app.local_reads[&(me.clone(), peer.clone())].at, 42);
+                assert!(app.mark_chat_read(index).is_empty(), "no duplicate receipt");
+
+                app.read_marks(&me, vec![(peer, "later-on-phone".into(), None)]);
+                assert!(app.mark_chat_read(index).is_empty());
+                assert_eq!(app.chats[index].read_mark.as_deref(), Some("later-on-phone"));
+                assert!(!app.chats[index].read_mark_here);
+                assert!(app.mark_chat_read(server).is_empty());
+                assert!(app.mark_chat_read(usize::MAX).is_empty());
+            }
+        }
     }
 
     #[test]

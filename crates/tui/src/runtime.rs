@@ -4855,6 +4855,15 @@ mod tests {
 
     #[test]
     fn an_irc_chat_read_locally_stays_read_after_restart_without_live_archive_ids() {
+        check_irc_read_survives_restart(false);
+    }
+
+    #[test]
+    fn an_irc_chat_marked_read_without_opening_stays_read_after_restart() {
+        check_irc_read_survives_restart(true);
+    }
+
+    fn check_irc_read_survives_restart(manual: bool) {
         use crate::app::{App, ChatKind};
         use crate::config::Modifier;
         use omtalk_store::{Store, StoredMessage};
@@ -4899,7 +4908,15 @@ mod tests {
         );
         assert_eq!(app.chats[room].unread, 2);
         let delayed = vec![(peer.clone(), "archive-old".into())];
-        app.select(room);
+        if manual {
+            assert!(
+                app.mark_chat_read(room).is_empty(),
+                "no new archive ID to publish"
+            );
+            assert_eq!(app.selected, Some(server));
+        } else {
+            app.select(room);
+        }
         assert_eq!(app.chats[room].unread, 0);
         // CURRENT: the production event loop persists this before waiting again.
         super::flush_local_reads(&mut app, &store);
