@@ -607,6 +607,73 @@ async fn receipts_and_read_markers_go_through_the_server() {
         seen,
         [Mark::Received("r-1".into()), Mark::Displayed("r-1".into())]
     );
+
+    // Conversations resolves a group read marker by the room's stanza ID, not by
+    // the author's message ID. A private non-anonymous room supplies that ID and
+    // broadcasts the acknowledgement from the reader's occupant JID.
+    let room: BareJid = format!("read-markers-{}@muc.localhost", rand_suffix())
+        .parse()
+        .unwrap();
+    alice.join(&room, "author").await.unwrap();
+    alice.make_private(&room).await.unwrap();
+    alice
+        .set_affiliation(&room, bob.jid(), Affiliation::Member)
+        .await
+        .unwrap();
+    bob.join(&room, "reader").await.unwrap();
+    let info = bob.disco_info(&room.clone().into(), None).await.unwrap();
+    assert!(info.features.iter().any(|f| f == xmpp_parsers::ns::SID));
+    let mut message = Message::new_with_type(
+        xmpp_parsers::message::MessageType::Groupchat,
+        Some(room.clone().into()),
+    )
+    .with_body(Lang::default(), "read this room message".into());
+    receipts::mark_outgoing(&mut message, "sender-original-1");
+    message
+        .payloads
+        .push(Element::builder("markable", xmpp_parsers::ns::DISPLAYED_MARKERS).build());
+    alice.send(message).await.unwrap();
+    let got = wait_for(&mut events, |e| match &e.event {
+        Event::Message(m)
+            if e.account == *bob.jid()
+                && m.type_ == xmpp_parsers::message::MessageType::Groupchat
+                && m.id.as_ref().is_some_and(|id| id.0 == "sender-original-1") =>
+        {
+            Some((**m).clone())
+        }
+        _ => None,
+    })
+    .await;
+    let stanza_id = got
+        .payloads
+        .iter()
+        .filter_map(|p| xmpp_parsers::stanza_id::StanzaId::try_from(p.clone()).ok())
+        .find(|id| id.by == room)
+        .expect("the room supplies a stable stanza ID");
+    assert!(!stanza_id.id.is_empty());
+    assert_ne!(stanza_id.id, "sender-original-1");
+    bob.send(receipts::room_displayed(&room, &stanza_id.id))
+        .await
+        .unwrap();
+    let read = wait_for(&mut events, |e| match &e.event {
+        Event::Message(m)
+            if e.account == *alice.jid()
+                && m.type_ == xmpp_parsers::message::MessageType::Groupchat
+                && m.from.as_ref().is_some_and(|from| {
+                    from.to_bare() == room && from.resource().is_some_and(|nick| nick.as_str() == "reader")
+                }) =>
+        {
+            m.payloads
+                .iter()
+                .find(|p| p.is("displayed", xmpp_parsers::ns::DISPLAYED_MARKERS))
+                .cloned()
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(read.attr("id"), Some(stanza_id.id.as_str()));
+    alice.stop().await;
+    bob.stop().await;
 }
 
 #[tokio::test]

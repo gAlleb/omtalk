@@ -282,6 +282,11 @@ enum Msg {
     },
     /// A line for the status bar, about no account in particular.
     Status(String),
+    /// A content message's "active" reached the stream; restore any newer typing state.
+    MessageSent {
+        account: BareJid,
+        chat: BareJid,
+    },
     /// Someone's typing state in a chat.
     Typing {
         account: BareJid,
@@ -1112,6 +1117,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             Some(account) => app.server_notice(&account, text, now()),
             None => app.status = text,
         },
+        Msg::MessageSent { account, chat } => {
+            for action in app.typing_after_send(&account, &chat) {
+                tokio::spawn(perform(action, shared.clone()));
+            }
+        }
         Msg::Delivery { account, id, state } => {
             // Kept, so the ✓✓ is there after a restart too.
             if let Some(kept) = kept_delivery(&state) {
@@ -2696,6 +2706,10 @@ async fn perform(action: Action, shared: Shared) {
                             },
                         );
                         delivery(Delivery::Sent);
+                        tell(Msg::MessageSent {
+                            account: account.clone(),
+                            chat: to.clone(),
+                        });
                         for (jid, device, e) in report.failed {
                             tell(Msg::Notice {
                                 account: account.clone(),
@@ -2775,6 +2789,10 @@ async fn perform(action: Action, shared: Shared) {
                             );
                         }
                         delivery(Delivery::Sent);
+                        tell(Msg::MessageSent {
+                            account: account.clone(),
+                            chat: to.clone(),
+                        });
                     }
                     Err(omtalk_xmpp::Error::Queued) => {
                         if !room {
@@ -2828,7 +2846,21 @@ async fn perform(action: Action, shared: Shared) {
                 }
             }
             if let Some(id) = marker {
-                let _ = xmpp.send(receipts::displayed(to.clone().into(), &id)).await;
+                let message = if room {
+                    // XEP-0333 §4.3: only trust a room-assigned ID when that room
+                    // advertises XEP-0359. A forged stanza-id must not be echoed.
+                    let supports_ids = xmpp
+                        .disco_info(&to.clone().into(), None)
+                        .await
+                        .is_ok_and(|info| info.features.contains(xmpp_parsers::ns::SID));
+                    if !supports_ids {
+                        return;
+                    }
+                    receipts::room_displayed(&to, &id)
+                } else {
+                    receipts::displayed(to.clone().into(), &id)
+                };
+                let _ = xmpp.send(message).await;
             }
         }
         Action::Older {
@@ -3249,6 +3281,10 @@ async fn perform(action: Action, shared: Shared) {
                         account: account.clone(),
                         id: id.clone(),
                         state: Delivery::Sent,
+                    });
+                    tell(Msg::MessageSent {
+                        account: account.clone(),
+                        chat: to.clone(),
                     });
                 }
                 Err(e) => failed(e),

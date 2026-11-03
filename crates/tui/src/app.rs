@@ -229,7 +229,7 @@ pub struct Chat {
     /// The peer's devices; `None` until read.
     pub devices: Option<Vec<DeviceRow>>,
     /// The newest message here whose sender asked to learn when it is read, not yet
-    /// marked read.
+    /// marked read. A room's stanza-id in MUC, the sender's id in a direct chat.
     pub markable: Option<String>,
     /// Where the chat is read up to, as one's clients told the server (XEP-0490): the
     /// archive's id of that message. Opening the chat moves it to the newest message.
@@ -1360,6 +1360,27 @@ impl App {
         }]
     }
 
+    /// A content message carries "active", but encryption or upload may have delayed
+    /// it until after a newer typing state. Reassert what is current only after that
+    /// message was actually sent, not when its send action was started.
+    pub fn typing_after_send(&self, account: &BareJid, to: &BareJid) -> Vec<Action> {
+        let Some(((own, chat), state @ (ChatState::Composing | ChatState::Paused))) = &self.typing_out else {
+            return Vec::new();
+        };
+        if !self.send_typing || own != account || chat != to {
+            return Vec::new();
+        }
+        let Some(chat) = self.chats.iter().find(|c| &c.account == account && &c.jid == to) else {
+            return Vec::new();
+        };
+        vec![Action::ChatState {
+            account: account.clone(),
+            to: to.clone(),
+            room: chat.is_room(),
+            state: state.clone(),
+        }]
+    }
+
     /// The window came to the front or went behind. Back in front, the open chat is read.
     pub fn on_focus(&mut self, focused: bool) -> Vec<Action> {
         self.focused = focused;
@@ -1818,10 +1839,7 @@ impl App {
                 },
             );
         }
-        let marker = chat
-            .markable
-            .take()
-            .filter(|_| self.read_markers && !chat.is_room());
+        let marker = chat.markable.take().filter(|_| self.read_markers);
         // Read up to the newest message here, whenever it came (before a restart too),
         // if the server does not have it so already, and never back from where another
         // client read to.
@@ -2135,7 +2153,16 @@ impl App {
         if message.direction == Direction::Incoming {
             let chat = &mut self.chats[index];
             if message.markable {
-                chat.markable = message.id.clone();
+                // Group markers name the ID assigned by the room, never the
+                // sender's origin-id. The runtime verifies the room supports SID.
+                let id = if chat.is_room() {
+                    &message.archive_id
+                } else {
+                    &message.id
+                };
+                if let Some(id) = id.as_ref().filter(|id| !id.is_empty()) {
+                    chat.markable = Some(id.clone());
+                }
             }
             if self.selected == Some(index) {
                 return self.mark_read(index);
@@ -5869,7 +5896,8 @@ mod tests {
                 line.id = Some("message".into());
                 line.archive_id = Some("archive".into());
                 app.chats[index].lines.push(line);
-                app.chats[index].markable = Some("message".into());
+                let marker_id = if room { "archive" } else { "message" };
+                app.chats[index].markable = Some(marker_id.into());
                 app.chats[index].unread = 1;
                 app.chats[index].new_since = Some(42);
                 app.read_markers = read_markers;
@@ -5880,7 +5908,7 @@ mod tests {
                         account: me.clone(),
                         to: peer.clone(),
                         room,
-                        marker: (read_markers && !room).then(|| "message".into()),
+                        marker: read_markers.then(|| marker_id.into()),
                         archive_id: Some("archive".into()),
                     }]
                 );
@@ -5896,6 +5924,66 @@ mod tests {
                 assert!(!app.chats[index].read_mark_here);
                 assert!(app.mark_chat_read(server).is_empty());
                 assert!(app.mark_chat_read(usize::MAX).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn room_read_markers_use_the_room_id_and_wait_for_reading() {
+        for read_markers in [false, true] {
+            for markable in [false, true] {
+                for archived in [false, true] {
+                    let mut app = app();
+                    let me = jid("me@example.org");
+                    let peer = jid("team@muc.example.org");
+                    let room = app.chat(&me, &peer, ChatKind::Room { nick: "me".into() });
+                    app.select(room);
+                    app.on_focus(false);
+                    app.read_markers = read_markers;
+                    for i in 1..=2 {
+                        let incoming = Incoming {
+                            peer: peer.clone(),
+                            sender: jid("lynx@example.org"),
+                            nick: Some("lynx".into()),
+                            device: Some(1),
+                            direction: Direction::Incoming,
+                            encrypted: true,
+                            text: Some(format!("message {i}")),
+                            at: None,
+                            not_for_this_device: false,
+                            id: Some(format!("sender-{i}")),
+                            markable,
+                            archive_id: archived.then(|| format!("room-{i}")),
+                            untrusted: false,
+                            reply_to: None,
+                            replaces: None,
+                            shared_file: false,
+                        };
+                        assert!(
+                            app.on_incoming(&me, &incoming, i).is_empty(),
+                            "not read behind the window"
+                        );
+                    }
+                    assert_eq!(app.chats[room].unread, 2);
+                    let actions = app.on_focus(true);
+                    let expected = if archived {
+                        vec![Action::Displayed {
+                            account: me.clone(),
+                            to: peer,
+                            room: true,
+                            marker: (read_markers && markable).then(|| "room-2".into()),
+                            archive_id: Some("room-2".into()),
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    assert_eq!(actions, expected, "room markers must never name sender IDs");
+                    assert_eq!(app.chats[room].unread, 0);
+                    assert!(
+                        app.mark_chat_read(room).is_empty(),
+                        "only once per markable message"
+                    );
+                }
             }
         }
     }
@@ -7182,6 +7270,68 @@ mod tests {
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.input, draft, "the draft survives leaving history");
         assert_eq!(app.sent, ["previous", draft]);
+    }
+
+    #[test]
+    fn delayed_message_send_restores_the_current_typing_state_only_in_its_chat() {
+        for room in [false, true] {
+            let mut app = app();
+            let me = jid("me@example.org");
+            let other = jid("other@example.org");
+            let peer = jid("chat@example.org");
+            let kind = if room {
+                ChatKind::Room { nick: "me".into() }
+            } else {
+                ChatKind::Direct
+            };
+            let index = app.chat(&me, &peer, kind);
+            app.select(index);
+            let state = |state| Action::ChatState {
+                account: me.clone(),
+                to: peer.clone(),
+                room,
+                state,
+            };
+            app.on_key(key(KeyCode::Char('a')));
+            let send = app.on_key(key(KeyCode::Enter));
+            assert!(matches!(&send[..], [Action::Send { .. }]));
+            assert!(
+                app.typing_after_send(&me, &peer).is_empty(),
+                "nothing newer typed yet"
+            );
+
+            // Send is waiting for encryption/network. Typing the next message reaches
+            // the wire first; the older content will clear it with its own Active.
+            assert_eq!(app.on_key(key(KeyCode::Char('b'))), [state(ChatState::Composing)]);
+            assert!(app.on_key(key(KeyCode::Char('c'))).is_empty());
+            assert_eq!(app.typing_after_send(&me, &peer), [state(ChatState::Composing)]);
+            assert_eq!(app.input, "bc", "reconciliation must not edit or send the draft");
+            assert!(app.typing_after_send(&other, &peer).is_empty());
+            assert!(
+                app.typing_after_send(&me, &jid("other-chat@example.org"))
+                    .is_empty()
+            );
+
+            app.typing_tick(app.typed_at + 10);
+            assert_eq!(app.typing_after_send(&me, &peer), [state(ChatState::Paused)]);
+            app.send_typing = false;
+            assert!(
+                app.typing_after_send(&me, &peer).is_empty(),
+                "respect a setting changed during send"
+            );
+            app.send_typing = true;
+            app.typing_out = Some(((me.clone(), peer.clone()), ChatState::Active));
+            assert!(
+                app.typing_after_send(&me, &peer).is_empty(),
+                "content already said Active"
+            );
+            app.typing_out = Some(((me.clone(), peer.clone()), ChatState::Composing));
+            app.chats.clear();
+            assert!(
+                app.typing_after_send(&me, &peer).is_empty(),
+                "a closed chat gets no late state"
+            );
+        }
     }
 
     #[test]

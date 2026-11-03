@@ -508,8 +508,10 @@ for all new messages in the chat. An empty sound command cannot play audio. Desk
 notifications and bells disabled globally stay disabled. Archive and own messages never alert.
 
 An unfocused window does not mark messages read, even in the open chat. When focused,
-omtalk sends read markers to the contact (unless `read_markers = false`) and synchronizes
-read positions with your other clients (XEP-0490). Local read positions are also kept
+omtalk sends requested read markers to the contact or room (unless `read_markers = false`).
+Room markers use the room's own message ID and require its support for stable IDs
+(XEP-0359), as used by Conversations. Read positions are also synchronized with your
+other clients (XEP-0490). Local read positions are kept
 across restarts, including IRC messages without archive IDs. Synchronization advances
 them when a newer known position arrives; temporary network failures are retried.
 

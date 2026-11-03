@@ -1,6 +1,6 @@
 //! Whether a message arrived and was read: delivery receipts (XEP-0184) and read markers
-//! (XEP-0333), which Gajim, Conversations, Monal and Dino all speak. Rooms have neither;
-//! there a message is known to have arrived when the room sends it back.
+//! (XEP-0333), which Gajim, Conversations, Monal and Dino all speak. Rooms confirm
+//! delivery by reflecting the message; their displayed markers use the room's ID.
 
 use xmpp_parsers::jid::Jid;
 use xmpp_parsers::message::{Id, Message, MessageType};
@@ -238,9 +238,43 @@ pub fn displayed(to: Jid, id: &str) -> Message {
     message
 }
 
+/// Says that a room message was read, using its room-assigned stanza ID (XEP-0333).
+/// The caller must verify the room advertises XEP-0359 before trusting that ID.
+pub fn room_displayed(room: &xmpp_parsers::jid::BareJid, id: &str) -> Message {
+    let mut message = displayed(room.clone().into(), id);
+    message.type_ = MessageType::Groupchat;
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_read_markers_use_groupchat_and_the_room_assigned_id() {
+        let room = "team@muc.example.org".parse().unwrap();
+        let sender_id = "sender-original-1";
+        let room_id = "room-assigned-2";
+        let message = room_displayed(&room, room_id);
+        assert!(!wants_receipt(&message));
+        let xml = Element::from(message);
+        let expected: Element = concat!(
+            r#"<message xmlns="jabber:client" type="groupchat" to="team@muc.example.org">"#,
+            r#"<displayed xmlns="urn:xmpp:chat-markers:0" id="room-assigned-2"/>"#,
+            r#"<store xmlns="urn:xmpp:hints"/>"#,
+            "</message>"
+        )
+        .parse()
+        .unwrap();
+        assert_eq!(xml, expected);
+        assert_ne!(
+            xml.get_child("displayed", ns::DISPLAYED_MARKERS)
+                .unwrap()
+                .attr(xml_ncname!("id")),
+            Some(sender_id),
+            "the sender's ID is not the room archive's ID"
+        );
+    }
 
     #[test]
     fn empty_displayed_ids_do_not_form_a_read_frontier() {
