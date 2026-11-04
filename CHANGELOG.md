@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.11 — 2026-11-04
+
+Mark chats read without opening them, keep unsent drafts in input history, and use more emoji. Room read markers and typing indicators now reach other clients reliably in the cases fixed below.
+
+- Mark a channel or direct chat read with a right click in the chat list or search results, or modifier+R / prefix then R in the chat switcher (Ctrl+R / Ctrl+X then R by default). The current chat, draft and scroll position stay in place. These shortcuts work in terminals where Shift+Enter is indistinguishable from Enter.
+- Unsent drafts become entries in input history: Up saves the current draft before browsing earlier entries, and Down reaches an empty input after the saved draft. Down from a newly typed draft saves it and clears the input too.
+- Quick reactions now offer 12 emoji in two rows. The emoji picker has 948 emoji with Russian and English search; sequences that render unreliably in the tested terminals are excluded. Drawing no longer erases emoji or exposes text from the conversation beneath them.
+- `/np` sends an action as `/me np: Artist — Title`, keeping the em dash between artist and title.
+- Room read markers are sent when requested and enabled, using the room-assigned message ID after verifying the room's support for stable IDs. Previously, the read-marker setting only enabled replies in direct chats.
+- A delayed outgoing message no longer leaves the typing indicator cleared while the next draft is being written: after the send completes, the current typing state is restored for that chat.
+- A fresh XMPP login rebuilds room presence and the OMEMO occupant cache, removing stale participants left after a disconnect or sleep. A resumed connection keeps its existing presence state.
+- Read positions received before their chats exist are retained and applied when the chats are created, preventing already-read history from temporarily appearing unread.
 - **A room's archive read on another device no longer counts as new while it comes in.** The archive comes oldest first; until the message read up to elsewhere arrives, what comes is read already. Before, the count climbed with every page (to hundreds in a busy room) and dropped only when that message came.
 - On login what is read is asked first, for up to three seconds, before rooms and the archive are caught up, so the first pages are counted right too; a slow answer does not hold the rooms up.
 - With image-link previews on, the link stays in sight above its picture and opens on a click; it was replaced by the picture.
