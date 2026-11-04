@@ -92,3 +92,13 @@ jobs:
           else
             gh release create "$TAG" $files --verify-tag --title "omtalk $version" --notes-file notes.md
           fi
+
+      - name: Build package in omvoid-repo
+        env:
+          GH_TOKEN: ${{ secrets.OMVOID_REPO_ACTIONS_TOKEN }}
+        run: |
+          gh workflow run build.yml \
+            --repo gAlleb/omvoid-repo \
+            --ref main \
+            -f packages=omtalk \
+            -f check_updates=true
