@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::terminal_backend::StableBackend;
 use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use omemo::OwnKeys;
 use omtalk_omemo::{Direction, Incoming, Omemo, State};
 use omtalk_store::{Store, StoredMessage};
@@ -35,6 +35,14 @@ const HISTORY: usize = 300;
 /// How many messages of a direct chat are read from the archive when this device has none.
 const HISTORY_FROM_ARCHIVE: usize = 50;
 
+#[path = "irc_runtime.rs"]
+mod irc;
+
+pub struct Prepared {
+    xmpp: Vec<AccountConfig>,
+    irc: Vec<omtalk_irc::Config>,
+}
+
 pub struct Options {
     pub config: Config,
     /// Where the config is: the settings window writes changes there.
@@ -46,7 +54,7 @@ impl Options {
     pub fn from_args() -> Result<Self, String> {
         let usage = || {
             format!(
-                "usage: omtalk [JID] [--config PATH] [--db PATH]{}",
+                "usage: omtalk [JID|IRC-PROFILE-ID] [--config PATH] [--db PATH]{}",
                 if cfg!(feature = "insecure-tcp") {
                     " [--plaintext HOST:PORT]"
                 } else {
@@ -73,6 +81,16 @@ impl Options {
         }
         let mut config = config::load(&config_path)?;
         if let Some(jid) = single {
+            if let Some(profile) = config.irc_accounts.iter().find(|a| a.id == jid).cloned() {
+                config.accounts.clear();
+                config.irc_accounts = vec![profile];
+                return Ok(Self {
+                    config,
+                    config_path,
+                    db,
+                });
+            }
+            config.irc_accounts.clear();
             let entry = config
                 .accounts
                 .iter()
@@ -95,7 +113,7 @@ impl Options {
                 account.plaintext = Some(addr.clone());
             }
         }
-        if config.accounts.is_empty() {
+        if config.accounts.is_empty() && config.irc_accounts.is_empty() {
             return Err(format!(
                 "no account: give one (omtalk me@example.org) or list them in {}",
                 config_path.display()
@@ -125,8 +143,9 @@ pub fn lock_accounts(options: &Options) -> Result<Vec<std::fs::File>, String> {
         .config
         .accounts
         .iter()
+        .map(|account| account.jid.clone()).chain(options.config.irc_accounts.iter().map(|account| format!("irc-{}", account.id)))
         .map(|account| {
-            let path = dir.join(format!("{stem}.{}.lock", account.jid));
+            let path = dir.join(format!("{stem}.{}.lock", account));
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -138,7 +157,7 @@ pub fn lock_accounts(options: &Options) -> Result<Vec<std::fs::File>, String> {
                 Err(std::fs::TryLockError::WouldBlock) => Err(trf!(
                     "{} is open in another omtalk already: a second client of the same account here needs a database of its own, as: omtalk --db ~/.local/share/omtalk/second.db",
                     "{} уже открыт в другом omtalk: второму клиенту того же аккаунта на этой машине нужна своя база, например: omtalk --db ~/.local/share/omtalk/second.db",
-                    account.jid
+                    account
                 )),
                 Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
             }
@@ -147,8 +166,8 @@ pub fn lock_accounts(options: &Options) -> Result<Vec<std::fs::File>, String> {
 }
 
 /// Account settings with passwords, read before the screen is taken over.
-pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String> {
-    options
+pub fn prepare_accounts(options: &Options) -> Result<Prepared, String> {
+    let xmpp = options
         .config
         .accounts
         .iter()
@@ -186,11 +205,19 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
             }
             Ok(account)
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let irc = options
+        .config
+        .irc_accounts
+        .iter()
+        .map(|entry| entry.prepare())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Prepared { xmpp, irc })
 }
 
 /// What tasks tell the interface.
 enum Msg {
+    Irc(irc::UiEvent),
     NotificationRead {
         account: BareJid,
         chat: BareJid,
@@ -202,6 +229,7 @@ enum Msg {
     },
     Audio(crate::audio::Event),
     AudioInfo(PathBuf, Result<crate::audio::Info, String>),
+    AudioDuration(PathBuf, f64),
     RoomStep {
         token: String,
         account: BareJid,
@@ -431,6 +459,8 @@ enum Msg {
 
 #[derive(Clone)]
 struct Shared {
+    irc: omtalk_irc::Client,
+    irc_jobs: Arc<std::sync::Mutex<std::collections::HashMap<String, irc::UploadJob>>>,
     accounts: HashMap<BareJid, (Account, Arc<Omemo>)>,
     read_sync: HashMap<BareJid, crate::read_sync::ReadSync>,
     /// Where fetched files are kept.
@@ -455,6 +485,53 @@ fn log_event<T: std::fmt::Debug>(journal: &Option<std::fs::File>, event: T) -> T
         let _ = writeln!(file, "{} {event:?}", chrono::Utc::now().format("%H:%M:%S%.3f"));
     }
     event
+}
+
+/// Mouse motion without a button changes no UI state. Do not turn a touchpad's
+/// motion/scroll burst into hundreds of full transcript redraws before a click.
+/// Keep clicks, keys, directions, locations and drag events in their original order.
+async fn next_input_batch<S>(
+    input: &mut S,
+    pending: &mut Option<io::Result<TermEvent>>,
+) -> Option<(io::Result<TermEvent>, usize)>
+where
+    S: futures::Stream<Item = io::Result<TermEvent>> + Unpin,
+{
+    use crossterm::event::MouseEventKind;
+    let mut ignored = 0;
+    let first = loop {
+        let event = match pending.take() {
+            Some(event) => event,
+            None => input.next().await?,
+        };
+        if matches!(&event, Ok(TermEvent::Mouse(m)) if m.kind == MouseEventKind::Moved) {
+            ignored += 1;
+            if ignored == 64 {
+                ignored = 0;
+                tokio::task::yield_now().await;
+            }
+            continue;
+        }
+        break event;
+    };
+    let mut count = 1;
+    if matches!(&first, Ok(TermEvent::Mouse(m)) if matches!(m.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown |
+        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight))
+    {
+        while count < 64 {
+            let Some(Some(next)) = input.next().now_or_never() else {
+                break;
+            };
+            if matches!((&first, &next), (Ok(TermEvent::Mouse(a)), Ok(TermEvent::Mouse(b))) if a == b) {
+                count += 1;
+            } else {
+                *pending = Some(next);
+                break;
+            }
+        }
+    }
+    Some((first, count))
 }
 
 /// Optional navigation-only trace: no message bodies, pasted text or typed letters.
@@ -494,7 +571,7 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), String> {
+pub async fn run(options: Options, configs: Prepared) -> Result<(), String> {
     let store = Store::open(&options.db).map_err(|e| format!("{}: {e}", options.db.display()))?;
     // The cache holds files of encrypted chats, decrypted, and avatars: one's own only,
     // as the database is.
@@ -507,7 +584,19 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         .map(|kept| omtalk_xmpp::presence::OwnStatus::from_kept(&kept))
         .unwrap_or_default();
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let initial_irc = configs.irc.clone();
+    let (irc, mut irc_events) = omtalk_irc::Client::start(configs.irc)?;
+    let irc_tx = tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = irc_events.recv().await {
+            if irc_tx.send(Msg::Irc(irc::UiEvent::Wire(event))).is_err() {
+                break;
+            }
+        }
+    });
     let mut shared = Shared {
+        irc,
+        irc_jobs: std::sync::Arc::default(),
         accounts: HashMap::new(),
         read_sync: HashMap::new(),
         cache: config::cache_dir().join("media"),
@@ -524,7 +613,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         let _ = audio_tx.send(Msg::Audio(event));
     });
     let mut jids = Vec::new();
-    for mut config in configs {
+    for mut config in configs.xmpp {
         let jid = config.jid.clone();
         let state = match store.load_omemo(&jid).map_err(|e| e.to_string())? {
             Some(state) => state,
@@ -573,7 +662,12 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             }
         });
     }
-    let mut app = App::new(jids.clone(), ui.modifier, ui.left, ui.right);
+    let mut app = App::new(
+        jids.iter().cloned().map(Into::into).collect(),
+        ui.modifier,
+        ui.left,
+        ui.right,
+    );
     app.leader = config::parse_key(&ui.leader)?;
     ui.unread_binding()?;
     app.own_status = kept_status;
@@ -588,10 +682,22 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 .collect::<Vec<_>>()
         };
         for (jid, name) in kept(KEPT_CONTACT_NAME) {
-            app.names.insert((account.clone(), jid), name);
+            app.names.insert(
+                (
+                    crate::address::Address::from(account.clone()),
+                    crate::address::Address::from(jid),
+                ),
+                name,
+            );
         }
         for (jid, name) in kept(KEPT_NICKNAME) {
-            app.nicknames.insert((account.clone(), jid), name);
+            app.nicknames.insert(
+                (
+                    crate::address::Address::from(account.clone()),
+                    crate::address::Address::from(jid),
+                ),
+                name,
+            );
         }
     }
     if let Some(kept) = store.kept(KEPT_FOLDED).ok().flatten() {
@@ -602,7 +708,13 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         if let Some((account, chat)) = key.split_once('/')
             && let (Ok(account), Ok(chat)) = (account.parse::<BareJid>(), chat.parse::<BareJid>())
         {
-            app.omemo_choice.insert((account, chat), on == "1");
+            app.omemo_choice.insert(
+                (
+                    crate::address::Address::from(account),
+                    crate::address::Address::from(chat),
+                ),
+                on == "1",
+            );
         }
     }
     restore_mutes(&store, &mut app);
@@ -629,15 +741,25 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     for account in &jids {
         restore_local_unread(&mut app, &store, account);
     }
-    app.folders = store.folders().map_err(|e| e.to_string())?;
+    app.folders = store
+        .folders()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|f| crate::address::Folder {
+            account: f.account.into(),
+            name: f.name,
+            chats: f.chats.into_iter().map(Into::into).collect(),
+        })
+        .collect();
     // A chat put in a folder stays in the list, also before anyone wrote in it.
     for folder in app.folders.clone() {
         for chat in folder.chats {
-            if jids.contains(&folder.account)
+            if folder.account.xmpp().is_some_and(|a| jids.contains(a))
                 && !store
-                    .closed_chats(&folder.account)
+                    .closed_chats(folder.account.xmpp().expect("XMPP folder"))
                     .unwrap_or_default()
-                    .contains(&chat)
+                    .iter()
+                    .any(|c| &chat == c)
                 && !app
                     .chats
                     .iter()
@@ -647,6 +769,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             }
         }
     }
+    irc::restore(&mut app, &shared, &initial_irc);
+    restore_pins(&shared.store, &mut app);
     for chat in &mut app.chats {
         prepare_media(&mut chat.lines, &shared);
     }
@@ -660,7 +784,18 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             .iter()
             .position(|c| c.account == account && c.jid == jid)
     });
-    let start = last_open.or_else(|| jids.first().map(|account| app.server_chat(account)));
+    let irc_open = store
+        .kept("irc/open")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<omtalk_core::ConversationId>(&s).ok())
+        .and_then(|id| app.chats.iter().position(|c| c.jid.conversation() == Some(&id)));
+    let start = irc_open.or(last_open).or_else(|| {
+        app.accounts
+            .first()
+            .cloned()
+            .map(|account| app.server_chat(&account))
+    });
     if let Some(index) = start {
         for action in app.select(index) {
             tokio::spawn(perform(action, shared.clone()));
@@ -678,13 +813,17 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut status = (String::new(), tokio::time::Instant::now());
     // OMTALK_LOG=file: every event the terminal sends, as omtalk reads it, for finding
     // out what a terminal does (a dropped file, a key that does nothing).
-    let journal = std::env::var_os("OMTALK_LOG").and_then(|path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-    });
+    let journal = initial_irc
+        .is_empty()
+        .then(|| std::env::var_os("OMTALK_LOG"))
+        .flatten()
+        .and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        });
     // A closed terminal window (SIGHUP) or a plain kill (SIGTERM) leaves as cleanly as
     // quitting: else the server keeps showing this client online for minutes.
     use tokio::signal::unix::{SignalKind, signal};
@@ -694,8 +833,19 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     let mut mouse_captured = true;
     // Folded folders and accounts, kept as they change.
     let mut folded = app.collapsed.clone();
+    let mut pins = app.pins.clone();
     let mut opened = app.current().map(|c| format!("{}\t{}", c.account, c.jid));
+    let mut irc_kept = std::collections::BTreeMap::new();
+    let mut pending_input = None;
     loop {
+        if app.pins != pins {
+            pins = app.pins.clone();
+            let value: Vec<_> = pins.iter().map(|(a, c)| (a.kept(), c.kept())).collect();
+            if let Ok(value) = serde_json::to_string(&value) {
+                let _ = shared.store.keep("pins", Some(&value));
+            }
+        }
+        irc::persist(&mut app, &shared, &mut irc_kept);
         flush_local_reads(&mut app, &shared.store);
         terminal
             .draw(|frame| view::draw(frame, &mut app, &mut pictures))
@@ -732,28 +882,42 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             Some((_, omtalk_xmpp::chatstates::ChatState::Composing))
         ) || app.typing_in.values().any(|t| !t.is_empty());
         let selected_before = app.selected;
-        let actions = tokio::select! {
+        let mut interacted = false;
+        let mut actions = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)), if typing => app.typing_tick(now()),
             _ = tokio::time::sleep_until(status.1 + STATUS_FADE), if fades => {
                 app.status.clear();
                 Vec::new()
             }
-            event = input.next() => match log_event(&journal, event) {
+            batch = next_input_batch(&mut input, &mut pending_input) => {
+              let (event, repeats) = batch.map_or((None, 1), |(event, count)| (Some(event), count));
+              match log_event(&journal, event) {
                 Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
                     if matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down | crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown | crossterm::event::KeyCode::Home | crossterm::event::KeyCode::End) { trace_scroll(&app, &format!("navigation key {key:?}")); }
+                    app.irc_read_enabled = true;
+                    interacted = true;
                     app.on_key(key)
                 }
                 Some(Ok(TermEvent::Mouse(mouse))) => {
-                    trace_scroll(&app, &format!("mouse {mouse:?}"));
-                    app.on_mouse(mouse)
+                    trace_scroll(&app, &format!("mouse {mouse:?} repeats={repeats}"));
+                    interacted = !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved);
+                    app.irc_read_enabled |= interacted;
+                    let mut actions = Vec::new();
+                    for _ in 0..repeats {
+                        actions.extend(app.on_mouse(mouse));
+                    }
+                    actions
                 },
                 Some(Ok(TermEvent::FocusGained)) => app.on_focus(true),
                 Some(Ok(TermEvent::FocusLost)) => app.on_focus(false),
                 // Pasted text arrives whole (bracketed paste), line breaks and all,
                 // instead of as keys where each break would send.
-                Some(Ok(TermEvent::Paste(text))) => app.on_paste(&text),
+                Some(Ok(TermEvent::Paste(text))) => {
+                    interacted = true; app.irc_read_enabled = true; app.on_paste(&text)
+                },
                 Some(Ok(_)) => Vec::new(),
                 Some(Err(_)) | None => break,
+              }
             },
             Some(msg) = rx.recv() => {
                 // Drain what else is waiting, then draw once.
@@ -787,11 +951,21 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             _ = hangup.recv() => break,
             _ = terminate.recv() => break,
         };
+        if interacted
+            && app.focused
+            && let Some(i) = app.selected
+            && app.chats[i].account.is_irc()
+        {
+            actions.extend(app.read_irc(i));
+        }
         if app.selected != selected_before {
             trace_scroll(&app, &format!("selection changed from {selected_before:?}"));
         }
 
         for action in actions {
+            if irc::local_action(&mut app, &action, &shared) {
+                continue;
+            }
             if let Action::Upload { path, .. } = &action {
                 analyse_audio(&mut app, path, &shared);
             }
@@ -854,6 +1028,8 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             break;
         }
     }
+    irc::persist(&mut app, &shared, &mut irc_kept);
+    shared.irc.stop();
     audio.send(crate::audio::Command::Quit);
     // Leave cleanly, or rooms keep showing us online for minutes (XEP-0198 parking).
     futures::future::join_all(shared.accounts.values().map(|(account, _)| account.stop())).await;
@@ -872,7 +1048,11 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
             .into_iter()
             .collect();
         for (room, nick) in &rooms {
-            let index = app.chat(account, room, ChatKind::Room { nick: nick.clone() });
+            let index = app.chat(
+                &crate::address::Address::from(account),
+                &crate::address::Address::from(room),
+                ChatKind::Room { nick: nick.clone() },
+            );
             app.chats[index].name = names.get(room.as_str()).cloned();
         }
         for summary in store
@@ -885,7 +1065,11 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
                 Some(nick) => ChatKind::Room { nick: nick.clone() },
                 None => ChatKind::Direct,
             };
-            let index = app.chat(account, &summary.chat, kind);
+            let index = app.chat(
+                &crate::address::Address::from(account),
+                &crate::address::Address::from(&summary.chat),
+                kind,
+            );
             let messages = store
                 .recent_messages(account, &summary.chat, HISTORY)
                 .unwrap_or_default();
@@ -952,6 +1136,7 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
+        Msg::Irc(event) => irc::apply(app, event, shared),
         Msg::NotificationRead { account, chat } => {
             // Resolve stable addresses now: the chat list may have changed while
             // the popup was visible. Never recreate a chat closed in the meantime.
@@ -985,6 +1170,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         Msg::AudioInfo(path, result) => {
             app.audio_pending.remove(&path);
             app.audio_info.insert(path, result);
+        }
+        Msg::AudioDuration(path, seconds) => {
+            app.audio_info.entry(path).or_insert(Ok(crate::audio::Info {
+                seconds,
+                peaks: Vec::new(),
+            }));
         }
         Msg::Audio(crate::audio::Event::Playback(state)) => app.playback = state,
         Msg::Audio(crate::audio::Event::Error(error)) => {
@@ -1040,16 +1231,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             // The database already keeps repeated MAM/offline copies once. The view
             // must merge them too, before an alert or another unread is generated.
             if message.direction == omtalk_omemo::Direction::Incoming
-                && app.merge_duplicate(&account, &message)
+                && app.merge_duplicate(&crate::address::Address::from(&account), &message)
             {
                 return;
             }
             // A correction changes the message it names, where it is: no alert.
-            if app.correct(&account, &message) {
+            if app.correct(&crate::address::Address::from(&account), &message) {
                 return;
             }
             // Before the chat shows it, while it is still "not looked at".
-            let alert = app.alert_for(&account, &message);
+            let alert = app.alert_for(&crate::address::Address::from(&account), &message);
             if alert.bell {
                 use std::io::Write;
                 let mut out = io::stdout();
@@ -1061,8 +1252,9 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if alert.desktop
                 && let Some(text) = &message.text
             {
-                let (who, room) = app.notice_names(&account, &message);
-                let (person, room_avatar) = app.notice_avatars(&account, &message);
+                let (who, room) = app.notice_names(&crate::address::Address::from(&account), &message);
+                let (person, room_avatar) =
+                    app.notice_avatars(&crate::address::Address::from(&account), &message);
                 // An action reads as one: "* bob waves".
                 let text = match crate::app::action_of(text) {
                     Some(action) => format!("* {who} {action}"),
@@ -1100,10 +1292,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     }
                 });
             }
-            if let Some(action) = app.ask_writer_avatar(&account, &message) {
+            if let Some(action) = app.ask_writer_avatar(&crate::address::Address::from(&account), &message) {
                 tokio::spawn(perform(action, shared.clone()));
             }
-            for action in app.on_incoming(&account, &message, at) {
+            for action in app.on_incoming(&crate::address::Address::from(&account), &message, at) {
                 tokio::spawn(perform(action, shared.clone()));
             }
             // Catch-up can bring older history after a local or remote read
@@ -1115,9 +1307,9 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 .find(|c| c.account == account && c.jid == message.peer)
             {
                 if let Some(id) = &chat.read_mark {
-                    let _ = shared.store.read_remotely(&account, &chat.jid, id);
+                    let _ = shared.store.read_remotely(&account, &message.peer, id);
                 }
-                if let Ok(Some(unread)) = shared.store.unread_after_mark(&account, &chat.jid, None) {
+                if let Ok(Some(unread)) = shared.store.unread_after_mark(&account, &message.peer, None) {
                     chat.unread = unread;
                 }
             }
@@ -1127,11 +1319,29 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         }
         Msg::Media { url, state } => {
             if let MediaState::Ready(path) = &state {
+                let file = omtalk_media::Media::Plain { url: url.clone() };
+                let metadata = file.metadata(&shared.cache);
+                for line in app.chats.iter_mut().flat_map(|c| &mut c.lines) {
+                    if let Some(media) = line.media.as_mut().filter(|m| m.url == url) {
+                        if let Some(metadata) = &metadata {
+                            media.name = metadata.name.clone();
+                        }
+                        media.image = (omtalk_media::Media::Plain {
+                            url: path.to_string_lossy().into_owned(),
+                        })
+                        .is_image();
+                    }
+                }
+            }
+            if let MediaState::Ready(path) = &state {
                 analyse_audio(app, path, shared);
             }
             // A picture is decoded aside: large ones take a moment.
             if let MediaState::Ready(path) = &state
-                && (omtalk_media::Media::Plain { url: url.clone() }).is_image()
+                && (omtalk_media::Media::Plain {
+                    url: path.to_string_lossy().into_owned(),
+                })
+                .is_image()
             {
                 let (path, url, tx) = (path.clone(), url.clone(), shared.tx.clone());
                 tokio::task::spawn_blocking(move || {
@@ -1149,7 +1359,10 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             None => app.status = text,
         },
         Msg::MessageSent { account, chat } => {
-            for action in app.typing_after_send(&account, &chat) {
+            for action in app.typing_after_send(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&chat),
+            ) {
                 tokio::spawn(perform(action, shared.clone()));
             }
         }
@@ -1158,7 +1371,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if let Some(kept) = kept_delivery(&state) {
                 let _ = shared.store.set_delivery(&account, &id, &kept);
             }
-            app.delivery(&account, &id, state)
+            app.delivery(&crate::address::Address::from(&account), &id, state)
         }
         Msg::Marked {
             account,
@@ -1168,12 +1381,19 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         } => {
             let kept = kept_delivery(&state);
             let read = state == Delivery::Read;
-            if let Some(chat) = app.delivery_from(&account, &from, &id, state)
-                && let Some(kept) = kept
+            if let Some(chat) = app.delivery_from(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&from),
+                &id,
+                state,
+            ) && let Some(kept) = kept
             {
-                let _ = shared.store.set_delivery_in(&account, &chat, &id, &kept);
+                let Some(chat) = chat.xmpp() else {
+                    return;
+                };
+                let _ = shared.store.set_delivery_in(&account, chat, &id, &kept);
                 if read {
-                    let _ = shared.store.set_read_up_to(&account, &chat, &id);
+                    let _ = shared.store.set_read_up_to(&account, chat, &id);
                 }
             }
         }
@@ -1182,7 +1402,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             restore_local_unread(app, &shared.store, &account);
             // The user may have read further since a background task counted this.
             let marks = counted(&shared.store, &account, marks);
-            for action in app.read_marks(&account, marks) {
+            for action in app.read_marks(
+                &crate::address::Address::from(&account),
+                marks
+                    .into_iter()
+                    .map(|(chat, id, count)| (chat.into(), id, count))
+                    .collect(),
+            ) {
                 tokio::spawn(perform(action, shared.clone()));
             }
         }
@@ -1192,14 +1418,18 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             mut lines,
         } => {
             prepare_media(&mut lines, shared);
-            let index = app.chat(&account, &chat, ChatKind::Direct);
+            let index = app.chat(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&chat),
+                ChatKind::Direct,
+            );
             let newer = std::mem::take(&mut app.chats[index].lines);
             app.chats[index].lines = lines;
             app.chats[index].lines.extend(newer);
         }
         Msg::Avatar { jid, hash } => match hash {
-            Some(hash) => drop(app.avatars.insert(jid, hash)),
-            None => drop(app.avatars.remove(&jid)),
+            Some(hash) => drop(app.avatars.insert(crate::address::Address::from(jid), hash)),
+            None => drop(app.avatars.remove(&crate::address::Address::from(&jid))),
         },
         // Kept for the next start, which shows them before the roster comes.
         Msg::Names {
@@ -1210,8 +1440,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if whole {
                 app.contacts.retain(|(a, _)| a != &account);
             }
-            app.contacts
-                .extend(names.iter().map(|(jid, _)| (account.clone(), jid.clone())));
+            app.contacts.extend(
+                names
+                    .iter()
+                    .map(|(jid, _)| (account.clone().into(), jid.clone().into())),
+            );
             for (jid, name) in &names {
                 let _ = shared
                     .store
@@ -1219,8 +1452,9 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             }
             // The whole roster: those kept from before who are no longer in it go.
             if whole {
-                let listed: std::collections::BTreeSet<&BareJid> = names.iter().map(|(jid, _)| jid).collect();
-                let gone: Vec<BareJid> = app
+                let listed: std::collections::BTreeSet<crate::address::Address> =
+                    names.iter().map(|(jid, _)| jid.clone().into()).collect();
+                let gone: Vec<crate::address::Address> = app
                     .names
                     .keys()
                     .filter(|(a, jid)| *a == account && !listed.contains(jid))
@@ -1231,23 +1465,40 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                         .store
                         .keep(&format!("{KEPT_CONTACT_NAME}{account}/{jid}"), None);
                 }
-                app.contact_names(&account, gone.into_iter().map(|jid| (jid, None)).collect());
+                app.contact_names(
+                    &crate::address::Address::from(&account),
+                    gone.into_iter().map(|jid| (jid, None)).collect(),
+                );
             }
-            app.contact_names(&account, names)
+            app.contact_names(
+                &crate::address::Address::from(&account),
+                names.into_iter().map(|(jid, name)| (jid.into(), name)).collect(),
+            )
         }
         Msg::Nickname { account, jid, nick } => {
             let _ = shared
                 .store
                 .keep(&format!("{KEPT_NICKNAME}{account}/{jid}"), nick.as_deref());
-            app.nickname(&account, &jid, nick)
+            app.nickname(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&jid),
+                nick,
+            )
         }
-        Msg::Reactions { account, reactions } => drop(app.reacted(&account, &reactions)),
+        Msg::Reactions { account, reactions } => {
+            let _ = app.reacted(&crate::address::Address::from(&account), &reactions);
+        }
         Msg::Found {
             account,
             chat,
             words,
             found,
-        } => app.found(&account, &chat, &words, found),
+        } => app.found(
+            &crate::address::Address::from(&account),
+            &crate::address::Address::from(&chat),
+            &words,
+            found,
+        ),
         Msg::Jumped {
             account,
             chat,
@@ -1256,7 +1507,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         } => {
             let mut lines = lines;
             prepare_media(&mut lines, shared);
-            app.jumped(&account, &chat, lines, at);
+            app.jumped(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&chat),
+                lines,
+                at,
+            );
         }
         Msg::Older {
             account,
@@ -1274,7 +1530,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     lines.len()
                 ),
             );
-            app.older(&account, &chat, lines, before, done);
+            app.older(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&chat),
+                lines,
+                before,
+                done,
+            );
         }
         Msg::RoomName { account, room, name } => {
             // Kept for the next start, which shows it before anything is asked.
@@ -1294,7 +1556,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             room,
             by,
             topic,
-        } => app.topic(&account, &room, by, topic, now()),
+        } => app.topic(
+            &crate::address::Address::from(&account),
+            &crate::address::Address::from(&room),
+            by,
+            topic,
+            now(),
+        ),
         Msg::Members {
             account,
             room,
@@ -1305,7 +1573,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 .iter_mut()
                 .find(|c| c.account == account && c.jid == room)
             {
-                chat.members = members;
+                chat.members = members.into_iter().map(Into::into).collect();
             }
         }
         Msg::Keys(rows) => {
@@ -1318,7 +1586,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 .current()
                 .is_some_and(|c| c.account == account && c.jid == jid)
             {
-                tokio::spawn(perform(Action::Devices { account, jid }, shared.clone()));
+                tokio::spawn(perform(
+                    Action::Devices {
+                        account: crate::address::Address::from(account),
+                        jid: crate::address::Address::from(jid),
+                    },
+                    shared.clone(),
+                ));
             }
         }
         Msg::Paste(text) => {
@@ -1331,8 +1605,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             chat,
             who,
             state,
-        } => app.typing(&account, &chat, who, state, now()),
-        Msg::Uploaded { account, id, link } => app.uploaded(&account, &id, &link),
+        } => app.typing(
+            &crate::address::Address::from(&account),
+            &crate::address::Address::from(&chat),
+            who,
+            state,
+            now(),
+        ),
+        Msg::Uploaded { account, id, link } => {
+            app.uploaded(&crate::address::Address::from(&account), &id, &link)
+        }
         Msg::Offer(path) => {
             app.input = format!("/upload {}", path.display());
             app.cursor = app.input.chars().count();
@@ -1345,23 +1627,29 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         }
         Msg::Online { account, online } => {
             let peer = online.account.clone();
-            app.presence(&account, online, now());
+            app.presence(&crate::address::Address::from(&account), online, now());
             if app
                 .current()
                 .is_some_and(|c| c.kind == ChatKind::Direct && c.account == account && c.jid == peer)
             {
-                for action in app.ask_bot_info(&account, &peer) {
+                for action in app.ask_bot_info(
+                    &crate::address::Address::from(&account),
+                    &crate::address::Address::from(&peer),
+                ) {
                     tokio::spawn(perform(action, shared.clone()));
                 }
             }
         }
         Msg::Bot { account, peer } => {
-            app.mark_bot(&account, &peer);
+            app.mark_bot(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&peer),
+            );
             let _ = shared
                 .store
                 .keep(&format!("{KEPT_BOT}{account}/{peer}"), Some("1"));
         }
-        Msg::Log { account, text } => app.server_log(&account, text, now()),
+        Msg::Log { account, text } => app.server_log(&crate::address::Address::from(&account), text, now()),
         Msg::Bound {
             account,
             resource,
@@ -1383,12 +1671,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     .filter(|c| c.kind == ChatKind::Direct && c.account == account)
                     .map(|c| c.jid.clone())
                 {
-                    for action in app.ask_bot_info(&account, &peer) {
+                    for action in app.ask_bot_info(&crate::address::Address::from(&account), &peer) {
                         tokio::spawn(perform(action, shared.clone()));
                     }
                 }
             }
-            app.own_resource.insert(account, resource);
+            app.own_resource
+                .insert(crate::address::Address::from(account), resource);
         }
         Msg::Listed { jid, node, listing } => {
             if let Some(services) = app.services.as_mut().filter(|s| !s.room) {
@@ -1453,29 +1742,42 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             chat: Some(chat),
             text,
         } => {
-            let index = app.chat(&account, &chat, ChatKind::Direct);
+            let index = app.chat(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&chat),
+                ChatKind::Direct,
+            );
             app.notice(Some(index), text, now());
         }
         Msg::Notice {
             account,
             chat: None,
             text,
-        } => app.server_notice(&account, text, now()),
+        } => app.server_notice(&crate::address::Address::from(&account), text, now()),
         Msg::Connection { account, state } => {
-            let index = app.server_chat(&account);
-            if app.connection.get(&account) != Some(&state) {
+            let index = app.server_chat(&crate::address::Address::from(&account));
+            if app.connection.get(&crate::address::Address::from(&account)) != Some(&state) {
                 app.notice(Some(index), state.words(), now());
             }
-            app.connection.insert(account, state);
+            app.connection
+                .insert(crate::address::Address::from(account), state);
         }
         Msg::Devices { account, jid, rows } => {
-            let index = app.chat(&account, &jid, ChatKind::Direct);
+            let index = app.chat(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&jid),
+                ChatKind::Direct,
+            );
             app.chats[index].devices = Some(rows);
         }
         Msg::Chats { account, peers } => {
             let closed = shared.store.closed_chats(&account).unwrap_or_default();
             for peer in peers.iter().filter(|p| !closed.contains(p)) {
-                app.chat(&account, peer, ChatKind::Direct);
+                app.chat(
+                    &crate::address::Address::from(&account),
+                    &crate::address::Address::from(peer),
+                    ChatKind::Direct,
+                );
                 let _ = shared.store.keep_chat(&account, peer);
             }
         }
@@ -1487,12 +1789,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         } => {
             tokio::spawn(perform(
                 Action::Members {
-                    account: account.clone(),
-                    room: room.clone(),
+                    account: crate::address::Address::from(account.clone()),
+                    room: crate::address::Address::from(room.clone()),
                 },
                 shared.clone(),
             ));
-            let index = app.chat(&account, &room, ChatKind::Room { nick });
+            let index = app.chat(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&room),
+                ChatKind::Room { nick },
+            );
             // Its name as last told, until the room tells it again.
             if app.chats[index].name.is_none() {
                 app.chats[index].name = shared
@@ -1548,7 +1854,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 .position(|c| c.account == account && c.jid == room)
             {
                 Some(index) => Some(index),
-                None if present => Some(app.chat(&account, &room, ChatKind::Room { nick: String::new() })),
+                None if present => Some(app.chat(
+                    &crate::address::Address::from(&account),
+                    &crate::address::Address::from(&room),
+                    ChatKind::Room { nick: String::new() },
+                )),
                 None => None,
             };
             if let Some(chat) = index.map(|i| &mut app.chats[i]) {
@@ -1562,7 +1872,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                         Some(mark) => chat.occupant_mark.insert(nick.clone(), mark),
                         None => chat.occupant_mark.remove(&nick),
                     };
-                    chat.occupants.insert(nick, real);
+                    chat.occupants.insert(nick, real.map(Into::into));
                 } else {
                     chat.occupant_status.remove(&nick);
                     chat.occupant_mark.remove(&nick);
@@ -1679,8 +1989,8 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                 if let Some(room) = muc::config_changed(message).filter(|room| xmpp.in_room(room)) {
                     tokio::spawn(perform(
                         Action::RoomName {
-                            account: account.clone(),
-                            room,
+                            account: crate::address::Address::from(account.clone()),
+                            room: crate::address::Address::from(room),
                         },
                         shared.clone(),
                     ));
@@ -1940,7 +2250,11 @@ const ROOM_CHECK: std::time::Duration = std::time::Duration::from_secs(300);
 /// Local progress survives a failed/missing server publication and a restart.
 fn flush_local_reads(app: &mut App, store: &Store) {
     for ((account, chat), point) in std::mem::take(&mut app.local_reads) {
-        if let Err(problem) = store.read_locally(&account, &chat, &point) {
+        if let Err(problem) = store.read_locally(
+            account.xmpp().expect("XMPP read frontier"),
+            chat.xmpp().expect("XMPP read frontier"),
+            &point,
+        ) {
             app.status = trf!(
                 "read position was not saved: {problem}",
                 "позиция прочитанного не сохранилась: {problem}"
@@ -1952,7 +2266,9 @@ fn flush_local_reads(app: &mut App, store: &Store) {
 
 fn restore_local_unread(app: &mut App, store: &Store, account: &BareJid) {
     for chat in app.chats.iter_mut().filter(|c| &c.account == account) {
-        if let Ok(Some(unread)) = store.unread_after_mark(account, &chat.jid, None) {
+        if let Ok(Some(unread)) =
+            store.unread_after_mark(account, chat.jid.xmpp().expect("XMPP account matched"), None)
+        {
             chat.unread = unread;
         }
     }
@@ -2501,7 +2817,7 @@ async fn key_rows(
         let devices = omemo.devices(owner).await.map_err(|e| e.to_string())?;
         let seen = store.devices_seen(account, owner).unwrap_or_default();
         rows.extend(devices.into_iter().map(|d| crate::keys::KeyRow {
-            owner: owner.clone(),
+            owner: crate::address::Address::from(owner.clone()),
             device: d.device,
             fingerprint: d.identity_key.map(|k| omtalk_omemo::fingerprint(&k)),
             trust: d.trust,
@@ -2644,9 +2960,19 @@ fn action_is_primary(action: &Action) -> bool {
 }
 
 async fn perform(action: Action, shared: Shared) {
+    if irc::perform(&action, &shared).await {
+        return;
+    }
     let tell = |msg| drop(shared.tx.send(msg));
     let get = |account: &BareJid| shared.accounts.get(account).cloned();
     match action {
+        Action::IrcSend { .. }
+        | Action::IrcRaw { .. }
+        | Action::IrcRead { .. }
+        | Action::IrcHistory { .. }
+        | Action::SaveIrcConversation { .. }
+        | Action::IrcRetry { .. }
+        | Action::IrcCancel { .. } => unreachable!("handled by IRC dispatcher"),
         Action::SaveFile {
             id,
             source,
@@ -2658,6 +2984,12 @@ async fn perform(action: Action, shared: Shared) {
         }
 
         Action::NowPlaying { account, chat } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(chat) = chat.xmpp().cloned() else {
+                return;
+            };
             let text = crate::mpris::now_playing().await;
             tell(Msg::NowPlaying { account, chat, text });
         }
@@ -2676,6 +3008,12 @@ async fn perform(action: Action, shared: Shared) {
             reply,
             replace,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(to) = to.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
@@ -2854,6 +3192,12 @@ async fn perform(action: Action, shared: Shared) {
             room,
             state,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(to) = to.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let _ = xmpp.send(omtalk_xmpp::chatstates::notice(&to, room, state)).await;
         }
@@ -2864,6 +3208,12 @@ async fn perform(action: Action, shared: Shared) {
             marker,
             archive_id,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(to) = to.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             // In a room the room's archive names the message; in a chat, one's own.
             if let Some(id) = archive_id {
@@ -2901,6 +3251,12 @@ async fn perform(action: Action, shared: Shared) {
             have,
             before,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(chat) = chat.xmpp().cloned() else {
+                return;
+            };
             // From the store first: what this device read, decrypted. Then the archive,
             // what is kept going into the store and coming from there in order.
             let page = |have| {
@@ -2956,6 +3312,12 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::Search { account, chat, words } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(chat) = chat.xmpp().cloned() else {
+                return;
+            };
             let found = shared
                 .store
                 .search(&account, &chat, &words, SEARCH_LIMIT)
@@ -2984,6 +3346,12 @@ async fn perform(action: Action, shared: Shared) {
             room,
             at,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(chat) = chat.xmpp().cloned() else {
+                return;
+            };
             let mut lines = stored_lines(
                 shared
                     .store
@@ -2999,9 +3367,21 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::ReopenChat { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let _ = shared.store.reopen_chat(&account, &jid);
         }
         Action::NoAutojoin { account, room } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let marks = match xmpp.bookmarks().await {
                 Ok(marks) => marks,
@@ -3024,6 +3404,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::SetOmemo { account, chat, on } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(chat) = chat.xmpp().cloned() else {
+                return;
+            };
             let key = format!("{KEPT_OMEMO}{account}/{chat}");
             let _ = shared.store.keep(&key, Some(if on { "1" } else { "0" }));
         }
@@ -3047,6 +3433,12 @@ async fn perform(action: Action, shared: Shared) {
             by,
             reactions,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(chat) = chat.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let message = omtalk_xmpp::reactions::message(&chat, room, &id, &reactions);
             match xmpp.send(message).await {
@@ -3060,6 +3452,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::Join { account, room, nick } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
@@ -3078,12 +3476,24 @@ async fn perform(action: Action, shared: Shared) {
             .await;
         }
         Action::Leave { account, room, nick } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let _ = xmpp.leave(&room, &nick).await;
             let _ = shared.store.forget_room(&account, &room);
             tell(Msg::Left { account, room });
         }
         Action::RemoveContact { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             // The roster push that follows takes its name away.
             let text = match xmpp.remove_contact(&jid).await {
@@ -3097,6 +3507,12 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::RenameContact { account, jid, name } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             // The roster push that follows shows the name everywhere.
             let text = match (xmpp.rename_contact(&jid, name.as_deref()).await, &name) {
@@ -3113,6 +3529,9 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::SetAvatar { account, path } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let set = match path {
                 // Read and made small aside: a large photo takes a moment.
@@ -3145,6 +3564,9 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::SetNickname { account, nick } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let set = xmpp.set_nickname(nick.as_deref()).await;
             if set.is_ok() {
@@ -3173,6 +3595,12 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::AddContact { account, jid, name } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let text = match xmpp.add_contact(&jid, name.as_deref()).await {
                 Ok(()) => tr!(
@@ -3189,6 +3617,12 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::Accept { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let text = match xmpp.accept_contact(&jid).await {
                 Ok(()) => tr!("sees your status", "видит ваш статус").to_owned(),
@@ -3201,6 +3635,12 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::Refuse { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let _ = xmpp.refuse_contact(&jid).await;
             tell(Msg::Notice {
@@ -3217,6 +3657,12 @@ async fn perform(action: Action, shared: Shared) {
             encrypted,
             id,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(to) = to.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
@@ -3322,6 +3768,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::CloseChat { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             if let Err(e) = shared.store.close_chat(&account, &jid) {
                 tell(Msg::Status(trf!(
                     "the chat {jid} did not close for good: {e}",
@@ -3330,7 +3782,18 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::SaveFolders(folders) => {
-            if let Err(e) = shared.store.save_folders(&folders) {
+            if let Err(e) = shared.store.save_folders(
+                &folders
+                    .iter()
+                    .filter_map(|f| {
+                        Some(omtalk_store::Folder {
+                            account: f.account.xmpp()?.clone(),
+                            name: f.name.clone(),
+                            chats: f.chats.iter().filter_map(|c| c.xmpp().cloned()).collect(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ) {
                 tell(Msg::Status(trf!(
                     "the folders were not saved: {e}",
                     "папки не сохранились: {e}"
@@ -3338,6 +3801,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::Devices { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((_, omemo)) = get(&account) else { return };
             let seen = shared.store.devices_seen(&account, &jid).unwrap_or_default();
             let rows = |devices: Vec<omtalk_omemo::DeviceInfo>| -> Vec<DeviceRow> {
@@ -3481,12 +3950,24 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::RoomName { account, room } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             if let Ok(name) = xmpp.room_name(&room).await {
                 tell(Msg::RoomName { account, room, name });
             }
         }
         Action::SetTopic { account, room, topic } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             if let Err(e) = xmpp.set_subject(&room, &topic).await {
                 tell(Msg::Notice {
@@ -3501,6 +3982,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::SetRoomName { account, room, name } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             match xmpp.set_room_name(&room, &name).await {
                 Ok(()) => tell(Msg::RoomName {
@@ -3525,6 +4012,12 @@ async fn perform(action: Action, shared: Shared) {
             name,
             nick,
         } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, omemo)) = get(&account) else {
                 return;
             };
@@ -3591,6 +4084,15 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::Invite { account, room, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let made = xmpp
                 .set_affiliation(&room, &jid, omtalk_xmpp::Affiliation::Member)
@@ -3620,6 +4122,12 @@ async fn perform(action: Action, shared: Shared) {
             });
         }
         Action::Nick { account, room, nick } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             // Entering again under another nick is how a nick changes (XEP-0045, 7.6).
             match xmpp.join(&room, &nick).await {
@@ -3646,6 +4154,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::History { account, peer } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(peer) = peer.xmpp().cloned() else {
+                return;
+            };
             // A chat closed and opened again has its history here: that, not the archive
             // read a second time (and every message kept twice).
             let kept = shared
@@ -3684,6 +4198,12 @@ async fn perform(action: Action, shared: Shared) {
             }
         }
         Action::Avatar { account, jid, room } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(jid) = jid.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let from = if room {
                 AvatarFrom::VCard(None)
@@ -3693,6 +4213,12 @@ async fn perform(action: Action, shared: Shared) {
             load_avatar(shared.clone(), xmpp, jid, from).await;
         }
         Action::Members { account, room } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
+            let Some(room) = room.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             let members = read_members(&xmpp, &room).await;
             tell(Msg::Members {
@@ -3707,12 +4233,18 @@ async fn perform(action: Action, shared: Shared) {
                 | crate::keys::Request::Trust { account, .. }
                 | crate::keys::Request::Remove { account, .. } => account.clone(),
             };
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
             let Some((_, omemo)) = get(&account) else { return };
             let peer = match request {
-                crate::keys::Request::Load { peer, .. } => peer,
+                crate::keys::Request::Load { peer, .. } => peer.and_then(|p| p.xmpp().cloned()),
                 crate::keys::Request::Trust {
                     owner, device, trust, ..
                 } => {
+                    let Some(owner) = owner.xmpp().cloned() else {
+                        return;
+                    };
                     if let Err(e) = omemo.set_trust(&owner, device, trust).await {
                         tell(Msg::Keys(Err(e.to_string())));
                         return;
@@ -3782,6 +4314,9 @@ async fn perform(action: Action, shared: Shared) {
             fetch_media(link, shared.clone()).await;
         }
         Action::BotInfo { account, jid } => {
+            let Some(account) = account.xmpp().cloned() else {
+                return;
+            };
             let Some((xmpp, _)) = get(&account) else { return };
             if let Ok(info) = xmpp.disco_info(&jid, None).await
                 && info.is_bot()
@@ -3849,8 +4384,12 @@ fn folded_to_kept(folded: &std::collections::BTreeSet<crate::app::Group>) -> Str
     folded
         .iter()
         .map(|group| match group {
-            crate::app::Group::Account(account) => format!("account\t{account}"),
-            crate::app::Group::Folder(account, name) => format!("folder\t{account}\t{name}"),
+            crate::app::Group::Pinned => "pinned".into(),
+            crate::app::Group::Profile(profile) => {
+                format!("profile\t{}", serde_json::to_string(profile).unwrap())
+            }
+            crate::app::Group::Account(account) => format!("account\t{}", account.kept()),
+            crate::app::Group::Folder(account, name) => format!("folder\t{}\t{name}", account.kept()),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -3859,10 +4398,19 @@ fn folded_to_kept(folded: &std::collections::BTreeSet<crate::app::Group>) -> Str
 fn folded_from_kept(kept: &str) -> std::collections::BTreeSet<crate::app::Group> {
     kept.lines()
         .filter_map(|line| {
+            if line == "pinned" {
+                return Some(crate::app::Group::Pinned);
+            }
             let mut parts = line.splitn(3, '\t');
-            match (parts.next()?, parts.next()?.parse().ok()?, parts.next()) {
-                ("account", account, None) => Some(crate::app::Group::Account(account)),
-                ("folder", account, Some(name)) => Some(crate::app::Group::Folder(account, name.to_owned())),
+            let kind = parts.next()?;
+            let value = parts.next()?;
+            if kind == "profile" {
+                return serde_json::from_str(value).ok().map(crate::app::Group::Profile);
+            }
+            let account = crate::address::Address::from_kept(value)?;
+            match (kind, parts.next()) {
+                ("account", None) => Some(crate::app::Group::Account(account)),
+                ("folder", Some(name)) => Some(crate::app::Group::Folder(account, name.into())),
                 _ => None,
             }
         })
@@ -3871,13 +4419,29 @@ fn folded_from_kept(kept: &str) -> std::collections::BTreeSet<crate::app::Group>
 
 /// Local notification mutes, by "account/chat".
 const KEPT_MUTED: &str = "muted/";
+
+fn restore_pins(store: &Store, app: &mut App) {
+    if let Some(value) = store.kept("pins").ok().flatten()
+        && let Ok(pins) = serde_json::from_str::<Vec<(String, String)>>(&value)
+    {
+        app.pins = pins
+            .into_iter()
+            .filter_map(|(a, c)| {
+                Some((
+                    crate::address::Address::from_kept(&a)?,
+                    crate::address::Address::from_kept(&c)?,
+                ))
+            })
+            .collect();
+    }
+}
 const KEPT_BOT: &str = "bot/";
 const KEPT_CHAT_NOTIFY: &str = "chat-notify/";
 
 fn save_chat_notify(
     store: &Store,
-    account: &BareJid,
-    peer: &BareJid,
+    account: &crate::address::Address,
+    peer: &crate::address::Address,
     prefs: &crate::notify::ChatNotify,
 ) -> Result<(), String> {
     let value = toml::to_string(prefs).map_err(|e| e.to_string())?;
@@ -3906,15 +4470,18 @@ fn restore_bots(store: &Store, app: &mut App) {
             && let Some((account, peer)) = key.split_once('/')
             && let (Ok(account), Ok(peer)) = (account.parse::<BareJid>(), peer.parse::<BareJid>())
         {
-            app.mark_bot(&account, &peer);
+            app.mark_bot(
+                &crate::address::Address::from(&account),
+                &crate::address::Address::from(&peer),
+            );
         }
     }
 }
 
 fn save_mute(
     store: &Store,
-    account: &BareJid,
-    chat: &BareJid,
+    account: &crate::address::Address,
+    chat: &crate::address::Address,
     muted: bool,
 ) -> Result<(), omtalk_store::Error> {
     store.keep(&format!("{KEPT_MUTED}{account}/{chat}"), muted.then_some("1"))
@@ -3926,7 +4493,10 @@ fn restore_mutes(store: &Store, app: &mut App) {
             && let Some((account, chat)) = key.split_once('/')
             && let (Ok(account), Ok(chat)) = (account.parse::<BareJid>(), chat.parse::<BareJid>())
         {
-            app.muted_chats.insert((account, chat));
+            app.muted_chats.insert((
+                crate::address::Address::from(account),
+                crate::address::Address::from(chat),
+            ));
         }
     }
 }
@@ -3992,15 +4562,21 @@ fn analyse_audio(app: &mut App, path: &std::path::Path, shared: &Shared) {
     }
     let path = path.to_owned();
     let tx = shared.tx.clone();
+    let cache = shared.cache.clone();
     tokio::spawn(async move {
         static SCANS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
         let Ok(_permit) = SCANS.acquire().await else {
             return;
         };
         let scan = path.clone();
-        let info = tokio::task::spawn_blocking(move || crate::audio::inspect(&scan))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+        let progress = tx.clone();
+        let info = tokio::task::spawn_blocking(move || {
+            crate::audio::inspect_cached(&scan, &cache, |seconds| {
+                let _ = progress.send(Msg::AudioDuration(scan.clone(), seconds));
+            })
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
         let _ = tx.send(Msg::AudioInfo(path, info));
     });
 }
@@ -4009,7 +4585,40 @@ fn prepare_media(lines: &mut [Line], shared: &Shared) {
     let mut links = Vec::new();
     for line in lines {
         line.set_image_links(shared.image_links);
-        if let Some(media) = &line.media {
+        if let Some(media) = &mut line.media {
+            if line.irc
+                && let MediaState::Ready(path) = &media.state
+                && path.is_file()
+            {
+                // Own uploads already have the original file. Decode/analyse it
+                // through the common media path, without downloading the URL again.
+                let _ = shared.tx.send(Msg::Media {
+                    url: media.url.clone(),
+                    state: media.state.clone(),
+                });
+                continue;
+            }
+            if line.irc
+                && let Some(link) = omtalk_media::Media::link(&media.link)
+            {
+                let cached = link.cached(&shared.cache);
+                if let Some(path) = cached {
+                    if let Some(metadata) = link.metadata(&shared.cache) {
+                        media.name = metadata.name;
+                    }
+                    media.state = MediaState::Ready(path);
+                    let _ = shared.tx.send(Msg::Media {
+                        url: media.url.clone(),
+                        state: media.state.clone(),
+                    });
+                    continue;
+                }
+                let automatic =
+                    omtalk_media::known_file(&link.name()) && (!link.is_image() || shared.image_links);
+                if !automatic || !shared.auto_download {
+                    continue;
+                }
+            }
             links.push(media.link.clone());
         }
     }
@@ -4022,7 +4631,7 @@ fn prepare_media(lines: &mut [Line], shared: &Shared) {
 
 fn fetch_if_media(text: &str, shared_file: bool, shared: &Shared) {
     let media = if shared_file {
-        omtalk_media::Media::shared(text)
+        omtalk_media::Media::shared(text).or_else(|| omtalk_media::Media::link(text))
     } else {
         omtalk_media::Media::from_text(text).or_else(|| {
             shared
@@ -4143,7 +4752,7 @@ fn save_avatar(dir: &std::path::Path, bytes: &[u8]) -> Result<String, String> {
 }
 
 async fn fetch_media(link: String, shared: Shared) {
-    let Some(media) = omtalk_media::Media::shared(&link) else {
+    let Some(media) = omtalk_media::Media::shared(&link).or_else(|| omtalk_media::Media::link(&link)) else {
         return;
     };
     static ACTIVE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
@@ -4198,6 +4807,61 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mouse_flood_keeps_click_order_without_a_redraw_for_every_motion() {
+        use super::*;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 50,
+            row: 15,
+            modifiers: KeyModifiers::NONE,
+        };
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            ..wheel
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 8,
+            ..wheel
+        };
+        let mut events = Vec::new();
+        for n in 0..2000 {
+            events.push(Ok(TermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: n % 80,
+                ..wheel
+            })));
+        }
+        for _ in 0..1000 {
+            events.push(Ok(TermEvent::Mouse(wheel)));
+        }
+        events.extend([Ok(TermEvent::Mouse(click)), Ok(TermEvent::Mouse(drag))]);
+        let mut input = futures::stream::iter(events);
+        let mut pending = None;
+        let mut counts = (0, 0);
+        let mut clicks = Vec::new();
+        while let Some((event, count)) = next_input_batch(&mut input, &mut pending).await {
+            counts.0 += 1;
+            match event.unwrap() {
+                TermEvent::Mouse(m) if m == wheel => counts.1 += count,
+                TermEvent::Mouse(m) => clicks.push(m),
+                _ => panic!("unexpected input"),
+            }
+        }
+        assert_eq!(counts.1, 1000, "every wheel step is kept");
+        assert!(
+            counts.0 <= 18,
+            "a touchpad burst must not require 3002 full transcript redraws"
+        );
+        assert_eq!(
+            clicks,
+            [click, drag],
+            "clicks and drags cannot be discarded/reordered"
+        );
+    }
     #[test]
     fn local_notification_overrides_survive_restart_and_reset_to_inherit() {
         use super::*;
@@ -4211,13 +4875,39 @@ mod tests {
             mentions_only: Some(true),
             sound: Some(false),
         };
-        save_chat_notify(&store, &me, &peer, &prefs).unwrap();
-        let mut app = App::new(vec![me.clone(), other.clone()], Modifier::Ctrl, 26, 30);
+        save_chat_notify(
+            &store,
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            &prefs,
+        )
+        .unwrap();
+        let mut app = App::new(
+            vec![crate::address::Address::Xmpp(me.clone()), other.clone().into()],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
         restore_chat_notify(&store, &mut app);
-        assert_eq!(app.chat_notify.get(&(me.clone(), peer.clone())), Some(&prefs));
-        assert!(!app.chat_notify.contains_key(&(other, peer.clone())));
-        save_chat_notify(&store, &me, &peer, &Default::default()).unwrap();
-        let mut reset = App::new(vec![me], Modifier::Ctrl, 26, 30);
+        assert_eq!(
+            app.chat_notify.get(&(
+                crate::address::Address::Xmpp(me.clone()),
+                crate::address::Address::Xmpp(peer.clone())
+            )),
+            Some(&prefs)
+        );
+        assert!(!app.chat_notify.contains_key(&(
+            crate::address::Address::Xmpp(other),
+            crate::address::Address::Xmpp(peer.clone())
+        )));
+        save_chat_notify(
+            &store,
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut reset = App::new(vec![crate::address::Address::Xmpp(me)], Modifier::Ctrl, 26, 30);
         restore_chat_notify(&store, &mut reset);
         assert!(reset.chat_notify.is_empty());
     }
@@ -4229,6 +4919,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4245,17 +4937,28 @@ mod tests {
         let room: BareJid = "#usue%irc.example.org@bridge.example.org".parse().unwrap();
         let second: BareJid = "chat@conference.example.org".parse().unwrap();
         for fresh in [false, true] {
-            let mut app = App::new(vec![me.clone(), other.clone()], Modifier::Ctrl, 26, 30);
+            let mut app = App::new(
+                vec![crate::address::Address::Xmpp(me.clone()), other.clone().into()],
+                Modifier::Ctrl,
+                26,
+                30,
+            );
             let mut chats = Vec::new();
             for (account, jid) in [(&me, &room), (&me, &second), (&other, &room)] {
-                let index = app.chat(account, jid, ChatKind::Room { nick: "me".into() });
+                let index = app.chat(
+                    &crate::address::Address::from(account),
+                    &crate::address::Address::from(jid),
+                    ChatKind::Room { nick: "me".into() },
+                );
                 let chat = &mut app.chats[index];
-                chat.occupants
-                    .insert("V_for_Vendetta".into(), Some(other.clone()));
+                chat.occupants.insert(
+                    "V_for_Vendetta".into(),
+                    Some(crate::address::Address::Xmpp(other.clone())),
+                );
                 chat.occupant_status
                     .insert("V_for_Vendetta".into(), Default::default());
                 chat.occupant_mark.insert("V_for_Vendetta".into(), "@");
-                chat.members.push(other.clone());
+                chat.members.push(crate::address::Address::Xmpp(other.clone()));
                 chat.lines
                     .push(Line::message(1, "nick".into(), "history".into(), false, false));
                 chat.unread = 3;
@@ -4313,6 +5016,8 @@ mod tests {
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4326,7 +5031,12 @@ mod tests {
         };
         let me: BareJid = "me@example.org".parse().unwrap();
         let peer: BareJid = "helper@example.org".parse().unwrap();
-        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let mut app = App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
         apply(
             &mut app,
             Msg::Bot {
@@ -4335,9 +5045,18 @@ mod tests {
             },
             &shared,
         );
-        let mut restarted = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let mut restarted = App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
         restore_bots(&store, &mut restarted);
-        let chat = restarted.chat(&me, &peer, ChatKind::Direct);
+        let chat = restarted.chat(
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            ChatKind::Direct,
+        );
         assert!(restarted.chats[chat].bot);
     }
 
@@ -4347,6 +5066,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4461,6 +5182,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: [(me.clone(), (account.clone(), omemo.clone()))].into(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4521,6 +5244,8 @@ mod tests {
         let store = Store::open(&dir.path().join("history.db")).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4707,6 +5432,8 @@ mod tests {
         let store = Store::open(&dir.path().join("history.db")).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4800,6 +5527,8 @@ mod tests {
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4811,9 +5540,18 @@ mod tests {
             store: store.clone(),
             tx,
         };
-        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
-        let server = app.server_chat(&me);
-        let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+        let mut app = App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
+        let server = app.server_chat(&crate::address::Address::from(&me));
+        let chat = app.chat(
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&room),
+            ChatKind::Room { nick: "me".into() },
+        );
         app.select(server);
         // The office laptop read through message 100. Its marker arrives before
         // some older archive pages, which are new to this laptop, but already read.
@@ -4874,6 +5612,8 @@ mod tests {
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let shared = Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4885,8 +5625,13 @@ mod tests {
             store: store.clone(),
             tx,
         };
-        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
-        let server = app.server_chat(&me);
+        let mut app = App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
+        let server = app.server_chat(&crate::address::Address::from(&me));
         app.select(server);
         // A room bookmarked on the other laptop does not exist locally yet.
         assert!(!app.chats.iter().any(|c| c.jid == room));
@@ -4898,7 +5643,11 @@ mod tests {
             },
             &shared,
         );
-        let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
+        let chat = app.chat(
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&room),
+            ChatKind::Room { nick: "me".into() },
+        );
         for at in 401..506 {
             let message = message(at);
             keep(&shared, &me, &message);
@@ -4933,6 +5682,8 @@ mod tests {
         let peer: BareJid = "chat@example.org".parse().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let shared = super::Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -4945,9 +5696,22 @@ mod tests {
             tx,
         };
         for kind in [ChatKind::Direct, ChatKind::Room { nick: "me".into() }] {
-            let mut app = App::new(vec![a.clone(), b.clone()], Modifier::Ctrl, 26, 30);
-            let first = app.chat(&a, &peer, kind.clone());
-            let target = app.chat(&b, &peer, kind);
+            let mut app = App::new(
+                vec![crate::address::Address::Xmpp(a.clone()), b.clone().into()],
+                Modifier::Ctrl,
+                26,
+                30,
+            );
+            let first = app.chat(
+                &crate::address::Address::from(&a),
+                &crate::address::Address::from(&peer),
+                kind.clone(),
+            );
+            let target = app.chat(
+                &crate::address::Address::from(&b),
+                &crate::address::Address::from(&peer),
+                kind,
+            );
             app.select(first);
             app.input = "unfinished draft".into();
             app.cursor = 4;
@@ -5033,14 +5797,26 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
-        let server = app.server_chat(&me);
+        let mut app = App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
+        let server = app.server_chat(&crate::address::Address::from(&me));
         super::load_history(&mut app, &store, std::slice::from_ref(&me));
-        let room = app.chat(&me, &peer, ChatKind::Room { nick: "me".into() });
+        let room = app.chat(
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            ChatKind::Room { nick: "me".into() },
+        );
         app.select(server);
         app.read_marks(
-            &me,
-            super::counted(&store, &me, vec![(peer.clone(), "archive-old".into())]),
+            &crate::address::Address::from(&me),
+            super::counted(&store, &me, vec![(peer.clone(), "archive-old".into())])
+                .into_iter()
+                .map(|(j, t, n)| (j.into(), t, n))
+                .collect(),
         );
         assert_eq!(app.chats[room].unread, 2);
         let delayed = vec![(peer.clone(), "archive-old".into())];
@@ -5059,6 +5835,8 @@ mod tests {
         app.select(server);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let shared = super::Shared {
+            irc: omtalk_irc::Client::start(Vec::new()).unwrap().0,
+            irc_jobs: std::sync::Arc::default(),
             accounts: Default::default(),
             read_sync: Default::default(),
             cache: dir.path().join("cache"),
@@ -5087,15 +5865,27 @@ mod tests {
         drop(store);
         // A fresh process, the same local DB, and an old server mark: the real IRC case.
         let store = Store::open(&path).unwrap();
-        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
-        let server = app.server_chat(&me);
+        let mut app = App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            Modifier::Ctrl,
+            26,
+            30,
+        );
+        let server = app.server_chat(&crate::address::Address::from(&me));
         super::load_history(&mut app, &store, std::slice::from_ref(&me));
-        let room = app.chat(&me, &peer, ChatKind::Room { nick: "me".into() });
+        let room = app.chat(
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            ChatKind::Room { nick: "me".into() },
+        );
         app.select(server);
         super::restore_local_unread(&mut app, &store, &me);
         app.read_marks(
-            &me,
-            super::counted(&store, &me, vec![(peer.clone(), "archive-old".into())]),
+            &crate::address::Address::from(&me),
+            super::counted(&store, &me, vec![(peer.clone(), "archive-old".into())])
+                .into_iter()
+                .map(|(j, t, n)| (j.into(), t, n))
+                .collect(),
         );
         assert_eq!(
             app.chats[room].unread, 0,
@@ -5104,8 +5894,11 @@ mod tests {
         // A marker beyond the history here remains unknown: opening the chat must
         // not publish an older ID over the phone's newer one.
         app.read_marks(
-            &me,
-            super::counted(&store, &me, vec![(peer.clone(), "not-here-yet".into())]),
+            &crate::address::Address::from(&me),
+            super::counted(&store, &me, vec![(peer.clone(), "not-here-yet".into())])
+                .into_iter()
+                .map(|(j, t, n)| (j.into(), t, n))
+                .collect(),
         );
         assert_eq!(app.chats[room].unread, 0);
         assert!(!app.chats[room].read_mark_here);
@@ -5143,13 +5936,19 @@ mod tests {
         super::restore_local_unread(&mut app, &store, &me);
         assert_eq!(app.chats[room].unread, 1);
         app.read_marks(
-            &me,
-            super::counted(&store, &me, vec![(peer.clone(), "archive-new".into())]),
+            &crate::address::Address::from(&me),
+            super::counted(&store, &me, vec![(peer.clone(), "archive-new".into())])
+                .into_iter()
+                .map(|(j, t, n)| (j.into(), t, n))
+                .collect(),
         );
         assert_eq!(app.chats[room].unread, 0);
         app.read_marks(
-            &me,
-            super::counted(&store, &me, vec![(peer, "archive-old".into())]),
+            &crate::address::Address::from(&me),
+            super::counted(&store, &me, vec![(peer, "archive-old".into())])
+                .into_iter()
+                .map(|(j, t, n)| (j.into(), t, n))
+                .collect(),
         );
         assert_eq!(app.chats[room].unread, 0);
     }
@@ -5162,17 +5961,43 @@ mod tests {
         let peer: omtalk_xmpp::BareJid = "team@muc.example.org".parse().unwrap();
         {
             let store = omtalk_store::Store::open(&path).unwrap();
-            super::save_mute(&store, &me, &peer, true).unwrap();
+            super::save_mute(
+                &store,
+                &crate::address::Address::from(&me),
+                &crate::address::Address::from(&peer),
+                true,
+            )
+            .unwrap();
         }
         let store = omtalk_store::Store::open(&path).unwrap();
-        let mut app = crate::app::App::new(vec![me.clone()], crate::config::Modifier::Ctrl, 26, 30);
+        let mut app = crate::app::App::new(
+            vec![crate::address::Address::Xmpp(me.clone())],
+            crate::config::Modifier::Ctrl,
+            26,
+            30,
+        );
         super::restore_mutes(&store, &mut app);
-        let index = app.chat(&me, &peer, crate::app::ChatKind::Room { nick: "me".into() });
+        let index = app.chat(
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            crate::app::ChatKind::Room { nick: "me".into() },
+        );
         assert!(app.chats[index].muted);
-        super::save_mute(&store, &me, &peer, false).unwrap();
+        super::save_mute(
+            &store,
+            &crate::address::Address::from(&me),
+            &crate::address::Address::from(&peer),
+            false,
+        )
+        .unwrap();
         drop(store);
         let store = omtalk_store::Store::open(&path).unwrap();
-        let mut app = crate::app::App::new(vec![me], crate::config::Modifier::Ctrl, 26, 30);
+        let mut app = crate::app::App::new(
+            vec![crate::address::Address::Xmpp(me)],
+            crate::config::Modifier::Ctrl,
+            26,
+            30,
+        );
         super::restore_mutes(&store, &mut app);
         assert!(app.muted_chats.is_empty());
     }
@@ -5181,13 +6006,52 @@ mod tests {
     fn folded_groups_are_kept_and_read_back() {
         use crate::app::Group;
         let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
+        let network = omtalk_core::NetworkId {
+            account: omtalk_core::AccountId::irc("home"),
+            network: omtalk_core::Network::Soju("2".into()),
+        };
         let folded: std::collections::BTreeSet<Group> = [
-            Group::Account(me.clone()),
-            Group::Folder(me.clone(), "Рабочие дела".into()),
+            Group::Pinned,
+            Group::Profile(network.account.clone()),
+            Group::Account(network.into()),
+            Group::Account(crate::address::Address::Xmpp(me.clone())),
+            Group::Folder(crate::address::Address::Xmpp(me.clone()), "Рабочие дела".into()),
         ]
         .into();
         assert_eq!(super::folded_from_kept(&super::folded_to_kept(&folded)), folded);
         assert!(super::folded_from_kept("nonsense\nfolder").is_empty());
+    }
+
+    #[test]
+    fn pins_persist_across_restart_with_distinct_network_and_protocol_identities() {
+        use crate::{address::Address, app::App, config::Modifier};
+        use omtalk_core::{AccountId, CaseMapping, ConversationId, ConversationKind, Network, NetworkId};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.db");
+        let store = omtalk_store::Store::open(&path).unwrap();
+        let mut pins = vec![(
+            Address::from("me@example.org".parse::<omtalk_xmpp::BareJid>().unwrap()),
+            Address::from("peer@example.org".parse::<omtalk_xmpp::BareJid>().unwrap()),
+        )];
+        for id in ["1", "2"] {
+            let net = NetworkId {
+                account: AccountId::irc("home"),
+                network: Network::Soju(id.into()),
+            };
+            pins.push((
+                net.clone().into(),
+                ConversationId::irc(net, ConversationKind::Channel, "#same", CaseMapping::Rfc1459).into(),
+            ));
+        }
+        let value: Vec<_> = pins.iter().map(|(a, c)| (a.kept(), c.kept())).collect();
+        store
+            .keep("pins", Some(&serde_json::to_string(&value).unwrap()))
+            .unwrap();
+        drop(store);
+        let store = omtalk_store::Store::open(&path).unwrap();
+        let mut app = App::new(vec![], Modifier::Ctrl, 26, 30);
+        super::restore_pins(&store, &mut app);
+        assert_eq!(app.pins, pins);
     }
 
     #[test]

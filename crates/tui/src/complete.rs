@@ -21,6 +21,19 @@ impl Command {
 
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "/pin",
+        args: ["", ""],
+        about: [
+            "pin this chat above all networks",
+            "закрепить чат над всеми сетями",
+        ],
+    },
+    Command {
+        name: "/unpin",
+        args: ["", ""],
+        about: ["remove this chat from pinned", "убрать чат из закреплённых"],
+    },
+    Command {
         name: "/emoji",
         args: ["", ""],
         about: ["insert an emoji", "вставить эмодзи"],
@@ -328,8 +341,205 @@ pub const COMMANDS: &[Command] = &[
     },
 ];
 
-pub fn about(name: &str) -> Option<&'static Command> {
-    COMMANDS.iter().find(|c| c.name == name)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    Common,
+    Xmpp,
+    Irc,
+}
+
+pub fn owner(name: &str) -> Owner {
+    match name {
+        "/pin" | "/unpin" | "/om" | "/emoji" | "/np" | "/mute" | "/unmute" | "/folder" | "/folder-up"
+        | "/folder-down" | "/rename-folder" | "/help" | "/upload" | "/me" | "/search" | "/settings"
+        | "/close" | "/quit" | "/record" | "/play" | "/stop" | "/seek" => Owner::Common,
+        "/room" | "/add" | "/accept" | "/refuse" | "/devices" | "/services" | "/reply" | "/dnd"
+        | "/react" | "/reactions" | "/edit" | "/commands" | "/keys" | "/create" | "/avatar" | "/nickname"
+        | "/name" | "/remove" => Owner::Xmpp,
+        _ => Owner::Irc,
+    }
+}
+
+macro_rules! irc_command {
+    ($name:literal, $args:literal, $en:literal, $ru:literal) => {
+        Command {
+            name: $name,
+            args: [$args, $args],
+            about: [$en, $ru],
+        }
+    };
+}
+pub const IRC_COMMANDS: &[Command] = &[
+    irc_command!(
+        "/motd",
+        "[SERVER]",
+        "show the server message of the day",
+        "показать приветствие сервера"
+    ),
+    irc_command!(
+        "/list",
+        "[FILTER]",
+        "list server channels",
+        "список каналов сервера"
+    ),
+    irc_command!(
+        "/ns",
+        "[COMMAND]",
+        "send a command to NickServ",
+        "команда NickServ"
+    ),
+    irc_command!(
+        "/nickserv",
+        "[COMMAND]",
+        "send a command to NickServ",
+        "команда NickServ"
+    ),
+    irc_command!(
+        "/cs",
+        "[COMMAND]",
+        "send a command to ChanServ",
+        "команда ChanServ"
+    ),
+    irc_command!(
+        "/chanserv",
+        "[COMMAND]",
+        "send a command to ChanServ",
+        "команда ChanServ"
+    ),
+    irc_command!(
+        "/ms",
+        "[COMMAND]",
+        "send a command to MemoServ",
+        "команда MemoServ"
+    ),
+    irc_command!(
+        "/memoserv",
+        "[COMMAND]",
+        "send a command to MemoServ",
+        "команда MemoServ"
+    ),
+    irc_command!(
+        "/msg",
+        "NICK [TEXT]",
+        "open a query or send text",
+        "открыть личный чат или отправить текст"
+    ),
+    irc_command!("/query", "NICK", "open a query", "открыть личный чат"),
+    irc_command!("/notice", "TARGET TEXT", "send a notice", "отправить NOTICE"),
+    irc_command!("/join", "#CHANNEL [KEY]", "join a channel", "войти в канал"),
+    irc_command!(
+        "/part",
+        "[#CHANNEL] [REASON]",
+        "leave the upstream channel",
+        "покинуть канал на сервере IRC"
+    ),
+    irc_command!(
+        "/leave",
+        "[#CHANNEL] [REASON]",
+        "leave the upstream channel",
+        "покинуть канал на сервере IRC"
+    ),
+    irc_command!(
+        "/detach",
+        "[#CHANNEL]",
+        "detach this soju channel",
+        "отсоединить канал в soju"
+    ),
+    irc_command!("/nick", "NICK", "change your IRC nick", "сменить IRC-ник"),
+    irc_command!(
+        "/topic",
+        "[TEXT]",
+        "read or set the channel topic",
+        "показать или сменить тему канала"
+    ),
+    irc_command!(
+        "/away",
+        "[TEXT]",
+        "mark yourself away on this network",
+        "отметить отсутствие в этой сети"
+    ),
+    irc_command!(
+        "/online",
+        "",
+        "clear away on this network",
+        "снять отсутствие в этой сети"
+    ),
+    irc_command!(
+        "/whois",
+        "NICK",
+        "request user information",
+        "запросить сведения о пользователе"
+    ),
+    irc_command!(
+        "/names",
+        "[#CHANNEL]",
+        "request channel participants",
+        "запросить участников канала"
+    ),
+    irc_command!(
+        "/invite",
+        "NICK [#CHANNEL]",
+        "invite a nick to a channel",
+        "пригласить участника в канал"
+    ),
+    irc_command!(
+        "/kick",
+        "NICK [REASON]",
+        "remove a nick from this channel",
+        "удалить участника из канала"
+    ),
+    irc_command!(
+        "/mode",
+        "[TARGET] MODES",
+        "query or change IRC modes",
+        "показать или сменить режимы IRC"
+    ),
+    irc_command!(
+        "/raw",
+        "LINE",
+        "send an explicit IRC command",
+        "отправить явную команду IRC"
+    ),
+    irc_command!("/quote", "LINE", "alias of /raw", "синоним /raw"),
+    irc_command!("/bouncer", "", "open BouncerServ", "открыть BouncerServ"),
+    irc_command!(
+        "/networks",
+        "",
+        "refresh soju networks",
+        "обновить список сетей soju"
+    ),
+    irc_command!(
+        "/retry",
+        "",
+        "retry the last failed file",
+        "повторить отправку последнего файла"
+    ),
+    irc_command!(
+        "/cancel",
+        "",
+        "cancel the pending file; keep the local file",
+        "отменить отправку, сохранив локальный файл"
+    ),
+    irc_command!(
+        "/close",
+        "",
+        "hide locally; remain in the channel",
+        "скрыть локально, сохранив участие в канале"
+    ),
+];
+
+pub fn registry(irc: bool) -> Vec<&'static Command> {
+    if !irc {
+        return COMMANDS.iter().collect();
+    }
+    COMMANDS
+        .iter()
+        .filter(|c| owner(c.name) == Owner::Common && c.name != "/close")
+        .chain(IRC_COMMANDS.iter())
+        .collect()
+}
+pub fn about_in(name: &str, irc: bool) -> Option<&'static Command> {
+    registry(irc).into_iter().find(|c| c.name == name)
 }
 
 /// Commands that can choose an account independently of the currently open chat.
@@ -353,6 +563,8 @@ pub fn allows_account(command: &str) -> bool {
 /// What can be completed where, gathered from the app.
 #[derive(Debug, Default)]
 pub struct Context {
+    pub irc: bool,
+    pub networks: Vec<String>,
     /// Full JIDs of the configured accounts, for --account.
     pub accounts: Vec<String>,
     /// Nicks in the current room, if it is one.
@@ -384,14 +596,15 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     let first_end = before.find(char::is_whitespace);
     let command = first_end.map(|end| &before[..end]);
     if let (Some(command), Some(end)) = (command, first_end)
-        && allows_account(command)
+        && (allows_account(command) || context.irc)
     {
         let rest = before[end..].trim_start();
-        if rest.split_whitespace().next() == Some("--account") {
-            if rest == "--account" {
+        if matches!(rest.split_whitespace().next(), Some("--account" | "--network")) {
+            let flag = rest.split_whitespace().next().unwrap();
+            if rest == flag {
                 return Some((before.chars().count(), vec![" ".into()]));
             }
-            let value = rest["--account".len()..].trim_start();
+            let value = rest[flag.len()..].trim_start();
             if let Some(end) = value.find(char::is_whitespace) {
                 let tail = value[end..].trim_start();
                 let normalized = format!("{command} {tail}");
@@ -400,12 +613,28 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
                     .map(|(start, found)| (start + skipped, found));
             }
             let start = before.chars().count() - value.chars().count();
-            let found = matching(context.accounts.iter().map(String::as_str), value, " ");
+            let found = matching(
+                if flag == "--network" {
+                    &context.networks
+                } else {
+                    &context.accounts
+                }
+                .iter()
+                .map(String::as_str),
+                value,
+                " ",
+            );
             return (!found.is_empty()).then_some((start, found));
         }
         if !rest.contains(char::is_whitespace) && rest.starts_with('-') {
             let start = before.chars().count() - rest.chars().count();
-            let found = matching(["--account"].into_iter(), rest, " ");
+            let found = matching(
+                ["--account", "--network"]
+                    .into_iter()
+                    .filter(|v| context.irc || *v == "--account"),
+                rest,
+                " ",
+            );
             return (!found.is_empty()).then_some((start, found));
         }
     }
@@ -432,10 +661,13 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
     let typed = &before[start_byte..];
     let start = before[..start_byte].chars().count();
     let found = match command {
-        None if typed.starts_with('/') => matching(COMMANDS.iter().map(|c| c.name), typed, " "),
-        Some("/msg" | "/add" | "/remove" | "/accept" | "/refuse" | "/keys" | "/invite")
-            if is_first_argument(&before, start_byte) =>
-        {
+        None if typed.starts_with('/') => {
+            matching(registry(context.irc).into_iter().map(|c| c.name), typed, " ")
+        }
+        Some(
+            "/msg" | "/query" | "/notice" | "/whois" | "/kick" | "/add" | "/remove" | "/accept" | "/refuse"
+            | "/keys" | "/invite",
+        ) if is_first_argument(&before, start_byte) => {
             matching(context.people.iter().map(String::as_str), typed, " ")
         }
         Some("/join") if is_first_argument(&before, start_byte) => {
@@ -508,11 +740,14 @@ fn matching<'a>(all: impl Iterator<Item = &'a str>, typed: &str, suffix: &str) -
 }
 
 /// The commands that begin with what is typed, while only the command is being typed.
-pub fn commands_for(input: &str) -> Vec<&'static Command> {
+pub fn commands_in(input: &str, irc: bool) -> Vec<&'static Command> {
     if !input.starts_with('/') || input.contains(char::is_whitespace) {
         return Vec::new();
     }
-    COMMANDS.iter().filter(|c| c.name.starts_with(input)).collect()
+    registry(irc)
+        .into_iter()
+        .filter(|c| c.name.starts_with(input))
+        .collect()
 }
 
 #[cfg(test)]
@@ -521,6 +756,8 @@ mod tests {
 
     fn context() -> Context {
         Context {
+            irc: false,
+            networks: vec![],
             accounts: vec!["me@home.org".into(), "me@work.org".into()],
             nicks: vec!["Алиса".into(), "alex".into(), "bob".into()],
             people: vec!["anna@home.org".into(), "boss@work.org".into()],
@@ -576,15 +813,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            commands_for("/f").iter().map(|c| c.name).collect::<Vec<_>>(),
+            commands_in("/f", false)
+                .iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>(),
             ["/folder", "/folder-up", "/folder-down"]
         );
-        assert_eq!(commands_for("/").len(), COMMANDS.len());
+        assert_eq!(commands_in("/", false).len(), COMMANDS.len());
         assert!(
-            commands_for("/msg bob").is_empty(),
+            commands_in("/msg bob", false).is_empty(),
             "the list goes once the command is typed"
         );
-        assert!(commands_for("привет").is_empty());
+        assert!(commands_in("привет", false).is_empty());
     }
 
     #[test]

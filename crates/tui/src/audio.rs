@@ -12,7 +12,7 @@ use std::{
 use symphonia::core::{
     audio::SampleBuffer,
     codecs::{CODEC_TYPE_NULL, Decoder as Codec, DecoderOptions},
-    formats::{FormatOptions, FormatReader},
+    formats::{FormatOptions, FormatReader, SeekMode, SeekTo},
     io::MediaSourceStream,
     meta::MetadataOptions,
     probe::Hint,
@@ -29,7 +29,7 @@ pub fn supported(path: &Path) -> bool {
         .contains(&e.to_ascii_lowercase().as_str())
     })
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Info {
     pub seconds: f64,
     pub peaks: Vec<u8>,
@@ -91,8 +91,10 @@ enum Source {
     },
     Opus {
         packets: ogg::PacketReader<File>,
+        pending: VecDeque<ogg::Packet>,
         decoder: opus::Decoder,
         skip: usize,
+        preskip: usize,
         gain: f32,
         end: Option<u64>,
         decoded: u64,
@@ -127,8 +129,10 @@ impl Reader {
             return Ok(Self {
                 source: Source::Opus {
                     packets,
+                    pending: VecDeque::new(),
                     decoder: opus::Decoder::new(RATE, mode).map_err(err)?,
                     skip,
+                    preskip: skip,
                     gain,
                     end: None,
                     decoded: 0,
@@ -189,13 +193,18 @@ impl Reader {
         match &mut self.source {
             Source::Opus {
                 packets,
+                pending,
                 decoder,
                 skip,
                 gain,
                 end,
                 decoded,
+                ..
             } => {
-                let Some(packet) = packets.read_packet().map_err(err)? else {
+                let Some(packet) = (match pending.pop_front() {
+                    Some(packet) => Some(packet),
+                    None => packets.read_packet().map_err(err)?,
+                }) else {
                     return Ok(None);
                 };
                 if packet.last_in_stream() {
@@ -247,7 +256,85 @@ impl Reader {
             },
         }
     }
+
+    /// Reposition before decoding. Opus packet headers give sample counts without
+    /// decoding the preceding audio; retain 80 ms of decoder pre-roll (RFC 7845).
+    /// Other formats use the demuxer's seek table and decode only its short lead-in.
+    fn seek(&mut self, seconds: f64) -> Result<u64, String> {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Ok(0);
+        }
+        match &mut self.source {
+            Source::Standard {
+                format,
+                decoder,
+                track,
+            } => {
+                let to = format
+                    .seek(
+                        SeekMode::Accurate,
+                        SeekTo::Time {
+                            time: symphonia::core::units::Time::new(seconds as u64, seconds.fract()),
+                            track_id: Some(*track),
+                        },
+                    )
+                    .map_err(err)?;
+                decoder.reset();
+                let lead = to.required_ts.saturating_sub(to.actual_ts);
+                let seconds = format
+                    .tracks()
+                    .iter()
+                    .find(|t| t.id == *track)
+                    .and_then(|t| t.codec_params.time_base)
+                    .map(|tb| {
+                        let t = tb.calc_time(lead);
+                        t.seconds as f64 + t.frac
+                    })
+                    .unwrap_or(lead as f64 / self.rate as f64);
+                Ok((seconds * self.rate as f64).round() as u64)
+            }
+            Source::Opus {
+                packets,
+                pending,
+                decoder,
+                skip,
+                preskip,
+                decoded,
+                end,
+                ..
+            } => {
+                let target = (seconds * RATE as f64) as u64 + *preskip as u64;
+                let mut ahead = VecDeque::new();
+                let mut at = 0;
+                while let Some(packet) = packets.read_packet().map_err(err)? {
+                    let frames = opus::packet::get_nb_samples(&packet.data, RATE).map_err(err)? as u64;
+                    let start = at;
+                    at += frames;
+                    ahead.push_back((packet, start, at));
+                    while ahead
+                        .front()
+                        .is_some_and(|(_, _, end)| *end < target.saturating_sub(3840))
+                    {
+                        ahead.pop_front();
+                    }
+                    if at >= target {
+                        break;
+                    }
+                }
+                *decoded = ahead.front().map_or(at, |(_, start, _)| *start);
+                *skip = target.saturating_sub(*decoded) as usize;
+                *end = None;
+                decoder.reset_state().map_err(err)?;
+                *pending = ahead.into_iter().map(|(packet, _, _)| packet).collect();
+                Ok(0)
+            }
+        }
+    }
 }
+
+#[path = "audio_analysis.rs"]
+mod analysis;
+pub use analysis::inspect_cached;
 
 /// A bounded, streaming peak envelope. Compacting pairs retains the whole file's
 /// shape without keeping decoded PCM in memory.
@@ -335,7 +422,13 @@ struct Playing {
 }
 impl Playing {
     fn new(path: PathBuf, seconds: f64) -> Result<Self, String> {
-        let reader = Reader::open(&path)?;
+        let mut reader = Reader::open(&path)?;
+        let seconds = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
+        let skip = reader.seek(seconds)?;
         let buffer = Arc::new(Mutex::new(Buffer::default()));
         let client = connect_audio()?;
         let spec = SampleSpec {
@@ -354,7 +447,6 @@ impl Playing {
         params.buffer_attr.target_length = reader.rate * reader.channels as u32 * 4 / 10;
         params.buffer_attr.pre_buffering = 0;
         let device = wait(client.create_playback_stream(params, AudioSource(buffer.clone())))?;
-        let skip = (seconds.max(0.0) * reader.rate as f64) as u64;
         Ok(Self {
             path,
             reader,

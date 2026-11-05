@@ -18,6 +18,7 @@
 //! image_links = false   # true: preview standalone HTTPS image links
 //! avatars = false       # true: people's and rooms' pictures in the right pane
 //! compact = false       # true: time and name on the message's own line, not above it
+//! irc_presence = true   # show IRC joins/departures with the event's time
 //! language = "en"       # the interface's language: en or ru
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! read_markers = true   # let senders see that their messages were read
@@ -41,16 +42,171 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "FileConfig")]
 pub struct Config {
-    #[serde(default, rename = "account")]
     pub accounts: Vec<AccountEntry>,
-    #[serde(default)]
+    pub irc_accounts: Vec<IrcEntry>,
     pub ui: Ui,
-    #[serde(default)]
     pub theme: ThemeConfig,
-    #[serde(default)]
     pub notify: crate::notify::NotifyConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    #[serde(default, rename = "account")]
+    accounts: Vec<toml::Table>,
+    #[serde(default)]
+    ui: Ui,
+    #[serde(default)]
+    theme: ThemeConfig,
+    #[serde(default)]
+    notify: crate::notify::NotifyConfig,
+}
+
+impl TryFrom<FileConfig> for Config {
+    type Error = String;
+    fn try_from(file: FileConfig) -> Result<Self, String> {
+        let mut config = Self {
+            ui: file.ui,
+            theme: file.theme,
+            notify: file.notify,
+            ..Default::default()
+        };
+        let mut ids = std::collections::BTreeSet::new();
+        for mut entry in file.accounts {
+            let protocol = entry
+                .remove("protocol")
+                .unwrap_or(toml::Value::String("xmpp".into()));
+            match protocol.as_str() {
+                Some("xmpp") => config.accounts.push(
+                    toml::Value::Table(entry)
+                        .try_into()
+                        .map_err(|_| "invalid XMPP account configuration")?,
+                ),
+                Some("irc") => {
+                    let irc: IrcEntry = toml::Value::Table(entry)
+                        .try_into()
+                        .map_err(|_| "invalid IRC account configuration")?;
+                    if !ids.insert(irc.id.clone()) {
+                        return Err(format!("duplicate IRC profile id: {}", irc.id));
+                    }
+                    if irc.id.is_empty()
+                        || !irc
+                            .id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    {
+                        return Err("IRC id: only ASCII letters, digits, _ or -".into());
+                    }
+                    config.irc_accounts.push(irc);
+                }
+                _ => return Err("account protocol must be xmpp or irc".into()),
+            }
+        }
+        Ok(config)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IrcEntry {
+    pub id: String,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub mode: omtalk_irc::Mode,
+    pub server: String,
+    pub port: Option<u16>,
+    #[serde(default = "default_true")]
+    pub tls: bool,
+    pub ca_certificate: Option<PathBuf>,
+    pub username: Option<String>,
+    pub nick: Option<String>,
+    pub realname: Option<String>,
+    /// soju login credentials. Direct IRC uses the independent SASL/PASS fields.
+    pub password_command: Option<String>,
+    pub sasl_username: Option<String>,
+    pub sasl_password_command: Option<String>,
+    pub server_password_command: Option<String>,
+    pub selected_network: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl IrcEntry {
+    pub fn prepare(&self) -> Result<omtalk_irc::Config, String> {
+        let username = self
+            .username
+            .clone()
+            .or_else(|| self.nick.clone())
+            .ok_or("IRC: username or nick is required")?;
+        let sasl = if self.mode == omtalk_irc::Mode::Soju {
+            if self.sasl_password_command.is_some() || self.sasl_username.is_some() {
+                return Err("soju uses username + password_command; direct SASL fields are separate".into());
+            }
+            let password = match &self.password_command {
+                Some(command) => run_irc_password_command(command)?,
+                None => rpassword::prompt_password(format!("IRC {} password: ", self.id))
+                    .map_err(|_| "cannot read IRC password")?,
+            };
+            Some(omtalk_irc::Sasl {
+                username: username.clone(),
+                password,
+            })
+        } else {
+            if self.password_command.is_some() {
+                return Err(
+                    "direct IRC: use sasl_password_command or server_password_command explicitly".into(),
+                );
+            }
+            self.sasl_password_command
+                .as_ref()
+                .map(|command| {
+                    Ok::<_, String>(omtalk_irc::Sasl {
+                        username: self.sasl_username.clone().unwrap_or_else(|| username.clone()),
+                        password: run_irc_password_command(command)?,
+                    })
+                })
+                .transpose()?
+        };
+        let config = omtalk_irc::Config {
+            id: self.id.clone(),
+            name: self.name.clone().unwrap_or_else(|| self.id.clone()),
+            mode: self.mode,
+            server: self.server.clone(),
+            port: self.port.unwrap_or(if self.tls { 6697 } else { 6667 }),
+            tls: self.tls,
+            ca_certificate: self.ca_certificate.clone(),
+            username: username.clone(),
+            nick: self.nick.clone().unwrap_or(username),
+            realname: self.realname.clone().unwrap_or_else(|| "omtalk".into()),
+            sasl,
+            server_password: self
+                .server_password_command
+                .as_ref()
+                .map(|s| run_irc_password_command(s))
+                .transpose()?,
+            selected_network: self.selected_network.clone(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+fn run_irc_password_command(command: &str) -> Result<String, String> {
+    // Password helpers may print secrets to stderr on failure. Do not surface it.
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .map_err(|_| "IRC password_command could not be started")?;
+    if !output.status.success() {
+        return Err("IRC password_command failed".into());
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| "IRC password_command returned invalid text")?;
+    Ok(text.lines().next().unwrap_or_default().into())
 }
 
 /// `[theme]`: colours of one's own for any role; the rest stay the terminal's.
@@ -181,6 +337,8 @@ pub struct Ui {
     /// Time and name on the first line of a message, as IRC clients have it, not on a
     /// line of their own above it.
     pub compact: bool,
+    /// Show IRC JOIN/PART/QUIT/KICK notices with their event time.
+    pub irc_presence: bool,
     /// The interface's language: "en" (the default) or "ru".
     pub language: crate::lang::Language,
 }
@@ -203,6 +361,7 @@ impl Default for Ui {
             image_links: false,
             avatars: false,
             compact: false,
+            irc_presence: true,
             language: crate::lang::Language::English,
         }
     }
@@ -328,6 +487,14 @@ pub fn run_password_command(command: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn documented_mixed_configuration_parses_without_running_password_helpers() {
+        let config: super::Config = toml::from_str(include_str!("../../../docs/native-irc.toml")).unwrap();
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(config.irc_accounts.len(), 2);
+        assert_eq!(config.irc_accounts[0].mode, omtalk_irc::Mode::Soju);
+        assert_eq!(config.irc_accounts[1].mode, omtalk_irc::Mode::Direct);
+    }
     use super::*;
 
     #[test]

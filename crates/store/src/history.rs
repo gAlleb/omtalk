@@ -625,7 +625,7 @@ mod tests {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP VIEW message_history; DROP INDEX messages_by_archive; PRAGMA user_version=16;",
+                "DROP VIEW message_history; DROP INDEX messages_by_archive; DROP TABLE irc_messages; DROP TABLE irc_conversations; PRAGMA user_version=16;",
             )
             .unwrap();
         drop(store);

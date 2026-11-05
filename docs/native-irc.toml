@@ -1,0 +1,43 @@
+# Existing XMPP entry: protocol is optional and defaults to xmpp.
+[[account]]
+jid = "you@example.org"
+password_command = "pass show xmpp/you"
+
+# Native soju: discovery plus a bound connection per network.
+[[account]]
+protocol = "irc"
+id = "irc-home"
+name = "Home soju"
+mode = "soju"
+server = "soju.example.org"
+port = 6697
+tls = true
+username = "you"
+password_command = "pass show irc/soju"
+# Optional private CA (certificate verification stays enabled):
+# ca_certificate = "/home/you/.config/omtalk/soju-ca.pem"
+# Explicit single-network fallback only; omit for normal multi-network soju:
+# selected_network = "libera"
+
+# Optional direct IRC connection, independent of soju and XMPP.
+[[account]]
+protocol = "irc"
+id = "irc-direct"
+name = "Direct IRC"
+mode = "direct"
+server = "irc.example.org"
+port = 6697
+tls = true
+nick = "your-nick"
+username = "you"
+realname = "omtalk"
+# Direct IRC SASL and server PASS are separate credentials:
+# sasl_username = "your-account"
+# sasl_password_command = "pass show irc/direct-sasl"
+# server_password_command = "pass show irc/direct-pass"
+
+[ui]
+language = "en"
+auto_download = true
+image_links = false
+irc_presence = true

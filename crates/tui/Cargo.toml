@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+omtalk-core = { version = "0.1.11", path = "../core" }
+omtalk-irc = { version = "0.1.11", path = "../irc" }
+serde_json = "1"
 pulseaudio = "0.3.1"
 symphonia = { version = "0.5", features = ["all"] }
 opus = "0.4"

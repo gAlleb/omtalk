@@ -5,19 +5,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use crate::address::Address;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use omtalk_omemo::{Direction, Incoming};
+use omtalk_xmpp::Jid;
 use omtalk_xmpp::chatstates::ChatState;
 use omtalk_xmpp::presence::Online;
 use omtalk_xmpp::services::CommandAction;
-use omtalk_xmpp::{BareJid, Jid};
 use ratatui::layout::Rect;
 
-use omtalk_store::Folder;
+use crate::address::Folder;
 
 use crate::complete::{self, Completion};
 use crate::config::Modifier;
 use crate::services::{Outcome, Services};
+
+#[path = "irc_ui.rs"]
+mod irc;
+pub use irc::IrcNetworkView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatKind {
@@ -49,6 +54,9 @@ pub enum Delivery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
+    pub irc: bool,
+    pub kind: omtalk_core::MessageKind,
+    pub server_time: Option<String>,
     /// Unix time, seconds.
     pub at: i64,
     pub who: String,
@@ -122,6 +130,18 @@ impl MediaSlot {
 impl Line {
     /// Changing preview preferences must not hide real uploads or reset loaded images.
     pub fn set_image_links(&mut self, enabled: bool) {
+        if self.irc {
+            if self.media.is_none()
+                && let Some(media) = omtalk_media::Media::link(&self.text)
+            {
+                self.media = Some(MediaSlot {
+                    state: MediaState::Offered,
+                    preview: true,
+                    ..MediaSlot::new(&self.text, media)
+                });
+            }
+            return;
+        }
         if self.shared_file || omtalk_media::Media::from_text(&self.text).is_some() {
             return;
         }
@@ -157,6 +177,13 @@ impl Line {
         };
         let media = media.map(|media| MediaSlot::new(&text, media));
         Self {
+            irc: false,
+            kind: if action_of(&text).is_some() {
+                omtalk_core::MessageKind::Action
+            } else {
+                omtalk_core::MessageKind::Text
+            },
+            server_time: None,
             at,
             who,
             text,
@@ -190,8 +217,8 @@ pub struct DeviceRow {
 
 #[derive(Debug, Clone)]
 pub struct Chat {
-    pub account: BareJid,
-    pub jid: BareJid,
+    pub account: Address,
+    pub jid: Address,
     pub kind: ChatKind,
     pub lines: Vec<Line>,
     pub unread: usize,
@@ -214,18 +241,21 @@ pub struct Chat {
     /// the chat is left or one writes in it.
     pub new_since: Option<i64>,
     /// Room occupants by nick, with the real account when the room shows it.
-    pub occupants: BTreeMap<String, Option<BareJid>>,
+    pub occupants: BTreeMap<String, Option<Address>>,
     /// Their status where it is not plain online: away, do not disturb…
     pub occupant_status: BTreeMap<String, omtalk_xmpp::presence::OwnStatus>,
     /// Their standing in the room, as IRC marks it: ~ owner, @ admin (an IRC op through
     /// biboumi), % moderator, + member (voiced). None for the rest.
+    pub irc_prefix_order: String,
+    pub irc_prefixes: BTreeMap<String, String>,
     pub occupant_mark: BTreeMap<String, &'static str>,
     /// A room's members (owners, admins, members), present or not; read when it opens.
-    pub members: Vec<BareJid>,
+    pub members: Vec<Address>,
     /// A room's own name, if it has one.
     pub name: Option<String>,
     /// A room's subject (topic), as it last said.
     pub topic: Option<String>,
+    pub irc_topic_author: Option<(String, i64)>,
     /// The peer's devices; `None` until read.
     pub devices: Option<Vec<DeviceRow>>,
     /// The newest message here whose sender asked to learn when it is read, not yet
@@ -263,6 +293,16 @@ impl Chat {
     /// each group by name.
     pub fn occupants_ranked(&self) -> Vec<&String> {
         let mut nicks: Vec<&String> = self.occupants.keys().collect();
+        if self.account.is_irc() {
+            nicks.sort_by_key(|nick| {
+                self.irc_prefixes
+                    .get(*nick)
+                    .and_then(|s| s.chars().next())
+                    .and_then(|c| self.irc_prefix_order.find(c))
+                    .unwrap_or(usize::MAX)
+            });
+            return nicks;
+        }
         nicks.sort_by_key(|nick| {
             self.occupant_mark
                 .get(*nick)
@@ -272,7 +312,7 @@ impl Chat {
         nicks
     }
 
-    pub fn new(account: BareJid, jid: BareJid, kind: ChatKind) -> Self {
+    pub fn new(account: Address, jid: Address, kind: ChatKind) -> Self {
         Self {
             account,
             jid,
@@ -290,10 +330,13 @@ impl Chat {
             new_since: None,
             occupants: BTreeMap::new(),
             occupant_status: BTreeMap::new(),
+            irc_prefix_order: String::new(),
+            irc_prefixes: BTreeMap::new(),
             occupant_mark: BTreeMap::new(),
             members: Vec::new(),
             name: None,
             topic: None,
+            irc_topic_author: None,
             devices: None,
             markable: None,
             read_mark: None,
@@ -332,7 +375,7 @@ pub enum Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Person {
     Here(String),
-    Away(BareJid),
+    Away(Address),
 }
 
 /// How an account's connection stands. Said in words when shown, in the interface's
@@ -345,6 +388,8 @@ pub enum Connection {
     Reconnecting(String),
     /// The server refused the password; the account has stopped.
     Refused(String),
+    /// A terminal connection error (TLS, binding or a removed IRC network).
+    Failed(String),
 }
 
 impl Connection {
@@ -362,6 +407,7 @@ impl Connection {
                 crate::lang::reason(why)
             ),
             Connection::Refused(why) => trf!("password refused: {why}", "пароль не принят: {why}"),
+            Connection::Failed(why) => trf!("connection stopped: {why}", "подключение остановлено: {why}"),
         }
     }
 }
@@ -376,9 +422,11 @@ pub enum Splitter {
 /// A heading in the chat list: an account, or one of the user's folders inside it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
+    Pinned,
+    Profile(omtalk_core::AccountId),
     /// A folder inside an account.
-    Folder(BareJid, String),
-    Account(BareJid),
+    Folder(Address, String),
+    Account(Address),
 }
 
 /// One row of the chat list.
@@ -459,7 +507,7 @@ pub struct Areas {
     pub settings_rows: Vec<(Rect, usize)>,
     pub key_buttons: Vec<(Rect, crate::keys::KeyButton)>,
     /// People in the pane beside a room who are away: a click opens a chat with them.
-    pub people: Vec<(Rect, BareJid)>,
+    pub people: Vec<(Rect, Address)>,
     /// The devices in the pane beside a direct chat: a click opens the keys window.
     pub side_devices: Option<Rect>,
     /// The services window and what is clickable in it.
@@ -472,6 +520,36 @@ pub struct Areas {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    IrcSend {
+        conversation: omtalk_core::ConversationId,
+        target: String,
+        id: String,
+        kind: omtalk_core::MessageKind,
+        text: String,
+    },
+    IrcRaw {
+        network: omtalk_core::NetworkId,
+        line: String,
+    },
+    IrcRead {
+        conversation: omtalk_core::ConversationId,
+        target: String,
+        timestamp: String,
+    },
+    IrcHistory {
+        conversation: omtalk_core::ConversationId,
+        request: omtalk_irc::HistoryRequest,
+    },
+    SaveIrcConversation {
+        conversation: omtalk_core::ConversationId,
+        state: omtalk_store::ConversationState,
+    },
+    IrcRetry {
+        id: String,
+    },
+    IrcCancel {
+        id: String,
+    },
     OpenUrl(String),
     SaveFile {
         id: String,
@@ -481,12 +559,12 @@ pub enum Action {
     },
     Audio(crate::audio::Command),
     NowPlaying {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
     },
     Send {
-        account: BareJid,
-        to: BareJid,
+        account: Address,
+        to: Address,
         room: bool,
         text: String,
         encrypted: bool,
@@ -500,8 +578,8 @@ pub enum Action {
     /// The messages of `chat` before what it shows: `have` of them are shown (and kept),
     /// `before` is where the archive's page ends, if known.
     Older {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         room: bool,
         have: usize,
         before: Option<String>,
@@ -510,99 +588,99 @@ pub enum Action {
     SetStatus(omtalk_xmpp::presence::OwnStatus),
     /// `jid` taken out of the account's roster (RFC 6121: the subscriptions go too).
     RemoveContact {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
     },
     /// The name one gives a contact in the roster; `None` takes it away.
     RenameContact {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
         name: Option<String>,
     },
     /// One's avatar from the picture at `path` (XEP-0084); `None` takes it away.
     SetAvatar {
-        account: BareJid,
+        account: Address,
         path: Option<PathBuf>,
     },
     /// The name one gives oneself (XEP-0172); `None` takes it away.
     SetNickname {
-        account: BareJid,
+        account: Address,
         nick: Option<String>,
     },
     /// A chat closed before is open again.
     ReopenChat {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
     },
     /// `room`'s bookmark no longer says to enter it by itself, for all the account's
     /// clients.
     NoAutojoin {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
     },
     /// OMEMO turned on or off in `chat`, to be kept.
     SetOmemo {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         on: bool,
     },
     /// Notification mute, local to this client, to be kept.
     SetMuted {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         muted: bool,
     },
     /// The messages of `chat` holding `words`.
     Search {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         words: String,
     },
     /// `chat` shown from the time `at` on (a search result picked).
     Jump {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         room: bool,
         at: i64,
     },
     /// One's reactions to the message `id` (XEP-0444), all of them now; as `by` they
     /// are kept.
     React {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         room: bool,
         id: String,
         by: String,
         reactions: Vec<String>,
     },
     Join {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
         /// `None`: the nick the other clients use there (the bookmark), else the
         /// account's name.
         nick: Option<String>,
     },
     Leave {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
         nick: String,
     },
     AddContact {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
         name: Option<String>,
     },
     Accept {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
     },
     Refuse {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
     },
     Devices {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
     },
     /// Ask a server what it offers, or run one step of a command.
     Services {
@@ -612,16 +690,16 @@ pub enum Action {
     },
     /// Tell chat `to` whether one is typing there (XEP-0085).
     ChatState {
-        account: BareJid,
-        to: BareJid,
+        account: Address,
+        to: Address,
         room: bool,
         state: ChatState,
     },
     /// Chat `to` was read here: tell the sender (`marker`, the message's id, XEP-0333;
     /// not in rooms) and one's own other clients (`archive_id`, XEP-0490).
     Displayed {
-        account: BareJid,
-        to: BareJid,
+        account: Address,
+        to: Address,
         room: bool,
         marker: Option<String>,
         archive_id: Option<String>,
@@ -629,8 +707,8 @@ pub enum Action {
     /// Send the file at `path` to the chat: up to the server's upload service (sealed
     /// first in an encrypted chat), then its link as a message under `id`.
     Upload {
-        account: BareJid,
-        to: BareJid,
+        account: Address,
+        to: Address,
         room: bool,
         path: PathBuf,
         encrypted: bool,
@@ -638,62 +716,62 @@ pub enum Action {
     },
     /// The chat was closed: keep it so, until someone writes in it.
     CloseChat {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
     },
     /// The folders changed; keep them.
     SaveFolders(Vec<Folder>),
     /// Take another nick in a room.
     Nick {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
         nick: String,
     },
     /// Read a room's name.
     RoomName {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
     },
     /// Set a room's subject.
     SetTopic {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
         topic: String,
     },
     /// Name a room (as its owner).
     SetRoomName {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
         name: String,
     },
     /// Make a room: members only, real addresses shown (as OMEMO needs), kept; and enter.
     CreateRoom {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
         name: Option<String>,
         nick: Option<String>,
     },
     /// Let `jid` into a room (as a member) and invite them.
     Invite {
-        account: BareJid,
-        room: BareJid,
-        jid: BareJid,
+        account: Address,
+        room: Address,
+        jid: Address,
     },
     /// Read a direct chat's history from the account's archive: this device has none.
     History {
-        account: BareJid,
-        peer: BareJid,
+        account: Address,
+        peer: Address,
     },
     /// Fetch the avatar of a person or a room, unless it is known.
     Avatar {
-        account: BareJid,
-        jid: BareJid,
+        account: Address,
+        jid: Address,
         room: bool,
     },
     /// Read who belongs to a room, present or not.
     Members {
-        account: BareJid,
-        room: BareJid,
+        account: Address,
+        room: Address,
     },
     /// The keys window asks something of OMEMO.
     Keys(crate::keys::Request),
@@ -714,13 +792,13 @@ pub enum Action {
     /// Show a fetched file in the outside viewer.
     Open(PathBuf),
     SetChatNotify {
-        account: BareJid,
-        chat: BareJid,
+        account: Address,
+        chat: Address,
         prefs: crate::notify::ChatNotify,
     },
     /// Discover the declared kind of a contact or one of its connected clients.
     BotInfo {
-        account: BareJid,
+        account: Address,
         jid: Jid,
     },
     Quit,
@@ -791,8 +869,8 @@ fn columns(text: &str, from: usize, to: usize) -> String {
 /// A reply being written: in which chat, to whom, the quote, and what it answers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Replying {
-    pub account: BareJid,
-    pub chat: BareJid,
+    pub account: Address,
+    pub chat: Address,
     pub who: String,
     pub quote: String,
     /// `None` when the message has no id to name: the quote goes alone.
@@ -802,8 +880,8 @@ pub struct Replying {
 /// One's own message being corrected (XEP-0308): the input line holds its new text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Editing {
-    pub account: BareJid,
-    pub chat: BareJid,
+    pub account: Address,
+    pub chat: Address,
     /// The id of the message as first sent: corrections always name that one.
     pub id: String,
     /// Its text before, shown above the input line.
@@ -862,8 +940,8 @@ pub struct Found {
 /// The results of `/search` in a chat, over the conversation until one is picked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Search {
-    pub account: BareJid,
-    pub chat: BareJid,
+    pub account: Address,
+    pub chat: Address,
     pub words: String,
     /// `None` while the store is looked through.
     pub found: Option<Vec<Found>>,
@@ -921,12 +999,17 @@ pub const SHOWN: usize = 300;
 const QUIT_AGAIN: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub struct App {
-    pub accounts: Vec<BareJid>,
+    pub pins: Vec<(Address, Address)>,
+    pub irc_read_enabled: bool,
+    pub irc_catching: std::collections::BTreeSet<omtalk_core::ConversationId>,
+    pub irc_networks: BTreeMap<omtalk_core::NetworkId, IrcNetworkView>,
+    pub irc_conversations: BTreeMap<omtalk_core::ConversationId, omtalk_store::ConversationState>,
+    pub accounts: Vec<Address>,
     /// Account → connection state, as shown in the status line.
-    pub connection: BTreeMap<BareJid, Connection>,
+    pub connection: BTreeMap<Address, Connection>,
     pub chats: Vec<Chat>,
     pub selected: Option<usize>,
-    unread_return: Option<(BareJid, BareJid)>,
+    unread_return: Option<(Address, Address)>,
     pub switcher: Option<usize>,
     pub emoji: Option<crate::emoji::Picker>,
     pub audio_info: BTreeMap<PathBuf, Result<crate::audio::Info, String>>,
@@ -934,8 +1017,9 @@ pub struct App {
     pub playback: crate::audio::Playback,
     pub recorder: Option<crate::audio_ui::Recorder>,
     pub file_save: Option<crate::file_save::SaveFile>,
-    pub contacts: BTreeSet<(BareJid, BareJid)>,
+    pub contacts: BTreeSet<(Address, Address)>,
     pub focus: Focus,
+    pub drafts: BTreeMap<(Address, Address), String>,
     pub input: String,
     /// In characters, not bytes.
     pub cursor: usize,
@@ -972,11 +1056,11 @@ pub struct App {
     /// Sound, desktop notification and the terminal's bell, each for its messages.
     pub notify: crate::notify::Notify,
     /// The typing state last told, and to which chat.
-    pub typing_out: Option<((BareJid, BareJid), ChatState)>,
+    pub typing_out: Option<((Address, Address), ChatState)>,
     /// When the input last changed (Unix seconds): typing pauses after a while.
     pub typed_at: i64,
     /// Who is typing where: (account, chat) → who → since when.
-    pub typing_in: BTreeMap<(BareJid, BareJid), BTreeMap<String, i64>>,
+    pub typing_in: BTreeMap<(Address, Address), BTreeMap<String, i64>>,
     /// The mouse is omtalk's (clicks, dragging, its own selection); off, the terminal
     /// and tmux select and paste as for any program.
     pub mouse: bool,
@@ -1000,7 +1084,7 @@ pub struct App {
     /// Time and name on a message's first line (`ui.compact`).
     pub compact: bool,
     /// Whose avatar is ready to draw: jid → its hash (the picture is "avatar:HASH").
-    pub avatars: BTreeMap<BareJid, String>,
+    pub avatars: BTreeMap<Address, String>,
     /// Avatars drawn here with block characters (a terminal without pictures): the
     /// square picture by its key; with pictures, they are among the view's pictures.
     pub avatar_blocks: BTreeMap<String, image::DynamicImage>,
@@ -1013,40 +1097,42 @@ pub struct App {
     pub refused: bool,
     /// How far the chat list is scrolled, in rows; the view keeps the chat picked in sight.
     pub chats_scroll: usize,
+    /// Wheel scrolling may move the list independently of the active conversation.
+    pub chats_manual_scroll: bool,
     /// The participant picked in a room's pane, while it has the focus.
     pub people_cursor: usize,
     /// Direct chats whose history was asked of the archive already.
-    pub history_asked: BTreeSet<(BareJid, BareJid)>,
+    pub history_asked: BTreeSet<(Address, Address)>,
     /// Whose avatars were asked for already, by account.
-    pub avatars_asked: BTreeSet<(BareJid, BareJid)>,
+    pub avatars_asked: BTreeSet<(Address, Address)>,
     /// `[ui]` and `[notify]` as last set: the settings window starts from them.
     pub config_ui: crate::config::Ui,
     pub config_notify: crate::notify::NotifyConfig,
     /// Connected clients by (account, whose), each by resource.
-    pub online: BTreeMap<(BareJid, BareJid), BTreeMap<String, Online>>,
+    pub online: BTreeMap<(Address, Address), BTreeMap<String, Online>>,
     /// This program's own resource on each account.
-    pub own_resource: BTreeMap<BareJid, String>,
+    pub own_resource: BTreeMap<Address, String>,
     /// Headings whose chats are folded away in the list.
     pub collapsed: BTreeSet<Group>,
     /// The user's own folders of chats, in order.
     pub folders: Vec<Folder>,
     /// The account commands act for: the last one picked, by its chat or its heading.
-    pub active: Option<BareJid>,
+    pub active: Option<Address>,
     /// Contacts' names in each account's roster: a chat with one opened later takes it.
-    pub names: BTreeMap<(BareJid, BareJid), String>,
+    pub names: BTreeMap<(Address, Address), String>,
     /// Chats where OMEMO was turned on or off by hand: kept, a chat opened takes it.
-    pub omemo_choice: BTreeMap<(BareJid, BareJid), bool>,
-    pub muted_chats: BTreeSet<(BareJid, BareJid)>,
-    pub bots: BTreeSet<(BareJid, BareJid)>,
-    pub chat_notify: BTreeMap<(BareJid, BareJid), crate::notify::ChatNotify>,
-    pub bot_checks: BTreeSet<(BareJid, String)>,
+    pub omemo_choice: BTreeMap<(Address, Address), bool>,
+    pub muted_chats: BTreeSet<(Address, Address)>,
+    pub bots: BTreeSet<(Address, Address)>,
+    pub chat_notify: BTreeMap<(Address, Address), crate::notify::ChatNotify>,
+    pub bot_checks: BTreeSet<(Address, String)>,
     /// Read frontiers to persist before waiting for another event, including messages
     /// that a bridge sent without an archive stanza-id.
-    pub local_reads: BTreeMap<(BareJid, BareJid), omtalk_store::ReadPoint>,
+    pub local_reads: BTreeMap<(Address, Address), omtalk_store::ReadPoint>,
     /// Server read positions received before their chats are discovered.
-    pending_read_marks: BTreeMap<(BareJid, BareJid), (String, Option<usize>)>,
+    pending_read_marks: BTreeMap<(Address, Address), (String, Option<usize>)>,
     /// The names contacts gave themselves (XEP-0172), after the roster's.
-    pub nicknames: BTreeMap<(BareJid, BareJid), String>,
+    pub nicknames: BTreeMap<(Address, Address), String>,
     /// One's own status, as set last (`/away`…): plain online at the start.
     pub own_status: omtalk_xmpp::presence::OwnStatus,
     /// The reaction picker, if a right click opened one.
@@ -1062,7 +1148,7 @@ pub struct App {
 pub const MIN_PANE: u16 = 12;
 
 impl App {
-    pub fn new(accounts: Vec<BareJid>, modifier: Modifier, left: u16, right: u16) -> Self {
+    pub fn new(accounts: Vec<Address>, modifier: Modifier, left: u16, right: u16) -> Self {
         let ui_modifier = modifier;
         let modifier = match modifier {
             Modifier::Ctrl => KeyModifiers::CONTROL,
@@ -1071,6 +1157,10 @@ impl App {
             Modifier::None => KeyModifiers::NONE,
         };
         Self {
+            irc_read_enabled: false,
+            irc_catching: Default::default(),
+            irc_networks: BTreeMap::new(),
+            irc_conversations: BTreeMap::new(),
             connection: accounts
                 .iter()
                 .map(|a| (a.clone(), Connection::Connecting))
@@ -1088,6 +1178,8 @@ impl App {
             file_save: None,
             contacts: BTreeSet::new(),
             focus: Focus::Input,
+            drafts: BTreeMap::new(),
+            pins: Vec::new(),
             input: String::new(),
             cursor: 0,
             left_width: left,
@@ -1111,6 +1203,7 @@ impl App {
             history_asked: BTreeSet::new(),
             people_cursor: 0,
             chats_scroll: 0,
+            chats_manual_scroll: false,
             refused: false,
             sent: Vec::new(),
             recall: None,
@@ -1172,7 +1265,7 @@ impl App {
 
     /// Takes the names contacts have in `account`'s roster for the chats with them, now
     /// and for those opened later. A name taken away leaves the address.
-    pub fn contact_names(&mut self, account: &BareJid, names: Vec<(BareJid, Option<String>)>) {
+    pub fn contact_names(&mut self, account: &Address, names: Vec<(Address, Option<String>)>) {
         for (jid, name) in names {
             let name = name.filter(|n| !n.trim().is_empty());
             let key = (account.clone(), jid);
@@ -1185,7 +1278,7 @@ impl App {
     }
 
     /// The name `jid` gave themselves (XEP-0172), for when the roster has none.
-    pub fn nickname(&mut self, account: &BareJid, jid: &BareJid, nick: Option<String>) {
+    pub fn nickname(&mut self, account: &Address, jid: &Address, nick: Option<String>) {
         let key = (account.clone(), jid.clone());
         match nick {
             Some(nick) => drop(self.nicknames.insert(key.clone(), nick)),
@@ -1196,11 +1289,11 @@ impl App {
 
     /// What a contact is called: the name in the roster, else the one they gave
     /// themselves; neither, and the address shows.
-    pub fn name_of(&self, key: &(BareJid, BareJid)) -> Option<String> {
+    pub fn name_of(&self, key: &(Address, Address)) -> Option<String> {
         self.names.get(key).or(self.nicknames.get(key)).cloned()
     }
 
-    fn rename(&mut self, key: &(BareJid, BareJid)) {
+    fn rename(&mut self, key: &(Address, Address)) {
         let name = self.name_of(key);
         for chat in self
             .chats
@@ -1212,9 +1305,9 @@ impl App {
     }
 
     /// The chat with `jid` on `account`, made if needed.
-    pub fn chat(&mut self, account: &BareJid, jid: &BareJid, kind: ChatKind) -> usize {
+    pub fn chat(&mut self, account: &Address, jid: &Address, kind: ChatKind) -> usize {
         // The account's own server is its server channel, however it came up.
-        let kind = if jid.node().is_none() && jid.domain() == account.domain() {
+        let kind = if jid.xmpp().is_some() && jid.node().is_none() && jid.domain() == account.domain() {
             ChatKind::Server
         } else {
             kind
@@ -1234,6 +1327,9 @@ impl App {
             return index;
         }
         let mut chat = Chat::new(account.clone(), jid.clone(), kind);
+        if account.is_irc() {
+            chat.omemo = false;
+        }
         if let Some((id, after)) = self.pending_read_marks.remove(&(account.clone(), jid.clone())) {
             chat.read_mark = Some(id);
             chat.read_mark_here = after.is_some();
@@ -1274,6 +1370,9 @@ impl App {
     /// Closes chat `index`: off the list, its history kept, back when someone writes. A
     /// room is left too.
     pub fn close_chat(&mut self, index: usize) -> Vec<Action> {
+        if self.chats.get(index).is_some_and(|c| c.account.is_irc()) {
+            return self.close_irc_chat(index);
+        }
         let Some(chat) = self.chats.get(index) else {
             return Vec::new();
         };
@@ -1303,13 +1402,27 @@ impl App {
     }
 
     /// The account's server channel, made if needed.
-    pub fn server_chat(&mut self, account: &BareJid) -> usize {
-        let server: BareJid = account.domain().as_str().parse().expect("a domain is a JID");
+    pub fn server_chat(&mut self, account: &Address) -> usize {
+        let server: Address = if let Some(network) = account.network() {
+            omtalk_core::ConversationId::irc(
+                network.clone(),
+                omtalk_core::ConversationKind::Server,
+                "",
+                omtalk_core::CaseMapping::Ascii,
+            )
+            .into()
+        } else {
+            account
+                .domain()
+                .expect("XMPP account")
+                .parse()
+                .expect("a domain is a JID")
+        };
         self.chat(account, &server, ChatKind::Server)
     }
 
     /// A line in the account's server channel, which also shows for a while below.
-    pub fn server_notice(&mut self, account: &BareJid, text: impl Into<String>, at: i64) {
+    pub fn server_notice(&mut self, account: &Address, text: impl Into<String>, at: i64) {
         let text = text.into();
         let index = self.server_chat(account);
         self.notice(Some(index), text.clone(), at);
@@ -1333,6 +1446,9 @@ impl App {
         let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
             return Vec::new();
         };
+        if chat.account.is_irc() {
+            return Vec::new();
+        }
         let key = (chat.account.clone(), chat.jid.clone());
         let room = chat.is_room();
         let typing = !self.input.trim().is_empty()
@@ -1363,7 +1479,7 @@ impl App {
     /// A content message carries "active", but encryption or upload may have delayed
     /// it until after a newer typing state. Reassert what is current only after that
     /// message was actually sent, not when its send action was started.
-    pub fn typing_after_send(&self, account: &BareJid, to: &BareJid) -> Vec<Action> {
+    pub fn typing_after_send(&self, account: &Address, to: &Address) -> Vec<Action> {
         let Some(((own, chat), state @ (ChatState::Composing | ChatState::Paused))) = &self.typing_out else {
             return Vec::new();
         };
@@ -1384,6 +1500,9 @@ impl App {
     /// The window came to the front or went behind. Back in front, the open chat is read.
     pub fn on_focus(&mut self, focused: bool) -> Vec<Action> {
         self.focused = focused;
+        if let Some(i) = self.selected.filter(|i| self.chats[*i].account.is_irc()) {
+            return if focused { self.read_irc(i) } else { Vec::new() };
+        }
         match self.selected {
             Some(index) if focused => {
                 self.note_new(index);
@@ -1397,7 +1516,7 @@ impl App {
     /// What a message from someone, coming now, calls for. Nothing while one is looking
     /// at its chat, nor for one read from an archive (a room's history on entering, what
     /// came while away); else by kind: private, one's nick named in a room, any.
-    pub fn alert_for(&self, account: &BareJid, message: &Incoming) -> crate::notify::Alert {
+    pub fn alert_for(&self, account: &Address, message: &Incoming) -> crate::notify::Alert {
         let Some(text) = &message.text else {
             return Default::default();
         };
@@ -1408,10 +1527,10 @@ impl App {
             .chats
             .iter()
             .position(|c| &c.account == account && c.jid == message.peer);
-        if self
-            .muted_chats
-            .contains(&(account.clone(), message.peer.clone()))
-        {
+        if self.muted_chats.contains(&(
+            account.clone(),
+            crate::address::Address::from(message.peer.clone()),
+        )) {
             return Default::default();
         }
         if self.focused && chat.is_some() && chat == self.selected {
@@ -1419,19 +1538,25 @@ impl App {
         }
         let kind = chat.map(|i| &self.chats[i].kind);
         let private = message.nick.is_none() && !matches!(kind, Some(ChatKind::Server));
-        let prefs = self.chat_notify.get(&(account.clone(), message.peer.clone()));
+        let prefs = self.chat_notify.get(&(
+            account.clone(),
+            crate::address::Address::from(message.peer.clone()),
+        ));
         let mention = match kind {
             Some(ChatKind::Room { nick }) => crate::notify::mentions(text, nick),
             Some(ChatKind::Direct) if prefs.is_some_and(|p| p.mentions_only == Some(true)) => self
                 .nicknames
                 .get(&(account.clone(), account.clone()))
                 .map(String::as_str)
-                .or_else(|| account.node().map(|node| node.as_str()))
+                .or_else(|| account.node())
                 .is_some_and(|nick| crate::notify::mentions(text, nick)),
             _ => false,
         };
         self.chat_notify
-            .get(&(account.clone(), message.peer.clone()))
+            .get(&(
+                account.clone(),
+                crate::address::Address::from(message.peer.clone()),
+            ))
             .map_or_else(
                 || self.notify.alert(private, mention),
                 |prefs| prefs.alert(&self.notify, private, mention),
@@ -1440,7 +1565,7 @@ impl App {
 
     /// Who wrote and, in a room, which, as a desktop notification names them: the room
     /// by its name (its address only while it has none).
-    pub fn notice_names(&self, account: &BareJid, message: &Incoming) -> (String, Option<String>) {
+    pub fn notice_names(&self, account: &Address, message: &Incoming) -> (String, Option<String>) {
         let Some(nick) = &message.nick else {
             return (message.sender.to_string(), None);
         };
@@ -1454,7 +1579,7 @@ impl App {
 
     /// The avatars a notification of `message` shows, as hashes: the writer's (in a room,
     /// when the room tells who it is) and, from a room, the room's.
-    pub fn notice_avatars(&self, account: &BareJid, message: &Incoming) -> (Option<String>, Option<String>) {
+    pub fn notice_avatars(&self, account: &Address, message: &Incoming) -> (Option<String>, Option<String>) {
         if !self.show_avatars {
             return (None, None);
         }
@@ -1463,19 +1588,29 @@ impl App {
             .iter()
             .find(|c| &c.account == account && c.jid == message.peer);
         match &message.nick {
-            None => (self.avatars.get(&message.sender).cloned(), None),
+            None => (
+                self.avatars
+                    .get(&crate::address::Address::from(&message.sender))
+                    .cloned(),
+                None,
+            ),
             Some(nick) => {
                 let person = chat
                     .and_then(|c| c.occupants.get(nick).cloned().flatten())
                     .and_then(|real| self.avatars.get(&real).cloned());
-                (person, self.avatars.get(&message.peer).cloned())
+                (
+                    person,
+                    self.avatars
+                        .get(&crate::address::Address::from(&message.peer))
+                        .cloned(),
+                )
             }
         }
     }
 
     /// The avatar of whoever wrote in a room, asked for once while avatars are shown:
     /// for notifications. Only where the room tells who the writer is.
-    pub fn ask_writer_avatar(&mut self, account: &BareJid, message: &Incoming) -> Option<Action> {
+    pub fn ask_writer_avatar(&mut self, account: &Address, message: &Incoming) -> Option<Action> {
         let nick = message.nick.as_ref()?;
         let real = self
             .chats
@@ -1525,7 +1660,7 @@ impl App {
     }
 
     /// Someone's typing state in a chat.
-    pub fn typing(&mut self, account: &BareJid, chat: &BareJid, who: String, state: ChatState, at: i64) {
+    pub fn typing(&mut self, account: &Address, chat: &Address, who: String, state: ChatState, at: i64) {
         // A room tells one's own state back under one's own nick.
         let own = self
             .chats
@@ -1547,7 +1682,7 @@ impl App {
     }
 
     /// Who is typing in a chat now; one who said so long ago and went silent is not.
-    pub fn typing_now(&self, account: &BareJid, chat: &BareJid, now: i64) -> Vec<String> {
+    pub fn typing_now(&self, account: &Address, chat: &Address, now: i64) -> Vec<String> {
         self.typing_in
             .get(&(account.clone(), chat.clone()))
             .map(|t| {
@@ -1584,7 +1719,7 @@ impl App {
     }
 
     /// A room's subject came: on entering (said quietly), or changed by `by`.
-    pub fn topic(&mut self, account: &BareJid, room: &BareJid, by: Option<String>, topic: String, at: i64) {
+    pub fn topic(&mut self, account: &Address, room: &Address, by: Option<String>, topic: String, at: i64) {
         let Some(index) = self
             .chats
             .iter()
@@ -1609,15 +1744,15 @@ impl App {
     }
 
     /// A line in the account's server channel only: news, not a problem.
-    pub fn server_log(&mut self, account: &BareJid, text: impl Into<String>, at: i64) {
+    pub fn server_log(&mut self, account: &Address, text: impl Into<String>, at: i64) {
         let index = self.server_chat(account);
         self.notice(Some(index), text, at);
     }
 
     /// A client of someone (or of oneself) came, went or changed its state. One's own
     /// clients coming and going are noted in the server channel.
-    pub fn presence(&mut self, account: &BareJid, online: Online, at: i64) {
-        let key = (account.clone(), online.account.clone());
+    pub fn presence(&mut self, account: &Address, online: Online, at: i64) {
+        let key = (account.clone(), online.account.clone().into());
         let clients = self.online.entry(key).or_default();
         let known = clients.contains_key(&online.resource);
         let line = match &online.state {
@@ -1649,9 +1784,9 @@ impl App {
     }
 
     /// A room's members who are not in it now.
-    pub fn away_members(&self, index: usize) -> Vec<BareJid> {
+    pub fn away_members(&self, index: usize) -> Vec<Address> {
         let chat = &self.chats[index];
-        let present: Vec<&BareJid> = chat.occupants.values().flatten().collect();
+        let present: Vec<&Address> = chat.occupants.values().flatten().collect();
         chat.members
             .iter()
             .filter(|m| **m != chat.account && !present.contains(m))
@@ -1660,13 +1795,13 @@ impl App {
     }
 
     /// Whether the account is connected now.
-    pub fn connected(&self, account: &BareJid) -> bool {
+    pub fn connected(&self, account: &Address) -> bool {
         self.connection.get(account).is_some_and(Connection::online)
     }
 
     /// `who`'s connected clients, the most available first. Offline, nobody is known
     /// to be online: what was heard before may be stale.
-    pub fn clients(&self, account: &BareJid, who: &BareJid) -> Vec<&Online> {
+    pub fn clients(&self, account: &Address, who: &Address) -> Vec<&Online> {
         if !self.connected(account) {
             return Vec::new();
         }
@@ -1680,11 +1815,14 @@ impl App {
     }
 
     /// Query only contacts being viewed, once per address/resource in this login.
-    pub fn ask_bot_info(&mut self, account: &BareJid, peer: &BareJid) -> Vec<Action> {
+    pub fn ask_bot_info(&mut self, account: &Address, peer: &Address) -> Vec<Action> {
         if account == peer {
             return Vec::new();
         }
-        let mut targets = vec![Jid::from(peer.clone())];
+        let Some(xmpp_peer) = peer.xmpp() else {
+            return Vec::new();
+        };
+        let mut targets = vec![Jid::from(xmpp_peer.clone())];
         targets.extend(
             self.clients(account, peer)
                 .into_iter()
@@ -1703,7 +1841,7 @@ impl App {
             .collect()
     }
 
-    pub fn mark_bot(&mut self, account: &BareJid, peer: &BareJid) {
+    pub fn mark_bot(&mut self, account: &Address, peer: &Address) {
         self.bots.insert((account.clone(), peer.clone()));
         for chat in &mut self.chats {
             if &chat.account == account && &chat.jid == peer && chat.kind == ChatKind::Direct {
@@ -1726,7 +1864,7 @@ impl App {
 
     /// How far one's message `id` got. A step back is ignored (a late receipt after the
     /// read marker), a failure always shows.
-    pub fn delivery(&mut self, account: &BareJid, id: &str, state: Delivery) {
+    pub fn delivery(&mut self, account: &Address, id: &str, state: Delivery) {
         self.delivery_in(account, None, id, state);
     }
 
@@ -1736,21 +1874,21 @@ impl App {
     /// chat it was about, if any.
     pub fn delivery_from(
         &mut self,
-        account: &BareJid,
-        from: &BareJid,
+        account: &Address,
+        from: &Address,
         id: &str,
         state: Delivery,
-    ) -> Option<BareJid> {
+    ) -> Option<Address> {
         self.delivery_in(account, Some(from), id, state)
     }
 
     fn delivery_in(
         &mut self,
-        account: &BareJid,
-        from: Option<&BareJid>,
+        account: &Address,
+        from: Option<&Address>,
         id: &str,
         state: Delivery,
-    ) -> Option<BareJid> {
+    ) -> Option<Address> {
         let about = |chat: &Chat| match from {
             None => true,
             Some(from) if from.node().is_none() => chat.jid.domain() == from.domain() || chat.jid == *from,
@@ -1816,6 +1954,10 @@ impl App {
 
     /// Explicitly acknowledge a chat without opening it or disturbing the draft.
     pub fn mark_chat_read(&mut self, index: usize) -> Vec<Action> {
+        if self.chats.get(index).is_some_and(|c| c.account.is_irc()) {
+            self.irc_read_enabled = true;
+            return self.read_irc_explicit(index);
+        }
         let Some(chat) = self.chats.get_mut(index).filter(|c| c.kind != ChatKind::Server) else {
             return Vec::new();
         };
@@ -1827,6 +1969,9 @@ impl App {
     }
 
     fn read_through_latest(&mut self, index: usize) -> Vec<Action> {
+        if self.chats.get(index).is_some_and(|c| c.account.is_irc()) {
+            return self.read_irc(index);
+        }
         let chat = &mut self.chats[index];
         if let Some(line) = chat.lines.iter().rev().find(|l| !l.notice) {
             self.local_reads.insert(
@@ -1868,8 +2013,8 @@ impl App {
     /// came after is unread here as there. The chat open in front is read at once.
     pub fn read_marks(
         &mut self,
-        account: &BareJid,
-        marks: Vec<(BareJid, String, Option<usize>)>,
+        account: &Address,
+        marks: Vec<(Address, String, Option<usize>)>,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         for (jid, id, after) in marks {
@@ -1904,6 +2049,28 @@ impl App {
         if index >= self.chats.len() {
             return Vec::new();
         }
+        self.chats_manual_scroll = false;
+        if self.selected != Some(index)
+            && (self.chats[index].account.is_irc() || self.current().is_some_and(|c| c.account.is_irc()))
+        {
+            if let Some(chat) = self.current() {
+                let key = (chat.account.clone(), chat.jid.clone());
+                let draft = if self.sensitive_irc_input(&self.input) {
+                    String::new()
+                } else {
+                    self.input.clone()
+                };
+                self.drafts.insert(key, draft);
+            }
+            self.input = self
+                .drafts
+                .get(&(self.chats[index].account.clone(), self.chats[index].jid.clone()))
+                .cloned()
+                .unwrap_or_default();
+            self.cursor = self.input.chars().count();
+            self.replying = None;
+            self.editing = None;
+        }
         self.unread_return = None;
         let mut actions = Vec::new();
         // Leaving a chat mid-word: it learns the typing paused.
@@ -1929,12 +2096,20 @@ impl App {
         if self.focused {
             self.note_new(index);
         }
+        if self.is_pinned(index) {
+            self.collapsed.remove(&Group::Pinned);
+        } else if let Some(net) = self.chats[index].account.network() {
+            self.collapsed.remove(&Group::Profile(net.account.clone()));
+        }
         self.selected = Some(index);
         self.active = Some(self.chats[index].account.clone());
         actions.extend(self.mark_read(index));
         actions.extend(self.ask_avatar(index));
         actions.extend(self.ask_history(index));
         let chat = &mut self.chats[index];
+        if chat.account.is_irc() {
+            return actions;
+        }
         chat.unread = 0;
         // A room's pane lists its members who are away: read afresh on opening.
         if chat.is_room() {
@@ -2021,7 +2196,7 @@ impl App {
 
     /// Offline delivery and MAM may both carry the same message. Merge transport
     /// metadata before counting unread or notifying; never deduplicate by body.
-    pub fn merge_duplicate(&mut self, account: &BareJid, message: &Incoming) -> bool {
+    pub fn merge_duplicate(&mut self, account: &Address, message: &Incoming) -> bool {
         // Corrections have their own handling and must not be swallowed here.
         if message.replaces.is_some() {
             return false;
@@ -2057,7 +2232,7 @@ impl App {
 
     /// A message arrived (or one's own came back): shown, and its read marker owed. What
     /// to do about it comes back: the marker, while the chat is in sight.
-    pub fn on_incoming(&mut self, account: &BareJid, message: &Incoming, at: i64) -> Vec<Action> {
+    pub fn on_incoming(&mut self, account: &Address, message: &Incoming, at: i64) -> Vec<Action> {
         // An encrypted own echo has no key for this sending device: match it before
         // rejecting unreadable content. The room's copy is the existing local message.
         if message.direction == Direction::Outgoing
@@ -2091,12 +2266,15 @@ impl App {
             Some(_) => ChatKind::Room { nick: String::new() },
             None => ChatKind::Direct,
         };
-        let index = self.chat(account, &message.peer, kind);
+        let index = self.chat(account, &crate::address::Address::from(&message.peer), kind);
         let who = message
             .nick
             .clone()
             .unwrap_or_else(|| message.sender.node().map(|n| n.to_string()).unwrap_or_default());
-        if let Some(typing) = self.typing_in.get_mut(&(account.clone(), message.peer.clone())) {
+        if let Some(typing) = self.typing_in.get_mut(&(
+            account.clone(),
+            crate::address::Address::from(message.peer.clone()),
+        )) {
             typing.remove(&who);
         }
         // A gateway (biboumi) sends it back under an id of its own: the same text, sent
@@ -2173,12 +2351,12 @@ impl App {
 
     /// Someone wrote, encrypted, but not for this device: said once in the chat, not for
     /// every such message.
-    fn not_for_this_device(&mut self, account: &BareJid, message: &Incoming, at: i64) {
+    fn not_for_this_device(&mut self, account: &Address, message: &Incoming, at: i64) {
         let kind = match &message.nick {
             Some(_) => ChatKind::Room { nick: String::new() },
             None => ChatKind::Direct,
         };
-        let index = self.chat(account, &message.peer, kind);
+        let index = self.chat(account, &crate::address::Address::from(&message.peer), kind);
         let who = match (&message.nick, message.direction) {
             (Some(nick), _) => nick.clone(),
             (None, Direction::Outgoing) => tr!("your other device", "ваше другое устройство").to_owned(),
@@ -2214,6 +2392,9 @@ impl App {
             Some(index) if index < self.chats.len() => self.push(
                 index,
                 Line {
+                    irc: false,
+                    kind: omtalk_core::MessageKind::Notice,
+                    server_time: None,
                     at,
                     who: String::new(),
                     text,
@@ -2292,8 +2473,12 @@ impl App {
                                 .unwrap_or_default();
                         }
                         let index = self.chat(&account, &jid, ChatKind::Direct);
-                        self.collapsed.remove(&Group::Account(account));
-                        self.collapsed.remove(&self.group_of(index));
+                        if self.is_pinned(index) {
+                            self.collapsed.remove(&Group::Pinned);
+                        } else {
+                            self.collapsed.remove(&Group::Account(account));
+                            self.collapsed.remove(&self.group_of(index));
+                        }
                         return self.open(index);
                     }
                     return Vec::new();
@@ -2474,6 +2659,9 @@ impl App {
                     Focus::Input if people => Focus::People,
                     Focus::Input | Focus::People => Focus::Chats,
                 };
+                if self.focus == Focus::Chats {
+                    self.chats_manual_scroll = false;
+                }
                 Vec::new()
             }
             KeyCode::BackTab => {
@@ -2484,6 +2672,9 @@ impl App {
                     Focus::Messages => Focus::Chats,
                     Focus::Input => Focus::Messages,
                 };
+                if self.focus == Focus::Chats {
+                    self.chats_manual_scroll = false;
+                }
                 Vec::new()
             }
             KeyCode::PageUp => self.scroll(10),
@@ -2557,14 +2748,25 @@ impl App {
     /// arrows, ← folds.
     fn chats_key(&mut self, code: KeyCode) -> Vec<Action> {
         match code {
+            // Some touchpads interleave plain arrow events with wheel events.
+            // After a wheel gesture those arrows must keep browsing the list.
+            KeyCode::Up if self.chats_manual_scroll => self.scroll_chats(-1),
+            KeyCode::Down if self.chats_manual_scroll => self.scroll_chats(1),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::Enter => {
+                self.chats_manual_scroll = false;
                 self.focus = Focus::Input;
                 Vec::new()
             }
             KeyCode::Left => {
-                if let Some(group) = self.selected.map(|i| self.group_of(i)) {
+                if let Some(group) = self.selected.map(|i| {
+                    if self.is_pinned(i) {
+                        Group::Pinned
+                    } else {
+                        self.group_of(i)
+                    }
+                }) {
                     self.toggle_group(&group);
                 }
                 Vec::new()
@@ -2643,6 +2845,9 @@ impl App {
     /// Puts one's own last message of the open chat into the input line, to correct it
     /// (`/edit`). Only a text written here or by one's other clients, with an id to name.
     pub fn edit_last(&mut self) {
+        if self.current().is_some_and(|c| c.account.is_irc()) {
+            return;
+        }
         let Some(index) = self.selected else { return };
         let chat = &self.chats[index];
         let last = chat
@@ -2669,7 +2874,7 @@ impl App {
     /// A correction come in (XEP-0308): the text of the message it names, by the same
     /// writer, becomes its text. Whether there was one to correct; if not, the
     /// correction shows as a message.
-    pub fn correct(&mut self, account: &BareJid, message: &Incoming) -> bool {
+    pub fn correct(&mut self, account: &Address, message: &Incoming) -> bool {
         let (Some(id), Some(text)) = (&message.replaces, &message.text) else {
             return false;
         };
@@ -2702,6 +2907,9 @@ impl App {
     /// Reacts with `reaction` to the message under the selection, else to the last one
     /// from someone (`/react 👍`); again, and it is taken back.
     pub fn react_here(&mut self, reaction: &str) -> Vec<Action> {
+        if self.current().is_some_and(|c| c.account.is_irc()) {
+            return Vec::new();
+        }
         let reaction = reaction_of(reaction);
         if reaction.is_empty() || reaction.chars().count() > 8 {
             return self.say(tr!(
@@ -2732,6 +2940,9 @@ impl App {
     }
 
     pub fn show_reactions_here(&mut self) -> Vec<Action> {
+        if self.current().is_some_and(|c| c.account.is_irc()) {
+            return Vec::new();
+        }
         let Some(chat) = self.selected else {
             return Vec::new();
         };
@@ -2755,6 +2966,9 @@ impl App {
     }
 
     pub fn show_reactions(&mut self, chat: usize, line: usize) -> Vec<Action> {
+        if self.chats.get(chat).is_some_and(|c| c.account.is_irc()) {
+            return Vec::new();
+        }
         let Some(chat) = self.chats.get(chat) else {
             return Vec::new();
         };
@@ -2767,7 +2981,7 @@ impl App {
                 by.clone()
             } else if by == chat.jid.as_str() {
                 chat.title()
-            } else if let Ok(jid) = by.parse::<BareJid>() {
+            } else if let Ok(jid) = by.parse::<Address>() {
                 self.name_of(&(chat.account.clone(), jid.clone()))
                     .unwrap_or_else(|| {
                         if jid == chat.account {
@@ -2800,6 +3014,9 @@ impl App {
     /// Reacts with `reaction` to message `line` of chat `index`; again, and it is taken
     /// back.
     pub fn react_line(&mut self, index: usize, line: usize, reaction: &str) -> Vec<Action> {
+        if self.chats.get(index).is_some_and(|c| c.account.is_irc()) {
+            return Vec::new();
+        }
         let Some(chat) = self.chats.get_mut(index) else {
             return Vec::new();
         };
@@ -2846,7 +3063,7 @@ impl App {
 
     /// Reactions come in: `by`'s, to the message `id` of the chat with `jid`. Whether the
     /// message is here.
-    pub fn reacted(&mut self, account: &BareJid, reactions: &omtalk_xmpp::reactions::Reactions) -> bool {
+    pub fn reacted(&mut self, account: &Address, reactions: &omtalk_xmpp::reactions::Reactions) -> bool {
         let Some(chat) = self
             .chats
             .iter_mut()
@@ -2872,6 +3089,9 @@ impl App {
     /// Starts a reply: to the message under the selection (quoting what is selected),
     /// else to the last message from someone in the open chat.
     pub fn reply_here(&mut self) -> Vec<Action> {
+        if self.current().is_some_and(|c| c.account.is_irc()) {
+            return Vec::new();
+        }
         let Some(chat) = self.selected else {
             return Vec::new();
         };
@@ -2897,6 +3117,9 @@ impl App {
 
     /// Starts a reply to message `line` of chat `chat`, quoting `quote` or all of it.
     pub fn reply_to(&mut self, chat: usize, line: usize, quote: Option<String>) -> Vec<Action> {
+        if self.chats.get(chat).is_some_and(|c| c.account.is_irc()) {
+            return Vec::new();
+        }
         let Some(original) = self.chats.get(chat).and_then(|c| c.lines.get(line)) else {
             return Vec::new();
         };
@@ -3039,7 +3262,7 @@ impl App {
     }
 
     fn remember_input(&mut self, input: String) {
-        if !input.trim().is_empty() && self.sent.last() != Some(&input) {
+        if !self.sensitive_irc_input(&input) && !input.trim().is_empty() && self.sent.last() != Some(&input) {
             self.sent.push(input);
         }
     }
@@ -3060,7 +3283,9 @@ impl App {
             return Vec::new();
         }
         // Kept for ↑, once: the same line twice in a row is one entry.
-        self.remember_input(input.trim().to_owned());
+        if !self.sensitive_irc_input(&input) {
+            self.remember_input(input.trim().to_owned());
+        }
         let escaped = input.starts_with("//") || input.starts_with("::");
         if escaped {
             input.remove(0);
@@ -3085,11 +3310,49 @@ impl App {
             .into();
             return Vec::new();
         };
+        if self.chats[index].account.is_irc() {
+            if self.chats[index].kind == ChatKind::Server && !escaped {
+                // An IRC server buffer is also a console: MOTD and /motd both
+                // belong to its network. Ordinary channel/query text is unchanged.
+                self.refused = false;
+                let command = format!("/{}", text.trim());
+                let actions = self.irc_command(&command).unwrap_or_else(|| {
+                    vec![Action::IrcRaw {
+                        network: self.chats[index].account.network().unwrap().clone(),
+                        line: text.trim().to_owned(),
+                    }]
+                });
+                if self.refused {
+                    self.cursor = input.chars().count();
+                    self.input = input;
+                }
+                return actions;
+            }
+            let action = !escaped && is_action(text.trim_start());
+            self.refused = false;
+            let actions = self.send_irc(
+                index,
+                text,
+                if action {
+                    omtalk_core::MessageKind::Action
+                } else {
+                    omtalk_core::MessageKind::Text
+                },
+            );
+            if self.refused {
+                self.cursor = input.chars().count();
+                self.input = input;
+            }
+            return actions;
+        }
         self.send_to(index, text)
     }
 
     /// Sends the file at `path` to chat `index`: its line shows at once, going up.
     pub fn upload(&mut self, index: usize, path: PathBuf) -> Vec<Action> {
+        if let Some(error) = self.irc_upload_error(index) {
+            return self.say(error);
+        }
         let chat = &self.chats[index];
         if chat.kind == ChatKind::Server {
             self.status = tr!("files cannot be sent here", "сюда файлы не отправить").into();
@@ -3101,6 +3364,7 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let local_audio = crate::audio::supported(&path).then(|| path.clone());
+        let irc_path = chat.account.is_irc().then(|| path.clone());
         let action = Action::Upload {
             account: chat.account.clone(),
             to: chat.jid.clone(),
@@ -3112,12 +3376,16 @@ impl App {
         let encrypted = chat.omemo;
         let mut line = Line::message(
             chrono::Utc::now().timestamp(),
-            tr!("me", "я").into(),
+            chat.account
+                .network()
+                .and_then(|n| self.irc_networks.get(n))
+                .map_or_else(|| tr!("me", "я").into(), |n| n.nick.clone()),
             name,
             encrypted,
             true,
         );
-        if let Some(path) = local_audio {
+        line.irc = chat.account.is_irc();
+        if let Some(path) = local_audio.or(irc_path) {
             line.media = Some(MediaSlot {
                 url: format!("local-audio:{id}"),
                 link: String::new(),
@@ -3135,7 +3403,7 @@ impl App {
     }
 
     /// The file of message `id` is up: its line becomes the link, as any shared file.
-    pub fn uploaded(&mut self, account: &BareJid, id: &str, link: &str) {
+    pub fn uploaded(&mut self, account: &Address, id: &str, link: &str) {
         for chat in self.chats.iter_mut().filter(|c| &c.account == account) {
             for line in chat
                 .lines
@@ -3162,6 +3430,9 @@ impl App {
 
     /// Sends `text` to chat `index`: its line shows at once, as being sent.
     pub fn send_to(&mut self, index: usize, text: String) -> Vec<Action> {
+        if self.chats[index].account.is_irc() {
+            return self.send_irc(index, text, omtalk_core::MessageKind::Text);
+        }
         let chat = &mut self.chats[index];
         if chat.kind == ChatKind::Server {
             self.status = tr!("only commands here", "здесь только команды").into();
@@ -3231,9 +3502,12 @@ impl App {
     }
 
     fn command(&mut self, line: &str) -> Vec<Action> {
+        if let Some(actions) = self.irc_command(line) {
+            return actions;
+        }
         let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let rest = rest.trim_start();
-        let parsed = (|| -> Result<(&str, Option<BareJid>), String> {
+        let parsed = (|| -> Result<(&str, Option<Address>), String> {
             if rest.split_whitespace().next() != Some("--account") {
                 return Ok((rest, None));
             }
@@ -3246,7 +3520,7 @@ impl App {
             let rest = rest["--account".len()..].trim_start();
             let (value, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             let account = value
-                .parse::<BareJid>()
+                .parse::<Address>()
                 .ok()
                 .filter(|jid| self.accounts.contains(jid));
             let Some(account) = account else {
@@ -3284,8 +3558,9 @@ impl App {
         let args: Vec<&str> = rest.split_whitespace().collect();
         let account = explicit.clone().or_else(|| self.account_for());
         let Some(account) = account else { return Vec::new() };
-        let jid = |i: usize| args.get(i).and_then(|a| a.parse::<BareJid>().ok());
+        let jid = |i: usize| args.get(i).and_then(|a| a.parse::<Address>().ok());
         let result = match (name, jid(0)) {
+            ("/pin" | "/unpin", _) if rest.is_empty() => return self.set_pinned(name == "/pin"),
             ("/play", _) if rest.is_empty() => return self.audio_command(None),
             ("/stop", _) if rest.is_empty() => return vec![Action::Audio(crate::audio::Command::Stop)],
             ("/seek", _) => {
@@ -3454,7 +3729,7 @@ impl App {
                 }
             }
             ("/keys", _) => {
-                let peer = match args.first().map(|a| a.parse::<BareJid>()) {
+                let peer = match args.first().map(|a| a.parse::<Address>()) {
                     Some(Ok(peer)) => Some(peer),
                     Some(Err(_)) => return self.say(tr!("/keys [ADDRESS]", "/keys [АДРЕС]")),
                     None => None,
@@ -3635,9 +3910,9 @@ impl App {
                 }
                 // A bare name goes to the account's room service, which the runtime finds.
                 let room = if address.contains('@') {
-                    address.parse::<BareJid>().ok()
+                    address.parse::<Address>().ok()
                 } else {
-                    format!("{address}@rooms.invalid").parse::<BareJid>().ok()
+                    format!("{address}@rooms.invalid").parse::<Address>().ok()
                 };
                 match room {
                     Some(room) => Ok(vec![Action::CreateRoom {
@@ -3697,7 +3972,7 @@ impl App {
     }
 
     /// Commands use the explicitly selected account, irrespective of the peer's domain.
-    pub fn account_for(&self) -> Option<BareJid> {
+    pub fn account_for(&self) -> Option<Address> {
         self.active.as_ref().or(self.accounts.first()).cloned()
     }
 
@@ -3849,34 +4124,124 @@ impl App {
 
     /// What Tab can complete here.
     fn completion_context(&self) -> complete::Context {
+        let mut account = self.account_for();
+        let before: String = self.input.chars().take(self.cursor).collect();
+        let mut words = before.split_whitespace();
+        let command = words.next().unwrap_or("");
+        let mut selected_account = None;
+        let mut selected_network = None;
+        if command.starts_with('/') {
+            while let Some(flag @ ("--account" | "--network")) = words.next() {
+                let Some(value) = words.next() else {
+                    break;
+                };
+                if flag == "--account" {
+                    selected_account = Some(value);
+                } else {
+                    selected_network = Some(value);
+                }
+            }
+        }
+        if let Some(id) = selected_account {
+            account = self
+                .accounts
+                .iter()
+                .find(|a| {
+                    a.network()
+                        .map_or_else(|| a.to_string() == id, |n| n.account.id == id)
+                })
+                .cloned();
+        }
+        let profile = account
+            .as_ref()
+            .and_then(Address::network)
+            .map(|n| n.account.clone());
+        let available: Vec<_> = self
+            .irc_networks
+            .iter()
+            .filter(|(n, v)| Some(&n.account) == profile.as_ref() && !v.removed)
+            .collect();
+        if let Some(selector) = selected_network {
+            let matched: Vec<_> = available
+                .iter()
+                .filter(|(n, v)| {
+                    v.name == selector
+                        || matches!(&n.network, omtalk_core::Network::Soju(id) if id == selector)
+                })
+                .collect();
+            account = if matched.len() == 1 {
+                Some(Address::Network(matched[0].0.clone()))
+            } else {
+                None
+            };
+        }
+        let irc = profile.is_some();
         let mut context = complete::Context {
-            accounts: self.accounts.iter().map(ToString::to_string).collect(),
+            irc,
+            networks: available
+                .iter()
+                .filter_map(|(n, _)| match &n.network {
+                    omtalk_core::Network::Soju(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            accounts: self
+                .accounts
+                .iter()
+                .map(|a| {
+                    a.network()
+                        .map_or_else(|| a.to_string(), |n| n.account.id.clone())
+                })
+                .collect(),
             ..complete::Context::default()
         };
-        if let Some(chat) = self.current().filter(|c| c.is_room()) {
+        context.accounts.sort();
+        context.accounts.dedup();
+        if let Some(chat) = self
+            .current()
+            .filter(|c| c.is_room() && Some(&c.account) == account.as_ref())
+        {
             let own = match &chat.kind {
                 ChatKind::Room { nick } => nick.as_str(),
-                ChatKind::Direct | ChatKind::Server => "",
+                _ => "",
             };
             context.nicks = chat.occupants.keys().filter(|n| *n != own).cloned().collect();
         }
-        for chat in self.chats.iter().filter(|c| c.kind != ChatKind::Server) {
+        for chat in self.chats.iter().filter(|c| {
+            c.kind != ChatKind::Server
+                && c.account.is_irc() == irc
+                && (!irc || Some(&c.account) == account.as_ref())
+        }) {
             let list = if chat.is_room() {
                 &mut context.rooms
             } else {
                 &mut context.people
             };
-            list.push(chat.jid.to_string());
-            for real in chat.occupants.values().flatten() {
-                if !self.accounts.contains(real) {
-                    context.people.push(real.to_string());
+            list.push(
+                chat.name
+                    .clone()
+                    .filter(|_| irc)
+                    .unwrap_or_else(|| chat.jid.to_string()),
+            );
+            if irc {
+                context.people.extend(chat.occupants.keys().cloned());
+            } else {
+                for real in chat.occupants.values().flatten() {
+                    if !self.accounts.contains(real) {
+                        context.people.push(real.to_string());
+                    }
                 }
             }
         }
-        let account = self.account_for();
-        let mut servers: Vec<String> = self.accounts.iter().map(|a| a.domain().to_string()).collect();
+        context.people.sort();
+        context.people.dedup();
+        let mut servers: Vec<String> = self
+            .accounts
+            .iter()
+            .filter_map(|a| a.domain().map(str::to_owned))
+            .collect();
         for room in self.chats.iter().filter(|c| c.is_room()) {
-            let domain = room.jid.domain().to_string();
+            let domain = room.jid.domain().unwrap_or_default().to_string();
             if !servers.contains(&domain) {
                 servers.push(domain);
             }
@@ -3939,6 +4304,9 @@ impl App {
     /// Opens a direct chat with a room participant, by nick: the room must show who is
     /// behind it.
     pub fn open_private(&mut self, nick: &str) -> Vec<Action> {
+        if let Some(network) = self.current().and_then(|c| c.account.network()).cloned() {
+            return self.open_irc_query(&network, nick);
+        }
         let Some(chat) = self.current().filter(|c| c.is_room()) else {
             return Vec::new();
         };
@@ -3972,14 +4340,17 @@ impl App {
     }
 
     /// Opens the keys window: `peer`'s devices (else the open chat's peer) and one's own.
-    pub fn open_keys(&mut self, peer: Option<BareJid>) -> Vec<Action> {
+    pub fn open_keys(&mut self, peer: Option<Address>) -> Vec<Action> {
         let Some(account) = self.account_for() else {
             return Vec::new();
         };
         self.open_keys_for(account, peer)
     }
 
-    fn open_keys_for(&mut self, account: BareJid, peer: Option<BareJid>) -> Vec<Action> {
+    fn open_keys_for(&mut self, account: Address, peer: Option<Address>) -> Vec<Action> {
+        if account.is_irc() {
+            return Vec::new();
+        }
         let peer = peer.or_else(|| {
             self.current()
                 .filter(|c| c.kind == ChatKind::Direct && c.account == account)
@@ -4038,6 +4409,9 @@ impl App {
     /// history is asked of the archive, once.
     fn ask_history(&mut self, index: usize) -> Option<Action> {
         let chat = self.chats.get(index)?;
+        if chat.account.is_irc() {
+            return None;
+        }
         if chat.kind != ChatKind::Direct || chat.lines.iter().any(|l| !l.notice) {
             return None;
         }
@@ -4051,6 +4425,9 @@ impl App {
     /// The avatar of chat `index`, asked for once while avatars are shown.
     pub fn ask_avatar(&mut self, index: usize) -> Option<Action> {
         let chat = self.chats.get(index)?;
+        if chat.account.is_irc() {
+            return None;
+        }
         let room = match chat.kind {
             ChatKind::Direct => false,
             ChatKind::Room { .. } => true,
@@ -4068,7 +4445,7 @@ impl App {
     }
 
     /// The picture to draw for `jid`, if one is shown.
-    pub fn avatar_of(&self, jid: &BareJid) -> Option<String> {
+    pub fn avatar_of(&self, jid: &Address) -> Option<String> {
         self.show_avatars
             .then(|| self.avatars.get(jid))
             .flatten()
@@ -4103,6 +4480,12 @@ impl App {
                 chat.muted,
                 &prefs,
             );
+            settings.rows.push(crate::settings::Setting {
+                section: "chat",
+                key: "pinned",
+                label: tr!("Pin above all networks", "Закрепить над всеми сетями"),
+                value: crate::settings::Value::Bool(self.selected.is_some_and(|i| self.is_pinned(i))),
+            });
         }
         self.settings = Some(settings);
         Vec::new()
@@ -4130,8 +4513,19 @@ impl App {
             let Some((account, peer, _)) = settings.chat.clone() else {
                 return Vec::new();
             };
-            if let Value::Bool(muted) = setting.value {
-                return self.mute_chat(&account, &peer, muted);
+            if setting.key == "pinned"
+                && let Value::Bool(pinned) = setting.value
+            {
+                return self.pin_chat((account, peer), pinned);
+            }
+            if setting.key == "muted"
+                && let Value::Bool(muted) = setting.value
+            {
+                return self.mute_chat(
+                    &crate::address::Address::from(&account),
+                    &crate::address::Address::from(&peer),
+                    muted,
+                );
             }
             let mut prefs = self
                 .chat_notify
@@ -4259,6 +4653,10 @@ impl App {
                 self.config_ui.compact = *on;
                 Ok(())
             }
+            ("irc_presence", Value::Bool(on)) => {
+                self.config_ui.irc_presence = *on;
+                Ok(())
+            }
             ("viewer", Value::Text(text)) if text.is_empty() => {
                 Err(tr!("a program is needed", "нужна программа").into())
             }
@@ -4342,7 +4740,10 @@ impl App {
         self.open_services_for(account, jid)
     }
 
-    fn open_services_for(&mut self, account: BareJid, jid: Option<Jid>) -> Vec<Action> {
+    fn open_services_for(&mut self, account: Address, jid: Option<Jid>) -> Vec<Action> {
+        let Some(account) = account.xmpp().cloned() else {
+            return self.say(tr!("XMPP-only command", "команда только для XMPP"));
+        };
         let jid = jid.unwrap_or_else(|| Jid::from(account.domain().to_owned()));
         let (services, request) = Services::open(account, jid);
         self.services = Some(services);
@@ -4360,15 +4761,20 @@ impl App {
         let Some(chat) = self.current() else {
             return self.open_services(None);
         };
-        let account = chat.account.clone();
+        let Some(account) = chat.account.xmpp().cloned() else {
+            return Vec::new();
+        };
+        let Some(xmpp_peer) = chat.jid.xmpp() else {
+            return Vec::new();
+        };
         let jid: Jid = match chat.kind {
             ChatKind::Server => Jid::from(account.domain().to_owned()),
-            ChatKind::Room { .. } => chat.jid.clone().into(),
-            ChatKind::Direct => match self.clients(&account, &chat.jid).first() {
+            ChatKind::Room { .. } => xmpp_peer.clone().into(),
+            ChatKind::Direct => match self.clients(&account.clone().into(), &chat.jid).first() {
                 Some(client) => format!("{}/{}", chat.jid, client.resource)
                     .parse()
-                    .unwrap_or_else(|_| chat.jid.clone().into()),
-                None => chat.jid.clone().into(),
+                    .unwrap_or_else(|_| xmpp_peer.clone().into()),
+                None => xmpp_peer.clone().into(),
             },
         };
         let parent = chat
@@ -4376,12 +4782,11 @@ impl App {
             .then(|| {
                 chat.jid
                     .node()?
-                    .as_str()
                     .split_once('%')
                     .map(|(_, server)| server.to_owned())
             })
             .flatten()
-            .and_then(|server| format!("{server}@{}", chat.jid.domain()).parse::<Jid>().ok());
+            .and_then(|server| format!("{server}@{}", xmpp_peer.domain()).parse::<Jid>().ok());
         let (mut services, request) = Services::open(account, jid);
         if let Some(parent) = parent {
             services = services.with_parent(parent);
@@ -4393,19 +4798,22 @@ impl App {
         }]
     }
 
-    fn open_room_admin(&mut self, target: Option<BareJid>) -> Vec<Action> {
+    fn open_room_admin(&mut self, target: Option<Address>) -> Vec<Action> {
         let Some(chat) = self.current().filter(|c| c.is_room()) else {
             self.status = tr!("open a room first", "сначала откройте комнату").into();
             return Vec::new();
         };
-        let mut services = Services::room(chat.account.clone(), chat.jid.clone());
+        let (Some(account), Some(room)) = (chat.account.xmpp(), chat.jid.xmpp()) else {
+            return Vec::new();
+        };
+        let mut services = Services::room(account.clone(), room.clone());
         services.room_nick = target.as_ref().and_then(|jid| {
             chat.occupants
                 .iter()
                 .find(|(_, real)| real.as_ref() == Some(jid))
                 .map(|(nick, _)| nick.clone())
         });
-        services.room_target = target;
+        services.room_target = target.and_then(|t| t.xmpp().cloned());
         self.services = Some(services);
         Vec::new()
     }
@@ -4484,6 +4892,9 @@ impl App {
         let Some(chat) = self.current_mut() else {
             return Vec::new();
         };
+        if chat.account.is_irc() {
+            return Vec::new();
+        }
         chat.omemo = !chat.omemo;
         let (account, jid, on) = (chat.account.clone(), chat.jid.clone(), chat.omemo);
         self.omemo_choice.insert((account.clone(), jid.clone()), on);
@@ -4505,7 +4916,60 @@ impl App {
         self.mute_chat(&account, &jid, muted)
     }
 
-    fn mute_chat(&mut self, account: &BareJid, jid: &BareJid, muted: bool) -> Vec<Action> {
+    pub fn is_pinned(&self, index: usize) -> bool {
+        self.chats
+            .get(index)
+            .is_some_and(|c| self.pins.contains(&(c.account.clone(), c.jid.clone())))
+    }
+
+    pub fn set_pinned(&mut self, pinned: bool) -> Vec<Action> {
+        let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
+            return self.say(tr!("open a chat to pin", "откройте чат для закрепления"));
+        };
+        let key = (chat.account.clone(), chat.jid.clone());
+        self.pin_chat(key, pinned)
+    }
+
+    fn pin_chat(&mut self, key: (Address, Address), pinned: bool) -> Vec<Action> {
+        self.update_pin(key.clone(), pinned);
+        if pinned {
+            self.collapsed.remove(&Group::Pinned);
+        }
+        let action = key.0.network().and_then(|net| {
+            let view = self.irc_networks.get(net)?;
+            if !view.connected || !view.caps.pin_sync {
+                return None;
+            }
+            let state = self.irc_conversations.get(key.1.conversation()?)?;
+            Some(Action::IrcRaw {
+                network: net.clone(),
+                line: format!(
+                    "METADATA {} SET soju.im/pinned {}",
+                    state.target,
+                    u8::from(pinned)
+                ),
+            })
+        });
+        self.status = if pinned {
+            tr!("chat pinned", "чат закреплён")
+        } else {
+            tr!("chat unpinned", "чат откреплён")
+        }
+        .into();
+        action.into_iter().collect()
+    }
+
+    pub fn update_pin(&mut self, key: (Address, Address), pinned: bool) {
+        if pinned {
+            if !self.pins.contains(&key) {
+                self.pins.push(key);
+            }
+        } else {
+            self.pins.retain(|p| p != &key);
+        }
+    }
+
+    fn mute_chat(&mut self, account: &Address, jid: &Address, muted: bool) -> Vec<Action> {
         for chat in &mut self.chats {
             if &chat.account == account && &chat.jid == jid {
                 chat.muted = muted;
@@ -4557,12 +5021,62 @@ impl App {
 
     fn chat_tree(&self, include_folded: bool) -> Vec<(Entry, usize)> {
         let mut rows = Vec::new();
-        let headings = self.accounts.len() > 1 || !self.folders.is_empty();
-        let base = usize::from(headings);
+        let pinned: Vec<_> = self
+            .pins
+            .iter()
+            .filter_map(|(a, j)| {
+                self.chats
+                    .iter()
+                    .position(|c| &c.account == a && &c.jid == j && c.kind != ChatKind::Server)
+            })
+            .collect();
+        if !pinned.is_empty() {
+            rows.push((Entry::Heading(Group::Pinned), 0));
+            if include_folded || !self.collapsed.contains(&Group::Pinned) {
+                rows.extend(pinned.iter().map(|i| (Entry::Chat(*i), 1)));
+            }
+        }
+        let headings =
+            self.accounts.len() > 1 || !self.folders.is_empty() || self.accounts.iter().any(|a| a.is_irc());
+        let mut ordered = Vec::new();
         for account in &self.accounts {
+            if ordered.contains(&account) {
+                continue;
+            }
+            ordered.push(account);
+            if let Some(net) = account.network() {
+                for related in &self.accounts {
+                    if related.network().is_some_and(|n| n.account == net.account)
+                        && !ordered.contains(&related)
+                    {
+                        ordered.push(related);
+                    }
+                }
+            }
+        }
+        let mut profiles = BTreeSet::new();
+        for account in ordered {
+            let nested = account.network().filter(|net| {
+                self.accounts.iter().any(|a| {
+                    a.network().is_some_and(|n| {
+                        n.account == net.account && n.network == omtalk_core::Network::Bouncer
+                    })
+                })
+            });
+            let depth = usize::from(nested.is_some());
+            if let Some(net) = nested {
+                let group = Group::Profile(net.account.clone());
+                if profiles.insert(net.account.clone()) {
+                    rows.push((Entry::Heading(group.clone()), 0));
+                }
+                if !include_folded && self.collapsed.contains(&group) {
+                    continue;
+                }
+            }
+            let base = usize::from(headings) + depth;
             let group = Group::Account(account.clone());
             if headings {
-                rows.push((Entry::Heading(group.clone()), 0));
+                rows.push((Entry::Heading(group.clone()), depth));
                 if !include_folded && self.collapsed.contains(&group) {
                     continue;
                 }
@@ -4590,7 +5104,7 @@ impl App {
                         .position(|c| &c.account == account && &c.jid == jid && c.kind != ChatKind::Server)
                     {
                         placed.push(index);
-                        if !folded {
+                        if !folded && !pinned.contains(&index) {
                             rows.push((Entry::Chat(index), base + 1));
                         }
                     }
@@ -4601,7 +5115,7 @@ impl App {
                 .chats
                 .iter()
                 .enumerate()
-                .filter(|(i, c)| &c.account == account && !placed.contains(i));
+                .filter(|(i, c)| &c.account == account && !placed.contains(i) && !pinned.contains(i));
             for (index, _) in loose {
                 rows.push((Entry::Chat(index), base));
             }
@@ -4625,7 +5139,7 @@ impl App {
             .collect()
     }
 
-    pub fn switch_targets(&self) -> Vec<(BareJid, BareJid, String)> {
+    pub fn switch_targets(&self) -> Vec<(Address, Address, String)> {
         let mut targets = BTreeMap::new();
         for (account, jid) in self.contacts.iter().chain(self.names.keys()) {
             targets.insert(
@@ -4684,9 +5198,13 @@ impl App {
                 return self.open(index);
             }
         };
-        self.collapsed
-            .remove(&Group::Account(self.chats[index].account.clone()));
-        self.collapsed.remove(&self.group_of(index));
+        if self.is_pinned(index) {
+            self.collapsed.remove(&Group::Pinned);
+        } else {
+            self.collapsed
+                .remove(&Group::Account(self.chats[index].account.clone()));
+            self.collapsed.remove(&self.group_of(index));
+        }
         let actions = self.select(index);
         self.unread_return = origin;
         actions
@@ -4701,7 +5219,7 @@ impl App {
 
     /// Puts folder `name` of `account` in the place of folder `target`: before it when
     /// moved up, after it when moved down.
-    pub fn place_folder(&mut self, account: &BareJid, name: &str, target: &str) -> Vec<Action> {
+    pub fn place_folder(&mut self, account: &Address, name: &str, target: &str) -> Vec<Action> {
         let find = |folders: &[Folder], name: &str| {
             folders
                 .iter()
@@ -4874,6 +5392,17 @@ impl App {
         Vec::new()
     }
 
+    fn scroll_chats(&mut self, by: isize) -> Vec<Action> {
+        self.focus = Focus::Chats;
+        let height = self.areas.left.map_or(0, |r| r.height.saturating_sub(2) as usize);
+        self.chats_scroll = self
+            .chats_scroll
+            .saturating_add_signed(by)
+            .min(self.tree().len().saturating_sub(height));
+        self.chats_manual_scroll = true;
+        Vec::new()
+    }
+
     /// Shows the chat from result `index` of the search on; the search closes.
     pub fn jump(&mut self, index: usize) -> Vec<Action> {
         let Some(search) = self.search.take() else {
@@ -4896,7 +5425,7 @@ impl App {
     }
 
     /// The search's results came.
-    pub fn found(&mut self, account: &BareJid, chat: &BareJid, words: &str, mut found: Vec<Found>) {
+    pub fn found(&mut self, account: &Address, chat: &Address, words: &str, mut found: Vec<Found>) {
         // In a direct chat the other side by the name the chat list has for them.
         if let Some(title) = self
             .chats
@@ -4921,7 +5450,7 @@ impl App {
 
     /// The chat shown from `at` on (see [`Action::Jump`]): what comes before is had by
     /// scrolling up, as ever.
-    pub fn jumped(&mut self, account: &BareJid, jid: &BareJid, lines: Vec<Line>, at: i64) {
+    pub fn jumped(&mut self, account: &Address, jid: &Address, lines: Vec<Line>, at: i64) {
         let Some(index) = self
             .chats
             .iter()
@@ -4959,13 +5488,21 @@ impl App {
         };
         if !chat.older_loading && !chat.older_done && chat.kind != ChatKind::Server {
             chat.older_loading = true;
-            let oldest_archived = chat.lines.iter().find_map(|l| l.archive_id.clone());
+            let oldest_archived = if chat.account.is_irc() {
+                chat.lines.iter().find_map(|l| l.id.clone())
+            } else {
+                chat.lines.iter().find_map(|l| l.archive_id.clone())
+            };
             return vec![Action::Older {
                 account: chat.account.clone(),
                 chat: chat.jid.clone(),
                 room: chat.is_room(),
                 have: chat.lines.iter().filter(|l| !l.notice).count(),
-                before: chat.older_before.clone().or(oldest_archived),
+                before: if chat.account.is_irc() {
+                    oldest_archived
+                } else {
+                    chat.older_before.clone().or(oldest_archived)
+                },
             }];
         }
         Vec::new()
@@ -4975,8 +5512,8 @@ impl App {
     /// shown, each once. `before` is where the archive's next page ends.
     pub fn older(
         &mut self,
-        account: &BareJid,
-        jid: &BareJid,
+        account: &Address,
+        jid: &Address,
         lines: Vec<Line>,
         before: Option<String>,
         done: bool,
@@ -5261,7 +5798,7 @@ impl App {
                 return self.mark_chat_read(index);
             }
             MouseEventKind::Down(MouseButton::Right)
-                if self.current().is_some_and(|c| c.is_room())
+                if self.current().is_some_and(|c| c.is_room() && !c.account.is_irc())
                     && let Some((_, jid)) = self.areas.people.iter().find(|(r, _)| inside(*r)) =>
             {
                 return self.open_room_admin(Some(jid.clone()));
@@ -5269,6 +5806,7 @@ impl App {
             // A right click on a message offers reactions to it.
             MouseEventKind::Down(MouseButton::Right)
                 if inside(self.areas.messages)
+                    && self.current().is_some_and(|c| !c.account.is_irc())
                     && let (Some(chat), Some(&(_, line))) = (
                         self.selected,
                         self.areas.message_lines.iter().find(|(r, _)| inside(*r)),
@@ -5352,7 +5890,11 @@ impl App {
                 } else if let Some((_, group)) = self.areas.group_rows.iter().find(|(r, _)| inside(*r)) {
                     let group = group.clone();
                     match group {
+                        Group::Pinned => self.toggle_group(&Group::Pinned),
                         // Folded once let go: it may be dragged to its new place first.
+                        Group::Profile(profile) => {
+                            self.toggle_group(&Group::Profile(profile));
+                        }
                         Group::Folder(..) => self.dragging_folder = Some(group),
                         Group::Account(account) => {
                             self.toggle_group(&Group::Account(account.clone()));
@@ -5452,8 +5994,8 @@ impl App {
                 self.focus = Focus::Messages;
                 self.scroll(-3)
             }
-            MouseEventKind::ScrollUp if inside_opt(self.areas.left) => self.move_selection(-1),
-            MouseEventKind::ScrollDown if inside_opt(self.areas.left) => self.move_selection(1),
+            MouseEventKind::ScrollUp if inside_opt(self.areas.left) => self.scroll_chats(-3),
+            MouseEventKind::ScrollDown if inside_opt(self.areas.left) => self.scroll_chats(3),
             // A room's participants, as with the arrow keys: the pane follows the one picked.
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if inside_opt(self.areas.right) && !self.room_people().is_empty() =>
@@ -5505,6 +6047,33 @@ pub fn action_of(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn irc_presence_setting_applies_immediately_and_is_saved() {
+        use crate::settings::{Value, Written};
+        let mut app = app();
+        app.open_settings();
+        let row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|s| s.key == "irc_presence")
+            .unwrap();
+        app.settings.as_mut().unwrap().rows[row].value = Value::Bool(false);
+        let actions = app.apply_setting(row);
+        assert!(!app.config_ui.irc_presence);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for action in actions {
+            if let Action::Setting { section, key, value } = action {
+                assert_eq!(value, Written::Bool(false));
+                crate::settings::write(&path, section, key, &value).unwrap();
+            }
+        }
+        assert!(!crate::config::load(&path).unwrap().ui.irc_presence);
+    }
+
     #[test]
     fn image_link_previews_are_optional_and_do_not_hide_real_uploads() {
         use crate::settings::{Value, Written};
@@ -5577,7 +6146,7 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEventState;
 
-    fn jid(text: &str) -> BareJid {
+    fn jid(text: &str) -> Address {
         text.parse().unwrap()
     }
 
@@ -5685,7 +6254,7 @@ mod tests {
         let mut app = app();
         app.connection.insert(me.clone(), Connection::Online);
         let online = Online {
-            account: peer.clone(),
+            account: peer.clone().xmpp().unwrap().clone(),
             resource: "bot-session".into(),
             state: Some(omtalk_xmpp::presence::State::Online),
             client: "service".into(),
@@ -5840,8 +6409,8 @@ mod tests {
         let services = app.services.as_ref().unwrap();
         assert!(services.room);
         assert_eq!(services.account, me);
-        assert_eq!(services.jid, Jid::from(room));
-        assert_eq!(services.room_target, Some(bob));
+        assert_eq!(services.jid, Jid::from(room.xmpp().unwrap().clone()));
+        assert_eq!(services.room_target, Some(bob.xmpp().unwrap().clone()));
         assert_eq!(services.room_nick.as_deref(), Some("Bob"));
     }
 
@@ -5942,8 +6511,8 @@ mod tests {
                     app.read_markers = read_markers;
                     for i in 1..=2 {
                         let incoming = Incoming {
-                            peer: peer.clone(),
-                            sender: jid("lynx@example.org"),
+                            peer: peer.clone().xmpp().unwrap().clone(),
+                            sender: jid("lynx@example.org").xmpp().unwrap().clone(),
                             nick: Some("lynx".into()),
                             device: Some(1),
                             direction: Direction::Incoming,
@@ -6412,8 +6981,8 @@ mod tests {
         for i in 1..=8 {
             let id = format!("r{i}");
             let archived = Incoming {
-                peer: jid("team@muc.example.org"),
-                sender: jid("bob@example.org"),
+                peer: jid("team@muc.example.org").xmpp().unwrap().clone(),
+                sender: jid("bob@example.org").xmpp().unwrap().clone(),
                 nick: Some("bob".into()),
                 device: Some(1),
                 direction: Direction::Incoming,
@@ -6464,8 +7033,8 @@ mod tests {
         app.select(carol);
         for (i, id) in ["b2", "b3", "b4"].into_iter().enumerate() {
             let archived = Incoming {
-                peer: jid("bob@example.org"),
-                sender: jid("bob@example.org"),
+                peer: jid("bob@example.org").xmpp().unwrap().clone(),
+                sender: jid("bob@example.org").xmpp().unwrap().clone(),
                 nick: None,
                 device: Some(1),
                 direction: Direction::Incoming,
@@ -6690,8 +7259,11 @@ mod tests {
         let sent = type_text(&mut app, "привет, IRC");
         assert_eq!(sent.len(), 1);
         let back = Incoming {
-            peer: jid("#chan%irc.example.org@irc.example.org"),
-            sender: me.clone(),
+            peer: jid("#chan%irc.example.org@irc.example.org")
+                .xmpp()
+                .unwrap()
+                .clone(),
+            sender: me.clone().xmpp().unwrap().clone(),
             nick: Some("s[x]".into()),
             device: None,
             direction: Direction::Outgoing,
@@ -6736,8 +7308,8 @@ mod tests {
             type_text(&mut app, "https://example.org/cat.png");
             let id = app.chats[room].lines.last().unwrap().id.clone().unwrap();
             let back = Incoming {
-                peer,
-                sender: me.clone(),
+                peer: peer.xmpp().unwrap().clone(),
+                sender: me.clone().xmpp().unwrap().clone(),
                 nick: Some("me".into()),
                 device: None,
                 direction: Direction::Outgoing,
@@ -6778,8 +7350,8 @@ mod tests {
             ChatKind::Room { nick: "me".into() },
         );
         let message = |text: String, at: Option<i64>| Incoming {
-            peer: jid("team@muc.example.org"),
-            sender: jid("bob@example.org"),
+            peer: jid("team@muc.example.org").xmpp().unwrap().clone(),
+            sender: jid("bob@example.org").xmpp().unwrap().clone(),
             nick: Some("bob".into()),
             device: None,
             direction: Direction::Incoming,
@@ -6835,8 +7407,8 @@ mod tests {
             app.select(index);
             app.focused = false;
             let message = Incoming {
-                peer: peer.clone(),
-                sender: jid("bob@example.org"),
+                peer: peer.clone().xmpp().unwrap().clone(),
+                sender: jid("bob@example.org").xmpp().unwrap().clone(),
                 nick: room.then(|| "bob".into()),
                 device: None,
                 direction: Direction::Incoming,
@@ -6944,7 +7516,7 @@ mod tests {
             }]
         );
         let reactions = omtalk_xmpp::reactions::Reactions {
-            chat: jid("bob@example.org"),
+            chat: jid("bob@example.org").xmpp().unwrap().clone(),
             room: false,
             id: "b1".into(),
             by: "bob@example.org".into(),
@@ -6972,8 +7544,8 @@ mod tests {
         let me = jid("me@example.org");
         let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
         let message = |text: &str, id: &str, replaces: Option<&str>, direction| Incoming {
-            peer: jid("bob@example.org"),
-            sender: jid("bob@example.org"),
+            peer: jid("bob@example.org").xmpp().unwrap().clone(),
+            sender: jid("bob@example.org").xmpp().unwrap().clone(),
             nick: None,
             device: Some(1),
             direction,
@@ -7007,8 +7579,8 @@ mod tests {
         let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
         app.select(bob);
         let incoming = |from: &str| Incoming {
-            peer: jid(from),
-            sender: jid(from),
+            peer: jid(from).xmpp().unwrap().clone(),
+            sender: jid(from).xmpp().unwrap().clone(),
             nick: None,
             device: Some(1),
             direction: Direction::Incoming,
@@ -7374,8 +7946,8 @@ mod room_history_identity_tests {
     #[test]
     fn older_pages_merge_archive_ids_with_different_message_ids_without_merging_real_repeats() {
         for archive_first in [false, true] {
-            let me: BareJid = "me@example.org".parse().unwrap();
-            let room: BareJid = "#usue%irc.example.org@bridge.example.org".parse().unwrap();
+            let me: Address = "me@example.org".parse().unwrap();
+            let room: Address = "#usue%irc.example.org@bridge.example.org".parse().unwrap();
             let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
             let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
             let mut live = Line::message(102, "xff_".into(), "same message".into(), false, false);

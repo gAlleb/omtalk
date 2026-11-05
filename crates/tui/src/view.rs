@@ -14,7 +14,7 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use omtalk_xmpp::BareJid;
+use crate::address::Address;
 use omtalk_xmpp::services::{CommandAction, CommandStatus, NoteKind};
 use xmpp_parsers::data_forms::FieldType;
 
@@ -136,7 +136,9 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .position(|(entry, _)| matches!(entry, Entry::Chat(i) if Some(*i) == app.selected));
     let mut scroll = app.chats_scroll;
-    if let Some(row) = picked {
+    if !app.chats_manual_scroll
+        && let Some(row) = picked
+    {
         if row < scroll {
             scroll = row;
         } else if row >= scroll + height {
@@ -190,7 +192,30 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
             Entry::Heading(group) => {
                 let folded = app.collapsed.contains(&group);
                 let paragraph = match &group {
-                    Group::Account(account) => account_row(app, account, folded, inner.width),
+                    Group::Pinned => Paragraph::new(TextLine::from(Span::styled(
+                        format!(
+                            "{} {}",
+                            if folded { "▸" } else { "▾" },
+                            tr!("Pinned", "Закреплённые")
+                        ),
+                        Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+                    ))),
+                    Group::Profile(profile) => {
+                        let name = app
+                            .irc_networks
+                            .iter()
+                            .find(|(n, _)| &n.account == profile)
+                            .map_or(profile.id.as_str(), |(_, v)| v.profile.as_str());
+                        Paragraph::new(TextLine::from(Span::styled(
+                            format!("{} [IRC] {name}", if folded { "▸" } else { "▾" }),
+                            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+                        )))
+                    }
+                    Group::Account(account) => {
+                        let indent = branch.width() as u16;
+                        account_row(app, account, folded, inner.width.saturating_sub(indent))
+                            .block(Block::default().padding(ratatui::widgets::Padding::left(indent)))
+                    }
                     Group::Folder(account, name) => {
                         folder_row(app, account, name, folded, inner.width, &branch)
                     }
@@ -199,8 +224,18 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.areas.group_rows.push((row, group.clone()));
             }
             Entry::Chat(index) => {
+                let title = if app.is_pinned(index) {
+                    let chat = &app.chats[index];
+                    let scope = chat
+                        .account
+                        .network()
+                        .map_or_else(|| chat.account.to_string(), |n| app.irc_name(n));
+                    format!("{} · {scope}", chat.title())
+                } else {
+                    app.chats[index].title()
+                };
                 frame.render_widget(
-                    chat_row(
+                    chat_row_named(
                         &app.chats[index],
                         app.selected == Some(index),
                         inner.width,
@@ -214,6 +249,7 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
                             chrono::Utc::now().timestamp(),
                         )
                         .is_empty(),
+                        &title,
                     ),
                     row,
                 );
@@ -242,10 +278,10 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// An account's heading in the chat list: fold mark, state, address, and while folded
 /// the unread count of its chats, so nothing hides there unnoticed.
-fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragraph<'static> {
+fn account_row(app: &App, account: &Address, folded: bool, width: u16) -> Paragraph<'static> {
     let online = app
         .connection
-        .get(account)
+        .get(&crate::address::Address::from(account))
         .is_some_and(crate::app::Connection::online);
     let mark = if folded { "▸ " } else { "▾ " };
     let unread: usize = app
@@ -260,7 +296,30 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
         String::new()
     };
     let room = (width as usize).saturating_sub(mark.width() + 2 + badge.width());
-    let name = truncate(&account.to_string(), room);
+    let title = account
+        .network()
+        .and_then(|n| app.irc_networks.get(n))
+        .map_or_else(
+            || account.to_string(),
+            |v| {
+                if account
+                    .network()
+                    .is_some_and(|n| n.network == omtalk_core::Network::Bouncer)
+                {
+                    "soju".into()
+                } else if account.network().is_some_and(|n| {
+                    matches!(
+                        n.network,
+                        omtalk_core::Network::Direct | omtalk_core::Network::Selected
+                    )
+                }) {
+                    format!("[IRC] {}", v.name)
+                } else {
+                    v.name.clone()
+                }
+            },
+        );
+    let name = truncate(&title, room);
     let gap = (width as usize).saturating_sub(mark.width() + 2 + name.width() + badge.width());
     Paragraph::new(TextLine::from(vec![
         Span::styled(mark, Style::default().fg(theme::dim())),
@@ -271,7 +330,7 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
         Span::styled(name, {
             // The account commands go to stands out.
             let style = Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD);
-            if app.active.as_ref() == Some(account) {
+            if app.active.as_ref() == Some(&crate::address::Address::from(account)) {
                 style.add_modifier(Modifier::UNDERLINED)
             } else {
                 style
@@ -290,7 +349,7 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
 /// A folder's heading: fold mark, its symbol and name, and while folded its unread count.
 fn folder_row(
     app: &App,
-    account: &BareJid,
+    account: &Address,
     name: &str,
     folded: bool,
     width: u16,
@@ -337,6 +396,7 @@ fn folder_row(
     ]))
 }
 
+#[cfg(test)]
 fn chat_row(
     chat: &Chat,
     selected: bool,
@@ -345,6 +405,29 @@ fn chat_row(
     branch: &str,
     online: bool,
     typing: bool,
+) -> Paragraph<'static> {
+    chat_row_named(
+        chat,
+        selected,
+        width,
+        icons,
+        branch,
+        online,
+        typing,
+        &chat.title(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chat_row_named(
+    chat: &Chat,
+    selected: bool,
+    width: u16,
+    icons: theme::Icons,
+    branch: &str,
+    online: bool,
+    typing: bool,
+    title: &str,
 ) -> Paragraph<'static> {
     let width = width.saturating_sub(branch.width() as u16);
     let icon = match chat.kind {
@@ -358,7 +441,11 @@ fn chat_row(
     } else {
         String::new()
     };
-    let lock = if chat.omemo { "" } else { icons.chat_unlocked };
+    let lock = if chat.account.is_irc() || chat.omemo {
+        ""
+    } else {
+        icons.chat_unlocked
+    };
     // Someone types there: a mark after the name.
     let lock = if typing {
         format!(" …{lock}")
@@ -371,7 +458,7 @@ fn chat_row(
         lock
     };
     let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + lock.width() + 1);
-    let title = truncate(&chat.title(), room_for_title);
+    let title = truncate(title, room_for_title);
     let gap = (width as usize).saturating_sub(icon.width() + title.width() + lock.width() + badge.width());
     let base = if selected {
         theme::selected()
@@ -426,6 +513,19 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
     app.areas.input = input;
 
     let (title, subtitle) = match app.current() {
+        Some(chat) if chat.account.is_irc() => {
+            let network = chat.account.network().unwrap();
+            let view = &app.irc_networks[network];
+            let name = if matches!(network.network, omtalk_core::Network::Bouncer) {
+                tr!("soju control", "управление soju").to_owned()
+            } else {
+                chat.title()
+            };
+            (
+                format!("{name} · {} [IRC] · {}", view.name, view.nick),
+                chat.topic.clone().unwrap_or_default(),
+            )
+        }
         Some(chat) if chat.kind == ChatKind::Direct => {
             let clients: Vec<String> = app
                 .clients(&chat.account, &chat.jid)
@@ -512,6 +612,12 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             // the account's name in a direct chat.
             let own = match &chat.kind {
                 ChatKind::Room { nick } if !nick.is_empty() => nick.clone(),
+                _ if chat.account.is_irc() => chat
+                    .account
+                    .network()
+                    .and_then(|n| app.irc_networks.get(n))
+                    .map(|n| n.nick.clone())
+                    .unwrap_or_default(),
                 _ => chat
                     .account
                     .node()
@@ -521,7 +627,9 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             // Where OMEMO is off (an IRC channel, an open room) every message is plain:
             // the short mark. Where it is on, a plain message gets the full one.
             let mut icons = app.icons;
-            if !chat.omemo {
+            if chat.account.is_irc() {
+                icons.plain_mark = "";
+            } else if !chat.omemo {
                 icons.plain_mark = icons.plain_mark_open_chat;
             }
             let peer = (chat.kind == ChatKind::Direct).then(|| chat.title());
@@ -886,15 +994,22 @@ fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
     if !app.leader_pending {
         return;
     }
-    let left = LEADER_KEYS.iter().map(|(k, ..)| k.width()).max().unwrap_or(0);
-    let width = (LEADER_KEYS
+    let keys: Vec<_> = LEADER_KEYS
+        .iter()
+        .filter(|(key, ..)| {
+            !app.current().is_some_and(|c| c.account.is_irc())
+                || !matches!(*key, "o" | "s" | "e" | "c" | "g" | "a")
+        })
+        .collect();
+    let left = keys.iter().map(|(k, ..)| k.width()).max().unwrap_or(0);
+    let width = (keys
         .iter()
         .map(|(_, en, ru)| left + 3 + if crate::lang::russian() { ru } else { en }.width())
         .max()
         .unwrap_or(0) as u16
         + 2)
     .min(input.width);
-    let height = (LEADER_KEYS.len() as u16 + 2).min(input.y.saturating_sub(1));
+    let height = (keys.len() as u16 + 2).min(input.y.saturating_sub(1));
     if height < 3 {
         return;
     }
@@ -915,10 +1030,16 @@ fn leader_keys(frame: &mut Frame, app: &App, input: Rect) {
     let inner = block.inner(area);
     clear(frame, area);
     frame.render_widget(block, area);
-    let lines: Vec<TextLine> = LEADER_KEYS
+    let lines: Vec<TextLine> = keys
         .iter()
         .map(|(key, en, ru)| {
-            let about = if crate::lang::russian() { ru } else { en };
+            let about = if *key == "w" && app.current().is_some_and(|c| c.account.is_irc()) {
+                &tr!("hide chat locally", "скрыть чат локально")
+            } else if crate::lang::russian() {
+                ru
+            } else {
+                en
+            };
             TextLine::from(vec![
                 Span::styled(
                     format!("{key:<left$}"),
@@ -941,11 +1062,13 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
             .enumerate()
             .map(|(i, text)| {
                 let text = text.trim_end().trim_end_matches(':').to_owned();
-                let about = complete::about(&text).map(|c| c.about()).unwrap_or("");
+                let about = complete::about_in(&text, app.current().is_some_and(|c| c.account.is_irc()))
+                    .map(|c| c.about())
+                    .unwrap_or("");
                 (text, about, i == c.index)
             })
             .collect(),
-        _ => complete::commands_for(&app.input)
+        _ => complete::commands_in(&app.input, app.current().is_some_and(|c| c.account.is_irc()))
             .into_iter()
             .map(|c| {
                 (
@@ -1145,13 +1268,20 @@ pub fn message_rows(
     let mut rows = Vec::new();
     let mut last_day = None;
     // Compact: "16:31   mrak  text", the names in a column as wide as the widest here.
+    let nick_limit = if lines.iter().any(|l| l.irc) {
+        // IRC nicks (including bots) should fit when the transcript is wide.
+        // Keep space for the clock, separators and at least 20 text columns.
+        width.saturating_sub(28).max(1)
+    } else {
+        NICK_COLUMN
+    };
     let nick_width = lines
         .iter()
         .filter(|l| !l.notice)
         .map(|l| shown(l).width().max(1))
         .max()
         .unwrap_or(1)
-        .min(NICK_COLUMN);
+        .min(nick_limit);
     let gutter = if compact {
         "00:00 ".len() + nick_width + 2
     } else {
@@ -1460,7 +1590,13 @@ pub fn message_rows(
             body_width.saturating_sub(marker.width()).max(1)
         };
         // An action, "/me waves": "* bob waves", as IRC and Gajim show it (XEP-0245).
-        if let Some(action) = crate::app::action_of(&line.text) {
+        if let Some(action) = (line.kind == omtalk_core::MessageKind::Action).then(|| {
+            if line.irc {
+                line.text.as_str()
+            } else {
+                crate::app::action_of(&line.text).unwrap_or(&line.text)
+            }
+        }) {
             let who_style = if line.outgoing {
                 Style::default()
                     .fg(theme::outgoing())
@@ -1860,15 +1996,24 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         (app.icons.unlocked, theme::warn())
     };
-    let button = format!(" {label} ");
-    let attach = format!(" {} ", app.icons.attach);
+    let button = if app.current().is_some_and(|c| c.account.is_irc()) {
+        String::new()
+    } else {
+        format!(" {label} ")
+    };
+    let files = app.selected.is_none_or(|i| app.irc_upload_error(i).is_none());
+    let attach = if files {
+        format!(" {} ", app.icons.attach)
+    } else {
+        String::new()
+    };
     let can_mute = app.current().is_some_and(|c| c.kind != ChatKind::Server);
     let emoji = if can_mute {
         format!(" {} ", app.icons.emoji)
     } else {
         String::new()
     };
-    let mic = if can_mute {
+    let mic = if can_mute && files {
         if app.icons == theme::text_icons() {
             " mic "
         } else {
@@ -2083,8 +2228,26 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                     )));
                 }
             }
+            if let Some((nick, at)) = &chat.irc_topic_author
+                && let Some(at) = Local.timestamp_opt(*at, 0).single()
+            {
+                let date = at.format("%d.%m.%Y %H:%M");
+                for part in wrap(
+                    &trf!("Topic set by {nick} · {date}", "Тему установил {nick} · {date}"),
+                    inner.width as usize,
+                ) {
+                    rows.push(TextLine::from(Span::styled(
+                        part,
+                        Style::default().fg(theme::dim()),
+                    )));
+                }
+            }
             rows.push(TextLine::from(Span::styled(
-                chat.jid.to_string(),
+                if chat.account.is_irc() {
+                    chat.title()
+                } else {
+                    chat.jid.to_string()
+                },
                 Style::default().fg(theme::dim()),
             )));
             rows.push(TextLine::default());
@@ -2108,12 +2271,15 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 };
                 let mut spans = vec![Span::styled("● ", Style::default().fg(dot))];
                 // Op, voice and the like, as IRC clients mark them.
+                if let Some(mark) = chat.irc_prefixes.get(nick) {
+                    spans.push(Span::styled(mark.clone(), Style::default().fg(theme::accent())));
+                }
                 if let Some(mark) = chat.occupant_mark.get(nick) {
                     spans.push(Span::styled(*mark, Style::default().fg(theme::accent())));
                 }
                 spans.push(Span::styled(nick.clone(), theme::nick(nick)));
                 if let Some(real) = real
-                    && real.node().is_some_and(|n| n.as_str() != nick)
+                    && real.node().is_some_and(|n| n != nick)
                 {
                     spans.push(Span::styled(
                         format!(" {real}"),
@@ -2167,6 +2333,48 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                 }
             }
         }
+        ChatKind::Server | ChatKind::Direct if chat.account.is_irc() => {
+            if let Some(net) = chat.account.network()
+                && let Some(view) = app.irc_networks.get(net)
+            {
+                for text in [
+                    format!("IRC · {}", view.profile),
+                    view.name.clone(),
+                    if view.connected {
+                        tr!("connected", "подключено").into()
+                    } else {
+                        tr!("disconnected", "отключено").into()
+                    },
+                    format!(
+                        "{}: {}",
+                        if net.network == omtalk_core::Network::Direct {
+                            tr!("TLS to server", "TLS до сервера")
+                        } else {
+                            tr!("TLS to soju", "TLS до soju")
+                        },
+                        if view.tls { "on" } else { "off" }
+                    ),
+                    format!("{}: {}", tr!("nick", "ник"), view.nick),
+                    view.upstream.clone(),
+                ] {
+                    rows.push(TextLine::from(Span::styled(
+                        text,
+                        Style::default().fg(theme::dim()),
+                    )));
+                }
+                rows.push(TextLine::default());
+                for command in if matches!(net.network, omtalk_core::Network::Bouncer) {
+                    &["/bouncer", "/networks", "/help"][..]
+                } else {
+                    &["/join #channel", "/query nick", "/whois nick", "/help"][..]
+                } {
+                    rows.push(TextLine::from(Span::styled(
+                        *command,
+                        Style::default().fg(theme::accent()),
+                    )));
+                }
+            }
+        }
         ChatKind::Server => {
             let state = app
                 .connection
@@ -2199,7 +2407,10 @@ fn side(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pictures) {
                     Span::raw(value),
                 ])
             };
-            rows.push(label(tr!("server", "сервер"), chat.account.domain().to_string()));
+            rows.push(label(
+                tr!("server", "сервер"),
+                chat.account.domain().unwrap_or_default().to_string(),
+            ));
             rows.push(label(tr!("chats", "чаты"), direct.to_string()));
             rows.push(label(tr!("rooms", "комнаты"), rooms.to_string()));
             rows.push(TextLine::default());
@@ -2357,8 +2568,16 @@ fn status_line(frame: &mut Frame, app: &App, area: Rect) {
     let hints = TextLine::from(vec![
         Span::styled(leader_label(app), Style::default().fg(theme::accent())),
         dim(tr!(" keys  ", " клавиши  ")),
-        key("O"),
-        dim(" OMEMO  "),
+        if app.current().is_some_and(|c| c.account.is_irc()) {
+            dim("IRC  ")
+        } else {
+            key("O")
+        },
+        if app.current().is_some_and(|c| c.account.is_irc()) {
+            dim("")
+        } else {
+            dim(" OMEMO  ")
+        },
         Span::styled("Tab", Style::default().fg(theme::accent())),
         dim(tr!(" complete/focus  ", " дописать/фокус  ")),
         Span::styled("/", Style::default().fg(theme::accent())),
@@ -2805,7 +3024,7 @@ fn keys_window(frame: &mut Frame, app: &mut App, screen: Rect) {
     // Each owner's devices under a heading; a device takes two rows: its state, its
     // fingerprint.
     let mut lines: Vec<(TextLine, Option<usize>)> = Vec::new();
-    let mut owner: Option<&BareJid> = None;
+    let mut owner: Option<&Address> = None;
     for (index, row) in keys.rows.iter().enumerate() {
         if owner != Some(&row.owner) {
             owner = Some(&row.owner);
@@ -3703,9 +3922,9 @@ fn step_label(action: CommandAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::address::Address;
     use crate::app::{Action, ChatKind};
     use crate::config::Modifier;
-    use omtalk_xmpp::BareJid;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -4090,7 +4309,7 @@ mod tests {
         screen(&mut app, 40, 12);
     }
 
-    fn jid(text: &str) -> BareJid {
+    fn jid(text: &str) -> Address {
         text.parse().unwrap()
     }
 
@@ -5293,8 +5512,8 @@ mod tests {
         let me = jid("me@home.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
         let missed = omtalk_omemo::Incoming {
-            peer: jid("bob@home.org"),
-            sender: jid("bob@home.org"),
+            peer: jid("bob@home.org").xmpp().unwrap().clone(),
+            sender: jid("bob@home.org").xmpp().unwrap().clone(),
             nick: None,
             device: None,
             direction: omtalk_omemo::Direction::Incoming,
@@ -5408,8 +5627,8 @@ mod tests {
             panic!("{sent:?}")
         };
         let echo = omtalk_omemo::Incoming {
-            peer: jid("team@muc.home.org"),
-            sender: me.clone(),
+            peer: jid("team@muc.home.org").xmpp().unwrap().clone(),
+            sender: me.clone().xmpp().unwrap().clone(),
             nick: Some("me".into()),
             device: None,
             direction: omtalk_omemo::Direction::Outgoing,
@@ -5432,8 +5651,8 @@ mod tests {
 
         // Bob's markable message: read at once while his chat is open, later otherwise.
         let from_bob = omtalk_omemo::Incoming {
-            peer: jid("bob@home.org"),
-            sender: jid("bob@home.org"),
+            peer: jid("bob@home.org").xmpp().unwrap().clone(),
+            sender: jid("bob@home.org").xmpp().unwrap().clone(),
             nick: None,
             device: Some(7),
             direction: omtalk_omemo::Direction::Incoming,
@@ -5634,7 +5853,7 @@ mod tests {
         app.select(bob);
         assert!(screen(&mut app, 120, 24).contains("не в сети"));
         let client = |who: &str, resource: &str, name: &str, state| Online {
-            account: jid(who),
+            account: jid(who).xmpp().unwrap().clone(),
             resource: resource.into(),
             state,
             client: name.into(),
@@ -5909,8 +6128,8 @@ mod tests {
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("bob печатает…") && text.contains("bob …"), "{text}");
         let from_bob = omtalk_omemo::Incoming {
-            peer: jid("bob@home.org"),
-            sender: jid("bob@home.org"),
+            peer: jid("bob@home.org").xmpp().unwrap().clone(),
+            sender: jid("bob@home.org").xmpp().unwrap().clone(),
             nick: None,
             device: Some(1),
             direction: omtalk_omemo::Direction::Incoming,
@@ -5967,8 +6186,8 @@ mod tests {
         let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
         app.select(bob);
         let from_bob = |id: &str| omtalk_omemo::Incoming {
-            peer: jid("bob@home.org"),
-            sender: jid("bob@home.org"),
+            peer: jid("bob@home.org").xmpp().unwrap().clone(),
+            sender: jid("bob@home.org").xmpp().unwrap().clone(),
             nick: None,
             device: Some(1),
             direction: omtalk_omemo::Direction::Incoming,
@@ -6027,7 +6246,7 @@ mod tests {
         );
         app.notify.bell_on = crate::notify::When::ALL;
         let said = |text: &str| omtalk_omemo::Incoming {
-            peer: jid("team@muc.home.org"),
+            peer: jid("team@muc.home.org").xmpp().unwrap().clone(),
             nick: Some("Алиса".into()),
             text: Some(text.into()),
             ..from_bob("4")
@@ -6509,7 +6728,7 @@ mod tests {
 
         // /help: every command, the last ones too.
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        let text = screen(&mut app, 120, 48);
+        let text = screen(&mut app, 120, 52);
         assert!(text.contains("/create") && text.contains("/quit"), "{text}");
     }
 
@@ -6530,7 +6749,7 @@ mod tests {
             text.contains("Этот чат") && text.contains("Мьют всех уведомлений") && text.contains("Звук"),
             "{text}"
         );
-        assert_eq!(app.settings.as_ref().unwrap().rows.len(), 3);
+        assert_eq!(app.settings.as_ref().unwrap().rows.len(), 4);
         let area = app
             .areas
             .settings_rows
@@ -6769,8 +6988,8 @@ mod tests {
             .occupants
             .insert("Алиса".into(), Some(jid("alice@home.org")));
         let said = omtalk_omemo::Incoming {
-            peer: jid("team@muc.home.org"),
-            sender: jid("team@muc.home.org"),
+            peer: jid("team@muc.home.org").xmpp().unwrap().clone(),
+            sender: jid("team@muc.home.org").xmpp().unwrap().clone(),
             nick: Some("Алиса".into()),
             device: None,
             direction: omtalk_omemo::Direction::Incoming,
@@ -7889,7 +8108,7 @@ mod tests {
             .insert(
                 "gajim.x1".into(),
                 Online {
-                    account: me.clone(),
+                    account: me.clone().xmpp().unwrap().clone(),
                     resource: "gajim.x1".into(),
                     state: Some(State::Online),
                     client: "Gajim".into(),
@@ -8021,6 +8240,47 @@ mod tests {
         // Back up: it follows.
         app.select(chats[3]);
         assert!(screen(&mut app, 100, 20).contains("p03"));
+    }
+
+    #[test]
+    fn wheel_scrolls_the_chat_list_without_opening_or_reading_chats() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chats: Vec<_> = (0..40)
+            .map(|i| app.chat(&me, &jid(&format!("p{i:02}@home.org")), ChatKind::Direct))
+            .collect();
+        app.select(chats[0]);
+        app.input = "draft stays here".into();
+        app.chats[chats[1]].unread = 7;
+        screen(&mut app, 100, 20);
+        for _ in 0..20 {
+            let actions = app.on_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 4,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(actions.is_empty());
+            screen(&mut app, 100, 20);
+        }
+        assert_eq!(app.selected, Some(chats[0]));
+        assert_eq!(app.chats[chats[1]].unread, 7);
+        assert_eq!(app.input, "draft stays here");
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.selected,
+            Some(chats[0]),
+            "interleaved touchpad arrows keep browsing the list"
+        );
+        let text = screen(&mut app, 100, 20);
+        assert!(text.contains("p38"), "{text}");
+        assert!(!app.areas.chat_rows.iter().any(|(_, i)| *i == chats[0]));
+        app.select(chats[0]);
+        assert!(screen(&mut app, 100, 20).contains("p00"));
     }
 
     #[test]
@@ -8364,8 +8624,8 @@ mod audio_view_tests {
     #[test]
     fn inline_audio_controls_and_waveform_are_clickable_in_both_layouts() {
         for (compact, nerd) in [(false, false), (false, true), (true, false), (true, true)] {
-            let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
-            let peer: omtalk_xmpp::BareJid = "other@example.org".parse().unwrap();
+            let me: crate::address::Address = "me@example.org".parse().unwrap();
+            let peer: crate::address::Address = "other@example.org".parse().unwrap();
             let mut app = App::new(vec![me.clone()], KeyModifier::Ctrl, 26, 30);
             app.compact = compact;
             app.icons = if nerd { theme::nerd() } else { theme::text_icons() };
@@ -8559,7 +8819,7 @@ mod download_retry_view_tests {
     fn failed_download_has_a_separate_clickable_retry_row() {
         use crate::app::{Action, ChatKind, MediaState};
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let me: omtalk_xmpp::BareJid = "me@example.org".parse().unwrap();
+        let me: crate::address::Address = "me@example.org".parse().unwrap();
         let peer = "other@example.org".parse().unwrap();
         let mut app = App::new(vec![me.clone()], crate::config::Modifier::Ctrl, 26, 30);
         let chat = app.chat(&me, &peer, ChatKind::Direct);
@@ -8588,5 +8848,209 @@ mod download_retry_view_tests {
             .draw(|f| draw(f, &mut app, &mut Pictures::new()))
             .unwrap();
         assert!(app.areas.fetches.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod native_irc_view_tests {
+    use super::*;
+    use crate::{app::Action, audio, config};
+    use omtalk_core::{AccountId, ConversationKind, Network, NetworkId};
+
+    #[test]
+    fn narrow_pins_show_the_channel_before_scope_and_network_headings_do_not_repeat_irc() {
+        let net = NetworkId {
+            account: AccountId::irc("my_long_soju_profile"),
+            network: Network::Soju("1".into()),
+        };
+        let mut app = App::new(vec![], config::Modifier::Ctrl, 26, 24);
+        app.add_irc_network(
+            NetworkId {
+                account: net.account.clone(),
+                network: Network::Bouncer,
+            },
+            "soju".into(),
+            "soju".into(),
+            true,
+        );
+        app.add_irc_network(net.clone(), "soju".into(), "libera".into(), true);
+        let i = app
+            .ensure_irc_chat(&net, "#asahi-alt", ConversationKind::Channel, true)
+            .unwrap();
+        app.select(i);
+        app.set_pinned(true);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..26).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        let pin = app
+            .areas
+            .chat_rows
+            .iter()
+            .find(|(_, index)| *index == i)
+            .unwrap()
+            .0;
+        assert!(row(pin.y).contains("#asahi-alt"), "{}", row(pin.y));
+        assert!(!row(pin.y).contains("my_long_soju_profile"));
+        let network = app
+            .areas
+            .group_rows
+            .iter()
+            .find(|(_, g)| *g == Group::Account(net.clone().into()))
+            .unwrap()
+            .0;
+        assert!(row(network.y).contains("libera") && !row(network.y).contains("[IRC]"));
+        let profile = app
+            .areas
+            .group_rows
+            .iter()
+            .find(|(_, g)| matches!(g, Group::Profile(_)))
+            .unwrap()
+            .0;
+        assert!(row(profile.y).contains("[IRC] soju"));
+    }
+
+    #[test]
+    fn irc_uses_existing_audio_controls_without_encryption_or_device_ui() {
+        for nerd in [false, true] {
+            let net = NetworkId {
+                account: AccountId::irc("fixture"),
+                network: Network::Soju("1".into()),
+            };
+            let mut app = App::new(vec![], config::Modifier::Ctrl, 42, 30);
+            app.icons = if nerd { theme::nerd() } else { theme::text_icons() };
+            app.add_irc_network(net.clone(), "Bouncer".into(), "Alpha".into(), true);
+            let v = app.irc_networks.get_mut(&net).unwrap();
+            v.connected = true;
+            v.nick = "testnick".into();
+            v.caps.upload = true;
+            let i = app
+                .ensure_irc_chat(&net, "#room", ConversationKind::Channel, true)
+                .unwrap();
+            let id = app.chats[i].jid.conversation().unwrap().clone();
+            app.irc_conversations.get_mut(&id).unwrap().joined = true;
+            app.select(i);
+            app.set_pinned(true);
+            app.collapsed.insert(Group::Account(net.clone().into()));
+            let path = std::path::PathBuf::from("/tmp/fixture-voice.ogg");
+            let mut line = Line::message_sharing(
+                1,
+                "friend".into(),
+                "https://files.test/voice.ogg".into(),
+                false,
+                false,
+                true,
+            );
+            line.irc = true;
+            line.media.as_mut().unwrap().state = MediaState::Ready(path.clone());
+            app.chats[i].lines.push(line.clone());
+            line.outgoing = true;
+            line.who = "testnick".into();
+            app.chats[i].lines.push(line);
+            let mut picture = Line::message_sharing(
+                2,
+                "friend".into(),
+                "https://files.test/image.png".into(),
+                false,
+                false,
+                true,
+            );
+            picture.irc = true;
+            picture.media.as_mut().unwrap().state = MediaState::Ready("/tmp/fixture-image.png".into());
+            app.chats[i].lines.push(picture);
+            let mut pictures = Pictures::new();
+            pictures.insert(
+                "https://files.test/image.png".into(),
+                ratatui_image::picker::Picker::halfblocks().new_resize_protocol(
+                    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                        8,
+                        8,
+                        image::Rgb([70, 140, 170]),
+                    )),
+                ),
+            );
+            app.audio_info.insert(
+                path.clone(),
+                Ok(audio::Info {
+                    seconds: 10.0,
+                    peaks: vec![0, 2, 5, 7],
+                }),
+            );
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+            terminal.draw(|f| draw(f, &mut app, &mut pictures)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Alpha [IRC]") && text.contains("testnick"));
+            assert!(text.contains("#room · Alpha"), "{text}");
+            assert!(!text.contains("[IRC] Alpha") && !text.contains("[fixture/Alpha]"));
+            assert!(
+                app.areas
+                    .files
+                    .iter()
+                    .any(|(_, path)| path == std::path::Path::new("/tmp/fixture-image.png"))
+            );
+            if !nerd && let Ok(path) = std::env::var("OMTALK_TEST_SCREEN") {
+                let cells: Vec<_> = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| (c.symbol(), format!("{:?}", c.fg), format!("{:?}", c.bg)))
+                    .collect();
+                std::fs::write(path, serde_json::to_vec(&(160, 40, cells)).unwrap()).unwrap();
+            }
+            assert!(!text.contains("OMEMO"));
+            assert!(!text.contains(app.icons.locked));
+            assert!(!text.contains(app.icons.unlocked));
+            assert_eq!(app.areas.omemo_button.width, 0);
+            assert!(
+                app.areas
+                    .audio
+                    .iter()
+                    .any(|(_, c)| *c == audio::Command::Toggle(path.clone()))
+            );
+            let (rect, _) = app
+                .areas
+                .audio
+                .iter()
+                .find(|(_, c)| *c == audio::Command::Toggle(path.clone()))
+                .unwrap();
+            let result = app.on_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert_eq!(result, vec![Action::Audio(audio::Command::Toggle(path.clone()))]);
+            for key in ['o', 'e', 's', 'c', 'g', 'a'] {
+                assert!(
+                    app.on_key(crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char(key),
+                        crossterm::event::KeyModifiers::CONTROL
+                    ))
+                    .is_empty()
+                );
+                assert!(app.keys.is_none() && app.services.is_none());
+            }
+            app.leader_pending = true;
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(!text.contains("OMEMO"));
+        }
     }
 }

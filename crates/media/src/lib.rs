@@ -3,6 +3,9 @@
 //! fragment, which never leaves this machine; `https://` links point at plain files.
 
 use std::path::{Path, PathBuf};
+pub mod filehost;
+mod metadata;
+pub use metadata::{Metadata, known_file};
 
 use aes_gcm::aead::AeadInOut;
 use aes_gcm::aead::consts::{U12, U16};
@@ -127,6 +130,30 @@ impl Media {
         None
     }
 
+    /// An ordinary link offered for a manual download. This never authorizes fetching.
+    pub fn link(text: &str) -> Option<Self> {
+        let url = reqwest::Url::parse(text.trim()).ok()?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || text.trim().contains(char::is_whitespace)
+        {
+            return None;
+        }
+        Some(Self::Plain {
+            url: text.trim().into(),
+        })
+    }
+
+    pub fn metadata(&self, cache_dir: &Path) -> Option<Metadata> {
+        let value = std::fs::read(cache_dir.join(self.digest()).join(".metadata.json")).ok()?;
+        let metadata: Metadata = serde_json::from_slice(&value).ok()?;
+        if metadata.name.contains(['/', '\\']) || metadata.name.starts_with('.') {
+            return None;
+        }
+        Some(metadata)
+    }
+
     pub fn url(&self) -> &str {
         match self {
             Media::Encrypted { url, .. } | Media::Plain { url } => url,
@@ -174,6 +201,12 @@ impl Media {
     /// The file if it is here already. One kept by an older omtalk, named after the link
     /// alone, is moved where it goes now.
     pub fn cached(&self, cache_dir: &Path) -> Option<PathBuf> {
+        if let Some(metadata) = self.metadata(cache_dir) {
+            let path = cache_dir.join(self.digest()).join(metadata.name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
         let path = self.cache_path(cache_dir);
         if path.is_file() {
             return Some(path);
@@ -245,8 +278,12 @@ impl Media {
         if let Some(path) = self.cached(cache_dir) {
             return Ok(path);
         }
-        let path = self.cache_path(cache_dir);
-        let mut data = download(self.url(), progress).await?;
+        let (mut data, metadata) = download(self.url(), progress).await?;
+        let path = if self.encrypted() {
+            self.cache_path(cache_dir)
+        } else {
+            cache_dir.join(self.digest()).join(&metadata.name)
+        };
         if let Media::Encrypted { iv, key, .. } = self {
             data = decrypt(&data, iv, key)?;
         }
@@ -267,11 +304,18 @@ impl Media {
             let _ = tokio::fs::remove_file(&partial).await;
             return Err(error.into());
         }
+        if !self.encrypted() {
+            let metadata_path = cache_dir.join(self.digest()).join(".metadata.json");
+            let partial = metadata_path.with_extension("part");
+            let json = serde_json::to_vec(&metadata).map_err(|e| std::io::Error::other(e.to_string()))?;
+            tokio::fs::write(&partial, json).await?;
+            tokio::fs::rename(partial, metadata_path).await?;
+        }
         Ok(path)
     }
 }
 
-async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<u8>, Error> {
+async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<(Vec<u8>, Metadata), Error> {
     // ring, like the XMPP connection; the call fails harmlessly once it is installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
@@ -287,6 +331,7 @@ async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<
         .await
         .and_then(|r| r.error_for_status())
         .map_err(download_error)?;
+    let metadata = Metadata::response(response.headers(), Media::Plain { url: url.into() }.name());
     let total = response.content_length();
     if total.is_some_and(|len| len > MAX_SIZE) {
         return Err(Error::TooLarge);
@@ -300,7 +345,7 @@ async fn download(url: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<
             return Err(Error::TooLarge);
         }
     }
-    Ok(data)
+    Ok((data, metadata))
 }
 
 /// AES-256-GCM with the tag at the end of the file, as XEP-0454 has it.
@@ -589,6 +634,37 @@ mod tests {
             socket.write_all(&body).await.unwrap();
         });
         format!("{addr}")
+    }
+
+    #[tokio::test]
+    async fn extensionless_audio_metadata_and_cache_work_after_reopening() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/opaque", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let count = stream.read(&mut request).await.unwrap();
+            assert!(
+                !String::from_utf8_lossy(&request[..count])
+                    .to_ascii_lowercase()
+                    .contains("authorization:")
+            );
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/ogg\r\nContent-Disposition: attachment; filename*=UTF-8''voice\r\nContent-Length: 5\r\nConnection: close\r\n\r\nsound").await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let media = Media::Plain { url: url.clone() };
+        let path = media.fetch(dir.path()).await.unwrap();
+        task.await.unwrap();
+        assert_eq!(path.file_name().unwrap(), "voice.ogg");
+        drop(media);
+        let reopened = Media::Plain { url };
+        assert_eq!(reopened.cached(dir.path()), Some(path.clone()));
+        assert_eq!(
+            reopened.metadata(dir.path()).unwrap().content_type.as_deref(),
+            Some("audio/ogg")
+        );
+        assert_eq!(reopened.fetch(dir.path()).await.unwrap(), path); // server already closed
     }
 
     #[tokio::test]

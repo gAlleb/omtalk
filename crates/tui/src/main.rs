@@ -5,6 +5,7 @@
 
 #[macro_use]
 mod lang;
+mod address;
 mod app;
 mod audio;
 mod audio_ui;

@@ -1,14 +1,14 @@
 //! The keys window: a peer's OMEMO devices and one's own, with fingerprints and what one
 //! decided about each, as Gajim's. A model only; the view draws it, the runtime asks.
 
+use crate::address::Address;
 use crossterm::event::{KeyCode, KeyEvent};
 use omtalk_omemo::Trust;
-use omtalk_xmpp::BareJid;
 
 /// One device as shown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyRow {
-    pub owner: BareJid,
+    pub owner: Address,
     pub device: u32,
     /// `None`: its bundle is missing or broken, a dead device.
     pub fingerprint: Option<String>,
@@ -22,17 +22,17 @@ pub struct KeyRow {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     Load {
-        account: BareJid,
-        peer: Option<BareJid>,
+        account: Address,
+        peer: Option<Address>,
     },
     Trust {
-        account: BareJid,
-        owner: BareJid,
+        account: Address,
+        owner: Address,
         device: u32,
         trust: Trust,
     },
     Remove {
-        account: BareJid,
+        account: Address,
         device: u32,
     },
 }
@@ -48,9 +48,9 @@ pub enum KeyButton {
 }
 
 pub struct Keys {
-    pub account: BareJid,
+    pub account: Address,
     /// Whose devices besides one's own; `None` for one's own only.
-    pub peer: Option<BareJid>,
+    pub peer: Option<Address>,
     /// The peer's first, then one's own.
     pub rows: Vec<KeyRow>,
     pub cursor: usize,
@@ -69,7 +69,7 @@ pub enum Outcome {
 }
 
 impl Keys {
-    pub fn open(account: BareJid, peer: Option<BareJid>) -> (Self, Request) {
+    pub fn open(account: Address, peer: Option<Address>) -> (Self, Request) {
         let request = Request::Load {
             account: account.clone(),
             peer: peer.clone(),
@@ -232,7 +232,7 @@ mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
 
-    fn jid(text: &str) -> BareJid {
+    fn jid(text: &str) -> Address {
         text.parse().unwrap()
     }
 

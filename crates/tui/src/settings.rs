@@ -113,7 +113,7 @@ pub enum Outcome {
 }
 
 pub struct Settings {
-    pub chat: Option<(omtalk_xmpp::BareJid, omtalk_xmpp::BareJid, String)>,
+    pub chat: Option<(crate::address::Address, crate::address::Address, String)>,
     pub rows: Vec<Setting>,
     pub cursor: usize,
     /// The text being typed for a text setting, and where the cursor is in it (chars).
@@ -266,6 +266,12 @@ impl Settings {
                 ),
                 Value::Bool(ui.compact),
             ),
+            row(
+                "ui",
+                "irc_presence",
+                tr!("IRC joins and departures", "Входы и выходы в IRC"),
+                Value::Bool(ui.irc_presence),
+            ),
             row("notify", "sound_on", tr!("Sound", "Звук"), when(&notify.sound_on)),
             row(
                 "notify",
@@ -297,8 +303,8 @@ impl Settings {
 
     pub fn add_chat(
         &mut self,
-        account: omtalk_xmpp::BareJid,
-        peer: omtalk_xmpp::BareJid,
+        account: crate::address::Address,
+        peer: crate::address::Address,
         title: String,
         muted: bool,
         prefs: &crate::notify::ChatNotify,

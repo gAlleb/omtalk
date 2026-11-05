@@ -4,12 +4,14 @@
 //! created readable by its owner only.
 
 mod closed;
+mod conversations;
 mod folders;
 mod history;
 mod kept;
 mod reactions;
 mod read;
 mod seen;
+pub use conversations::{ConversationState, HistoryCursor, HistoryMessage, HistoryPage, SaveOutcome};
 
 pub use folders::Folder;
 pub use history::{ChatSummary, Delivery, StoredMessage};
@@ -36,6 +38,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("the database was written by a newer omtalk (schema {0})")]
     NewerSchema(i64),
+    #[error("invalid conversation data: {0}")]
+    Conversation(String),
 }
 
 /// Each entry upgrades the schema by one version; never edit one that has shipped.
@@ -103,6 +107,7 @@ const MIGRATIONS: &[&str] = &[
     reactions::MIGRATION,
     kept::MIGRATION,
     history::MIGRATION_ARCHIVE_ID,
+    conversations::MIGRATION,
 ];
 
 #[derive(Clone)]

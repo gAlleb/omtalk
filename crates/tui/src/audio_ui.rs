@@ -1,15 +1,16 @@
 //! Audio controls and a recording draft bound to the chat where recording began.
+use crate::address::Address;
 use crate::{
     app::{Action, App, ChatKind},
     audio,
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use omtalk_xmpp::BareJid;
 use std::path::PathBuf;
 
 pub struct Recorder {
-    pub account: BareJid,
-    pub chat: BareJid,
+    pub account: Address,
+    pub chat: Address,
+    pub kind: ChatKind,
     pub path: PathBuf,
     pub seconds: f64,
     pub level: u8,
@@ -67,6 +68,10 @@ impl App {
         if self.recorder.is_some() {
             return Vec::new();
         }
+        if let Some(error) = self.selected.and_then(|i| self.irc_upload_error(i)) {
+            self.status = error.into();
+            return Vec::new();
+        }
         let Some(chat) = self.current().filter(|c| c.kind != ChatKind::Server) else {
             self.status = tr!(
                 "open a chat to record a voice message",
@@ -79,6 +84,7 @@ impl App {
         self.recorder = Some(Recorder {
             account: chat.account.clone(),
             chat: chat.jid.clone(),
+            kind: chat.kind.clone(),
             path: path.clone(),
             seconds: 0.0,
             level: 0,
@@ -130,8 +136,41 @@ impl App {
             }
         }
         if button == 1 && r.ready {
+            if r.chat.is_irc() {
+                let available = self
+                    .chats
+                    .iter()
+                    .any(|c| c.account == r.account && c.jid == r.chat)
+                    && r.chat.conversation().is_some_and(|id| {
+                        self.irc_conversations.get(id).is_some_and(|s| {
+                            !s.hidden && (!matches!(r.kind, ChatKind::Room { .. }) || s.joined)
+                        })
+                    });
+                if !available {
+                    r.error = Some(
+                        tr!(
+                            "original IRC chat is closed or left; recording kept",
+                            "исходный IRC-чат закрыт или покинут; запись сохранена"
+                        )
+                        .into(),
+                    );
+                    return Vec::new();
+                }
+            }
+            // Check before consuming the recording. A disconnected FILEHOST or
+            // a capability removed mid-recording leaves the preview draft intact.
+            let original = self.recorder.as_ref().unwrap();
+            if let Some(i) = self
+                .chats
+                .iter()
+                .position(|c| c.account == original.account && c.jid == original.chat)
+                && let Some(error) = self.irc_upload_error(i)
+            {
+                self.recorder.as_mut().unwrap().error = Some(error.into());
+                return Vec::new();
+            }
             let r = self.recorder.take().unwrap();
-            let index = self.chat(&r.account, &r.chat, ChatKind::Direct);
+            let index = self.chat(&r.account, &r.chat, r.kind);
             let mut actions = vec![Action::Audio(audio::Command::Stop)];
             actions.extend(self.upload(index, r.path));
             return actions;
@@ -145,8 +184,8 @@ mod tests {
     use super::*;
     #[test]
     fn recording_stays_bound_to_its_original_room_and_cancel_never_sends() {
-        let me: BareJid = "me@example.org".parse().unwrap();
-        let room: BareJid = "room@muc.example.org".parse().unwrap();
+        let me: Address = "me@example.org".parse().unwrap();
+        let room: Address = "room@muc.example.org".parse().unwrap();
         let mut app = App::new(vec![me.clone()], crate::config::Modifier::Ctrl, 26, 30);
         let index = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
         app.select(index);

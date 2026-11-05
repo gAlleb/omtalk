@@ -2,13 +2,14 @@
 
 **English** · [Русский](README.ru.md)
 
-A terminal XMPP client for direct and group chats, with OMEMO encryption, multiple
-accounts, and keyboard and mouse controls.
+A terminal XMPP and native IRC client for direct and group chats, with OMEMO for
+XMPP, multiple accounts, and keyboard and mouse controls.
 
 ## Features
 
 - OMEMO in direct chats and private groups, with device fingerprints and trust management.
-- Multiple accounts, chat folders, room bookmarks, and IRC through a biboumi bridge.
+- Native IRC/soju with multiple networks, history, read sync and shared file/voice controls.
+- Multiple accounts, chat folders, pinned chats, room bookmarks, and optional biboumi bridges.
 - Replies, edits, reactions with a list of who reacted, and message styling.
 - Encrypted file sharing, pictures, searchable local history, and server archive catch-up.
 - Read-state synchronization across devices, per-chat mute, and configurable notifications.
@@ -20,6 +21,7 @@ accounts, and keyboard and mouse controls.
 - [Controls](#controls)
 - [Messaging](#messaging)
 - [Accounts and rooms](#accounts-and-rooms)
+- [Native IRC and soju](#native-irc-and-soju)
 - [Encryption and devices](#encryption-and-devices)
 - [Settings and notifications](#settings-and-notifications)
 - [Command reference](#command-reference)
@@ -391,6 +393,92 @@ bridge such as biboumi, using addresses like `#chan%irc.server@biboumi.example.o
 In a biboumi channel's command browser, `←` leads to IRC server settings: port, TLS,
 password, nick and persistent connections. Long result tables scroll with arrows.
 
+## Native IRC and soju
+
+Add an `[[account]]` with `protocol = "irc"` alongside existing XMPP entries.
+The complete [mixed configuration example](docs/native-irc.toml) includes soju,
+direct IRC, password helpers and a private CA. Entries without `protocol` remain
+XMPP. Profile IDs must be unique and stable: renaming `name` is safe; changing
+`id` creates a separate local identity. Passwords are requested before opening the
+TUI when a soju `password_command` is absent.
+
+Normal soju mode discovers networks and opens a separately authenticated, bound
+connection for each. Saved upstream nicknames and channel membership stay on soju.
+`selected_network` is an explicit fallback for a bouncer without discovery; omtalk
+never silently falls back to it. Direct IRC uses `mode = "direct"`; SASL PLAIN
+requires TLS. Certificate errors stop the connection without a plaintext retry.
+
+The existing sidebar groups **[IRC] profile → network → conversations**. Click a
+heading or use Left/Right to fold/unfold it. Networks fold independently. `/pin`
+and `/unpin`, also in `/settings chat`, place conversations in a shared block at
+the top, labelled with their profile/network. Pins remain visible when networks
+are folded. soju pins synchronize with other clients using `soju.im/pinned`;
+other accounts keep pins locally. Fold state, folders, drafts and pins persist.
+
+| IRC command | Effect in the selected network |
+|---|---|
+| `/join #channel [key]`, `/query nick`, `/msg nick [text]` | Join/open/send |
+| `/nick nick`, `/topic [text]`, `/invite nick`, `/mode …`, `/kick …` | Network/channel operations |
+| `/me text`, `/notice target text`, `/np` | Action, notice, current MPRIS track |
+| `/whois nick`, `/names`, `/raw command` (`/quote`) | Information or an explicit raw command |
+| `/away [text]`, `/online` | Set/clear away in this network |
+| `/bouncer` | Open BouncerServ; manage soju with its own `help` commands |
+| `/close` | Hide this buffer locally, keeping history and server membership |
+| `/motd`, `/list`, `/version`, `/who` | Query the selected IRC server |
+| `/ns` (`/nickserv`), `/cs` (`/chanserv`), `/ms` (`/memoserv`) | Open a service or send it a command |
+| `/part [reason]` (`/leave`) | Leave the channel upstream |
+| `/detach` | Detach on soju; affects other downstream clients too |
+| `/quit` | Exit omtalk; soju's upstream connections remain running |
+
+Put selectors before arguments, for example
+`/msg --account irc-home --network libera friend hello`. A network name or stable
+soju network ID is accepted; ambiguous selection is rejected. `//me literal`
+sends the literal `/me literal`, while `/me waves` sends CTCP ACTION. Server
+buffers accept IRC commands with or without `/`, regardless of case: `MOTD`,
+`/motd`, `NickServ HELP`, `/NickServ HELP`. Commands not handled locally in a server
+buffer are passed to that server; unknown commands in conversations stay in the
+input for correction. A private chat hidden with `/close` stays hidden on restart
+and history replay, and reopens for a new live message. `/help` and completion show the
+current protocol's commands. The XMPP reference below describes XMPP semantics.
+
+Local history/search works in both protocols. CHATHISTORY and MARKREAD are used
+when negotiated; MARKREAD synchronizes **your own** reading between clients and
+does not claim that a peer read your message. Replayed history produces no live
+notifications and does not replace the current participant list. A disconnected
+send is not silently queued or resent; its draft is retained.
+
+The wheel over the left pane scrolls the list without changing the active chat.
+Pinned conversations show the channel first, followed by the network.
+`IRC joins and departures` in `/settings` (`[ui] irc_presence = true`) shows live
+JOIN/PART/QUIT/KICK notices with their event time. Turning it off hides future
+membership notices; the participant list still updates.
+
+`/upload path` and `/record` use the same image, audio, recording and file controls
+as XMPP. IRC sends a normal URL using the server's FILEHOST service. A failed or
+cancelled upload retains the local file; retry reuses an already uploaded URL.
+Without FILEHOST, uploading/starting a recording is unavailable. HTTPS links,
+including extensionless media, follow `auto_download` and `image_links`; fetched
+Content-Type/Content-Disposition metadata is cached for subsequent starts.
+
+IRC has no OMEMO, device/trust controls or end-to-end encrypted attachments. TLS
+to soju only describes that connection, not soju's connection to each upstream.
+IRC edits, replies, reactions, DCC and server-side SEARCH are not implemented.
+Direct servers without history/read/upload capabilities retain basic messaging;
+key-protected direct channels require their key again after reconnect.
+
+To try only a new IRC profile with a separate database:
+
+```sh
+cargo build -p omtalk
+target/debug/omtalk --config /path/to/mixed.toml --db /path/to/irc-test.db irc-home
+```
+
+For a trial with existing history, stop omtalk and back up the SQLite database
+(including outstanding WAL data, or use SQLite's `.backup`), then use a copy with
+`--db`. Migration 18 adds IRC tables without replacing XMPP rows or OMEMO state.
+An older binary will refuse this newer schema; keep the original backup for rollback.
+Do not run two copies of the same XMPP device database simultaneously.
+
 ## Encryption and devices
 
 Click the lock above the input or use prefix+`o` to toggle OMEMO for the chat.
@@ -601,6 +689,16 @@ for ad-hoc command tests. Upload service: `upload.localhost`, HTTP at `127.0.0.1
 
 ### Testing against other clients
 
+Native IRC has a separate real-soju fixture (Go, Python and OpenSSL required):
+
+```sh
+python3 tests/irc/run.py
+OMTALK_TEST_AUDIO=1 python3 tests/irc/run.py  # also test with a virtual PulseAudio/PipeWire device
+```
+
+See [IRC implementation and upstream regression notes](docs/irc-upstream-review.md)
+for pinned versions, scenarios and cleanup. This uses disposable servers and data.
+
 `omtalk-cli` is a line-based client for live OMEMO checks with Gajim, Monal,
 Conversations and Dino:
 
@@ -619,6 +717,8 @@ Server discovery uses SRV. `--host HOST [--port PORT]` selects STARTTLS manually
 
 | Directory | What is there |
 |---|---|
+| `crates/core` | protocol-independent identities, capabilities and message intents |
+| `crates/irc` | native IRC and soju sessions, network discovery, history, reads and pins |
 | `crates/omemo` | OMEMO 0.3: X3DH, Double Ratchet, the libsignal format, AES-GCM payload. No XML, no network |
 | `crates/omemo-xml` | OMEMO on the wire: devicelist, bundle, `<encrypted>` on top of xmpp-parsers types; encrypting one message for many devices |
 | `crates/xmpp` | connections for several accounts, password check, keepalive, the replies a client owes (disco, ping, caps), PEP, MUC (joining, closed rooms, participants), message archive (MAM), avatars |
@@ -630,6 +730,7 @@ Server discovery uses SRV. `--host HOST [--port PORT]` selects STARTTLS manually
 | `crates/cli` | `omtalk-cli`: the line-based client for live testing |
 | `crates/omemo-oracle` | tests only: starting the reference device and talking to it |
 | `tests/prosody` | a disposable Prosody 13 for integration tests |
+| `tests/irc` | pinned real soju, independent IRC peers, TLS/FILEHOST and optional virtual audio |
 | `tests/oracle` | the reference device on python-omemo; `crates/omemo/tests/oracle.rs` checks against it byte for byte |
 
 ## License

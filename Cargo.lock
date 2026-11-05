@@ -335,6 +335,7 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
@@ -1617,6 +1618,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "irc-proto"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "259640031f2f3e6d9fa632c7b314ba1eb5d1f88b3583bd2dd2e8f17155a19b5b"
+dependencies = [
+ "bytes",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2063,6 +2076,8 @@ dependencies = [
  "image",
  "ogg",
  "omemo",
+ "omtalk-core",
+ "omtalk-irc",
  "omtalk-media",
  "omtalk-omemo",
  "omtalk-store",
@@ -2073,6 +2088,7 @@ dependencies = [
  "ratatui-image",
  "rpassword",
  "serde",
+ "serde_json",
  "symphonia",
  "tempfile",
  "tokio",
@@ -2095,6 +2111,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "omtalk-core"
+version = "0.1.11"
+dependencies = [
+ "chrono",
+ "getrandom 0.4.3",
+ "serde",
+]
+
+[[package]]
+name = "omtalk-irc"
+version = "0.1.11"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "irc-proto",
+ "omtalk-core",
+ "omtalk-media",
+ "reqwest",
+ "rustls-native-certs",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "omtalk-media"
 version = "0.1.11"
 dependencies = [
@@ -2102,10 +2144,13 @@ dependencies = [
  "bytes",
  "futures-util",
  "getrandom 0.4.3",
+ "omtalk-core",
  "omtalk-xmpp",
  "percent-encoding",
  "reqwest",
  "rustls",
+ "serde",
+ "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
@@ -2130,14 +2175,17 @@ dependencies = [
 name = "omtalk-store"
 version = "0.1.11"
 dependencies = [
+ "chrono",
  "omemo",
  "omemo-xml",
+ "omtalk-core",
  "omtalk-omemo",
  "omtalk-testkit",
  "omtalk-xmpp",
  "postcard",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

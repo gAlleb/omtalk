@@ -1,0 +1,10 @@
+[package]
+name = "omtalk-core"
+version = "0.1.11"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+getrandom = "0.4"
