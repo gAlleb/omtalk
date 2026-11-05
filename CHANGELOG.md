@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Long client statuses in the contact sidebar wrap onto additional lines instead of being truncated.
 - Desktop notifications offer a localized "Mark as read" action for the corresponding account and chat, without opening the conversation or disturbing the current draft. Dismissing a notification leaves unread state unchanged. Action waiting is asynchronous and notification stacking is isolated per account.
 
 ## 0.1.11 — 2026-11-04

@@ -736,7 +736,7 @@ fn state_words(state: omtalk_xmpp::presence::State) -> &'static str {
     }
 }
 
-/// Connected clients, one a row: the program, its state, its own words.
+/// Connected clients: the program, its state and its own words, wrapped to fit.
 fn client_rows(rows: &mut Vec<TextLine<'static>>, clients: &[&omtalk_xmpp::presence::Online], width: u16) {
     use omtalk_xmpp::presence::State;
     for client in clients {
@@ -756,10 +756,19 @@ fn client_rows(rows: &mut Vec<TextLine<'static>>, clients: &[&omtalk_xmpp::prese
             client.client.as_str()
         };
         let line = format!("{name}  {words}");
-        rows.push(TextLine::from(vec![
-            Span::styled("● ", Style::default().fg(colour)),
-            Span::raw(truncate(&line, (width as usize).saturating_sub(2))),
-        ]));
+        for (index, part) in wrap(&line, (width as usize).saturating_sub(2))
+            .into_iter()
+            .enumerate()
+        {
+            rows.push(TextLine::from(vec![
+                if index == 0 {
+                    Span::styled("● ", Style::default().fg(colour))
+                } else {
+                    Span::raw("  ")
+                },
+                Span::raw(part),
+            ]));
+        }
     }
 }
 
