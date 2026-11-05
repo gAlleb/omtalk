@@ -184,23 +184,27 @@ pub fn run(command: &[String]) {
     }
 }
 
-/// As [`run`], from a thread that may wait: the command is waited for there.
-pub fn run_blocking(command: &[String]) {
+/// Wait asynchronously for an explicit notification action. Closing or expiring
+/// a popup is not an acknowledgement. Kill the waiting helper on runtime shutdown.
+pub async fn read_action(command: &[String]) -> bool {
     let Some((program, args)) = command.split_first() else {
-        return;
+        return false;
     };
-    let _ = std::process::Command::new(program)
+    tokio::process::Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .kill_on_drop(true)
+        .output()
+        .await
+        .is_ok_and(|output| output.status.success() && output.stdout == b"mark-read\n")
 }
 
 /// The notify-send command for a message from `who` (in `room`, if one), with `icon`
 /// (an avatar) if there is one. One chat's notifications replace each other where the
 /// daemon can (dunst's stack tag), not pile up.
 pub fn desktop(
+    account: &str,
     chat: &str,
     who: &str,
     room: Option<&str>,
@@ -222,7 +226,8 @@ pub fn desktop(
     let mut command = vec![
         "notify-send".into(),
         "--app-name=omtalk".into(),
-        format!("--hint=string:x-dunst-stack-tag:omtalk {chat}"),
+        format!("--hint=string:x-dunst-stack-tag:omtalk {account} {chat}"),
+        format!("--action=mark-read={}", tr!("Mark as read", "Прочитано")),
     ];
     if let Some(icon) = icon {
         command.push(format!("--icon={}", icon.display()));
@@ -234,6 +239,35 @@ pub fn desktop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_a_successful_explicit_read_action_acknowledges() {
+        for (script, expected) in [
+            ("printf 'mark-read\\n'", true),
+            ("exit 0", false), // dismissed or expired
+            ("printf 'default\\n'", false),
+            ("printf 'mark-read\\n'; exit 1", false),
+        ] {
+            assert_eq!(
+                read_action(&["sh".into(), "-c".into(), script.into()]).await,
+                expected
+            );
+        }
+        assert!(!read_action(&[]).await);
+        assert!(!read_action(&["/nonexistent/omtalk-notify-send".into()]).await);
+    }
+
+    #[test]
+    fn notification_actions_keep_accounts_separate_and_message_text_literal() {
+        let args = desktop("a@example.org", "room@example.org", "--who", None, "<b>&hi", None);
+        assert!(args.iter().any(|a| a.starts_with("--action=mark-read=")));
+        assert!(
+            args.contains(&"--hint=string:x-dunst-stack-tag:omtalk a@example.org room@example.org".into())
+        );
+        assert_eq!(&args[args.len() - 3..], ["--", "--who", "&lt;b&gt;&amp;hi"]);
+        let other = desktop("b@example.org", "room@example.org", "--who", None, "<b>&hi", None);
+        assert_ne!(args, other);
+    }
 
     #[test]
     fn chat_notification_overrides_preserve_inheritance_and_allow_explicit_sound() {

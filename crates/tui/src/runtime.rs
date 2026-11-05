@@ -191,6 +191,10 @@ pub fn prepare_accounts(options: &Options) -> Result<Vec<AccountConfig>, String>
 
 /// What tasks tell the interface.
 enum Msg {
+    NotificationRead {
+        account: BareJid,
+        chat: BareJid,
+    },
     Saved {
         id: String,
         target: PathBuf,
@@ -948,6 +952,20 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
 
 fn apply(app: &mut App, msg: Msg, shared: &Shared) {
     match msg {
+        Msg::NotificationRead { account, chat } => {
+            // Resolve stable addresses now: the chat list may have changed while
+            // the popup was visible. Never recreate a chat closed in the meantime.
+            if let Some(index) = app
+                .chats
+                .iter()
+                .position(|c| c.account == account && c.jid == chat)
+            {
+                for action in app.mark_chat_read(index) {
+                    tokio::spawn(perform(action, shared.clone()));
+                }
+                flush_local_reads(app, &shared.store);
+            }
+        }
         Msg::Saved { id, target, result } => match result {
             Ok(()) => {
                 app.status = trf!("saved: {}", "сохранено: {}", target.display());
@@ -1050,23 +1068,36 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     Some(action) => format!("* {who} {action}"),
                     None => text.clone(),
                 };
-                let chat = message.peer.to_string();
-                // The icon is made aside (once per pair of avatars), then the notification goes.
-                tokio::task::spawn_blocking(move || {
-                    let avatars = config::cache_dir().join("avatars");
-                    let icon = crate::avatar::notice_icon(
-                        &avatars,
-                        &avatars.join("notify"),
-                        person.as_deref(),
-                        room_avatar.as_deref(),
-                    );
-                    crate::notify::run_blocking(&crate::notify::desktop(
-                        &chat,
+                let chat = message.peer.clone();
+                let account = account.clone();
+                let tx = shared.tx.clone();
+                // Only image preparation blocks a worker. Waiting for an action
+                // must not occupy a blocking thread or hold up client shutdown.
+                tokio::spawn(async move {
+                    let icon = tokio::task::spawn_blocking(move || {
+                        let avatars = config::cache_dir().join("avatars");
+                        crate::avatar::notice_icon(
+                            &avatars,
+                            &avatars.join("notify"),
+                            person.as_deref(),
+                            room_avatar.as_deref(),
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if crate::notify::read_action(&crate::notify::desktop(
+                        &account.to_string(),
+                        &chat.to_string(),
                         &who,
                         room.as_deref(),
                         &text,
                         icon.as_deref(),
-                    ));
+                    ))
+                    .await
+                    {
+                        let _ = tx.send(Msg::NotificationRead { account, chat });
+                    }
                 });
             }
             if let Some(action) = app.ask_writer_avatar(&account, &message) {
@@ -4887,6 +4918,75 @@ mod tests {
             );
         }
         assert_eq!(app.chats[chat].unread, 5, "only messages 501–505 are unread");
+    }
+
+    #[tokio::test]
+    async fn notification_read_targets_its_account_without_opening_or_recreating_chats() {
+        use crate::app::{App, ChatKind, Line};
+        use crate::config::Modifier;
+        use omtalk_store::Store;
+        use omtalk_xmpp::BareJid;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("notifications.db")).unwrap();
+        let a: BareJid = "a@example.org".parse().unwrap();
+        let b: BareJid = "b@example.org".parse().unwrap();
+        let peer: BareJid = "chat@example.org".parse().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let shared = super::Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        for kind in [ChatKind::Direct, ChatKind::Room { nick: "me".into() }] {
+            let mut app = App::new(vec![a.clone(), b.clone()], Modifier::Ctrl, 26, 30);
+            let first = app.chat(&a, &peer, kind.clone());
+            let target = app.chat(&b, &peer, kind);
+            app.select(first);
+            app.input = "unfinished draft".into();
+            app.cursor = 4;
+            app.focused = false;
+            app.chats[first].scroll = 7;
+            for index in [first, target] {
+                app.chats[index].unread = 2;
+                app.chats[index]
+                    .lines
+                    .push(Line::message(42, "bob".into(), "hello".into(), false, false));
+            }
+            super::apply(
+                &mut app,
+                super::Msg::NotificationRead {
+                    account: b.clone(),
+                    chat: peer.clone(),
+                },
+                &shared,
+            );
+            assert_eq!(app.chats[target].unread, 0);
+            assert_eq!(app.chats[first].unread, 2);
+            assert_eq!(app.selected, Some(first));
+            assert_eq!(app.input, "unfinished draft");
+            assert_eq!(app.cursor, 4);
+            assert_eq!(app.chats[first].scroll, 7);
+            assert!(!app.focused);
+            app.remove_chat(target);
+            let count = app.chats.len();
+            super::apply(
+                &mut app,
+                super::Msg::NotificationRead {
+                    account: b.clone(),
+                    chat: peer.clone(),
+                },
+                &shared,
+            );
+            assert_eq!(app.chats.len(), count);
+            assert_eq!(app.chats[first].unread, 2);
+        }
     }
 
     #[test]

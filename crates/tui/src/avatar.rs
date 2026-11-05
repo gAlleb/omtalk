@@ -205,7 +205,14 @@ mod tests {
             "not fetched"
         );
 
-        let command = crate::notify::desktop("bob@home.org", "bob", None, "hi", Some(&out.join("bob.png")));
+        let command = crate::notify::desktop(
+            "me@home.org",
+            "bob@home.org",
+            "bob",
+            None,
+            "hi",
+            Some(&out.join("bob.png")),
+        );
         assert!(
             command
                 .iter()

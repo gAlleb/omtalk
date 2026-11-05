@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Desktop notifications offer a localized "Mark as read" action for the corresponding account and chat, without opening the conversation or disturbing the current draft. Dismissing a notification leaves unread state unchanged. Action waiting is asynchronous and notification stacking is isolated per account.
+
 ## 0.1.11 — 2026-11-04
 
 Mark chats read without opening them, keep unsent drafts in input history, and use more emoji. Room read markers and typing indicators now reach other clients reliably in the cases fixed below.

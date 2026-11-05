@@ -492,6 +492,13 @@ independently. Each accepts `all`, `private` (direct messages), `mention` (your 
 mentioned in a room), `private+mention`, or `none`. Sound runs the configured command; the example uses `canberra-gtk-play`. No signal is
 sent for archive catch-up or while you are looking at the chat.
 
+Desktop notifications offer **Mark as read**: acknowledge the chat without opening
+omtalk or changing the current draft. This marks all messages currently received
+in that chat as read and uses the usual read-state synchronization. Dismissing a
+notification does not mark it read. Requires `notify-send` with `--action` support
+and a notification daemon supporting actions. In Dunst, choose the action through
+its context menu or configured action mouse button; other daemons may show a button.
+
 `/mute`, or the bell beside the paperclip, silences **all** notifications for the current
 chat, including mentions. `/unmute` restores them. Direct chats, XMPP rooms and biboumi
 channels behave alike. The chat list shows a mute icon (`[muted]` in text mode).
