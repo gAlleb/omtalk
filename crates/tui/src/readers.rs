@@ -207,7 +207,10 @@ impl Readers {
         for line in lines {
             let old_count = line.readers.len();
             line.readers.clear();
-            if line.notice {
+            // Without the incoming message's author identity, its own sender
+            // cannot be excluded reliably. As in Gajim, show no room readers
+            // for these legacy records; do not guess from a reused nickname.
+            if line.notice || (!line.outgoing && line.author_ids.is_empty()) {
                 changed |= old_count != 0;
                 continue;
             }
@@ -281,7 +284,47 @@ mod tests {
             .unwrap();
         let mut line = Line::message(at, "writer".into(), "hello".into(), false, false);
         line.archive_id = Some(id.into());
+        line.author_ids.insert("jid:writer@example.org".into());
         line
+    }
+
+    #[test]
+    fn old_messages_without_author_identity_hide_readers_until_identity_is_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("history.db")).unwrap();
+        let chat = room();
+        let mut line = save(&store, &chat, "old-message", 100);
+        line.author_ids.clear();
+        let mut readers = Readers::default();
+        for reader in [
+            "jid:writer@example.org",
+            "jid:me@example.org",
+            "jid:anya@example.org",
+        ] {
+            readers.record(
+                &store,
+                &chat.account,
+                &chat.jid,
+                point(reader, "old-message", Some(150), 151),
+            );
+        }
+        let mut lines = vec![line];
+        readers.apply(&store, &chat.account, &chat.jid, &mut lines);
+        assert!(lines[0].readers.is_empty());
+        // If ordinary live/MAM delivery later supplies metadata, it works
+        // immediately without an extra recovery query or nickname matching.
+        lines[0].author_ids.insert("jid:writer@example.org".into());
+        readers.apply(&store, &chat.account, &chat.jid, &mut lines);
+        assert_eq!(lines[0].readers.len(), 2);
+        assert!(!lines[0].readers.contains_key("jid:writer@example.org"));
+        lines[0].author_ids.clear();
+        readers.apply(&store, &chat.account, &chat.jid, &mut lines);
+        assert!(lines[0].readers.is_empty(), "stale reader lists are cleared too");
+        // Outgoing direction already identifies our own account as the author.
+        lines[0].outgoing = true;
+        readers.apply(&store, &chat.account, &chat.jid, &mut lines);
+        assert_eq!(lines[0].readers.len(), 2);
+        assert!(!lines[0].readers.contains_key("jid:me@example.org"));
     }
 
     fn point(reader: &str, message: &str, at: Option<i64>, received: i64) -> Checkpoint {

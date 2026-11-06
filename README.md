@@ -231,6 +231,8 @@ These are reported read positions, not exact reading times. Markers survive rest
 and are restored from room history when the server archives them. This requires
 stable room IDs (XEP-0359) and identifiable participants (real JIDs or XEP-0421);
 missing markers do not mean that nobody read the message.
+Older incoming room messages without a known author identity do not show read
+marks. No background archive requests are made to repair these old records.
 The regular layout puts the mark after the time (`Nick  14:03 ✓✓`) above the
 message; the compact layout keeps it to the right of the message text.
 
