@@ -1013,6 +1013,8 @@ pub struct App {
     pub refused: bool,
     /// How far the chat list is scrolled, in rows; the view keeps the chat picked in sight.
     pub chats_scroll: usize,
+    /// Wheel scrolling may move the list independently of the active conversation.
+    pub chats_manual_scroll: bool,
     /// The participant picked in a room's pane, while it has the focus.
     pub people_cursor: usize,
     /// Direct chats whose history was asked of the archive already.
@@ -1111,6 +1113,7 @@ impl App {
             history_asked: BTreeSet::new(),
             people_cursor: 0,
             chats_scroll: 0,
+            chats_manual_scroll: false,
             refused: false,
             sent: Vec::new(),
             recall: None,
@@ -1904,6 +1907,7 @@ impl App {
         if index >= self.chats.len() {
             return Vec::new();
         }
+        self.chats_manual_scroll = false;
         self.unread_return = None;
         let mut actions = Vec::new();
         // Leaving a chat mid-word: it learns the typing paused.
@@ -2474,6 +2478,9 @@ impl App {
                     Focus::Input if people => Focus::People,
                     Focus::Input | Focus::People => Focus::Chats,
                 };
+                if self.focus == Focus::Chats {
+                    self.chats_manual_scroll = false;
+                }
                 Vec::new()
             }
             KeyCode::BackTab => {
@@ -2484,6 +2491,9 @@ impl App {
                     Focus::Messages => Focus::Chats,
                     Focus::Input => Focus::Messages,
                 };
+                if self.focus == Focus::Chats {
+                    self.chats_manual_scroll = false;
+                }
                 Vec::new()
             }
             KeyCode::PageUp => self.scroll(10),
@@ -2557,9 +2567,14 @@ impl App {
     /// arrows, ← folds.
     fn chats_key(&mut self, code: KeyCode) -> Vec<Action> {
         match code {
+            // Some touchpads interleave plain arrow events with wheel events.
+            // After a wheel gesture those arrows must keep browsing the list.
+            KeyCode::Up if self.chats_manual_scroll => self.scroll_chats(-1),
+            KeyCode::Down if self.chats_manual_scroll => self.scroll_chats(1),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::Enter => {
+                self.chats_manual_scroll = false;
                 self.focus = Focus::Input;
                 Vec::new()
             }
@@ -4874,6 +4889,17 @@ impl App {
         Vec::new()
     }
 
+    fn scroll_chats(&mut self, by: isize) -> Vec<Action> {
+        self.focus = Focus::Chats;
+        let height = self.areas.left.map_or(0, |r| r.height.saturating_sub(2) as usize);
+        self.chats_scroll = self
+            .chats_scroll
+            .saturating_add_signed(by)
+            .min(self.tree().len().saturating_sub(height));
+        self.chats_manual_scroll = true;
+        Vec::new()
+    }
+
     /// Shows the chat from result `index` of the search on; the search closes.
     pub fn jump(&mut self, index: usize) -> Vec<Action> {
         let Some(search) = self.search.take() else {
@@ -5452,8 +5478,8 @@ impl App {
                 self.focus = Focus::Messages;
                 self.scroll(-3)
             }
-            MouseEventKind::ScrollUp if inside_opt(self.areas.left) => self.move_selection(-1),
-            MouseEventKind::ScrollDown if inside_opt(self.areas.left) => self.move_selection(1),
+            MouseEventKind::ScrollUp if inside_opt(self.areas.left) => self.scroll_chats(-3),
+            MouseEventKind::ScrollDown if inside_opt(self.areas.left) => self.scroll_chats(3),
             // A room's participants, as with the arrow keys: the pane follows the one picked.
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if inside_opt(self.areas.right) && !self.room_people().is_empty() =>

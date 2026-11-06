@@ -129,14 +129,16 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut y = inner.y;
     let rows = app.tree();
-    // Longer than the pane: scrolled so that the chat picked is in sight, and no further
-    // than the end.
+    // Follow the selected chat unless the list was scrolled independently; never
+    // scroll past the end, including after resizing or folding a group.
     let height = inner.height as usize;
     let picked = rows
         .iter()
         .position(|(entry, _)| matches!(entry, Entry::Chat(i) if Some(*i) == app.selected));
     let mut scroll = app.chats_scroll;
-    if let Some(row) = picked {
+    if !app.chats_manual_scroll
+        && let Some(row) = picked
+    {
         if row < scroll {
             scroll = row;
         } else if row >= scroll + height {
@@ -8021,6 +8023,83 @@ mod tests {
         // Back up: it follows.
         app.select(chats[3]);
         assert!(screen(&mut app, 100, 20).contains("p03"));
+    }
+
+    #[test]
+    fn wheel_scrolls_the_chat_list_without_opening_or_reading_chats() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let chats: Vec<_> = (0..40)
+            .map(|i| app.chat(&me, &jid(&format!("p{i:02}@home.org")), ChatKind::Direct))
+            .collect();
+        app.select(chats[0]);
+        app.input = "draft stays here".into();
+        app.cursor = 5;
+        app.chats[chats[1]].unread = 7;
+        screen(&mut app, 100, 20);
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: 4,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        for _ in 0..20 {
+            for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollRight] {
+                let actions = app.on_mouse(mouse(kind));
+                assert!(
+                    actions.is_empty(),
+                    "browsing the list must not open or read chats"
+                );
+                screen(&mut app, 100, 20);
+            }
+        }
+        assert_eq!(app.selected, Some(chats[0]));
+        assert_eq!(app.chats[chats[1]].unread, 7);
+        assert_eq!(app.input, "draft stays here");
+        assert_eq!(app.cursor, 5);
+        assert_eq!(app.chats[chats[0]].scroll, 0);
+        assert!(app.areas.chat_rows.iter().any(|(_, i)| *i == chats[39]));
+        assert!(!app.areas.chat_rows.iter().any(|(_, i)| *i == chats[0]));
+        let end = app.chats_scroll;
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert!(app.on_key(KeyEvent::new(code, KeyModifiers::NONE)).is_empty());
+            screen(&mut app, 100, 20);
+            assert_eq!(app.selected, Some(chats[0]), "interleaved touchpad arrows");
+        }
+        assert_eq!(app.chats_scroll, end);
+        for _ in 0..20 {
+            app.on_mouse(mouse(MouseEventKind::ScrollUp));
+            app.on_mouse(mouse(MouseEventKind::ScrollLeft));
+            screen(&mut app, 100, 20);
+        }
+        assert_eq!(app.chats_scroll, 0);
+        assert_eq!(app.selected, Some(chats[0]));
+        assert_eq!(app.chats[chats[1]].unread, 7);
+        // A real click selects the painted row and restores keyboard navigation.
+        let row = app
+            .areas
+            .chat_rows
+            .iter()
+            .find(|(_, i)| *i == chats[1])
+            .unwrap()
+            .0;
+        app.on_mouse(MouseEvent {
+            column: row.x + 1,
+            row: row.y,
+            ..mouse(MouseEventKind::Down(MouseButton::Left))
+        });
+        app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(app.selected, Some(chats[1]));
+        assert_eq!(app.chats[chats[1]].unread, 0);
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected, Some(chats[2]));
+        // Deliberately tabbing back to the list also restores its arrow navigation.
+        app.on_mouse(mouse(MouseEventKind::ScrollDown));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected, Some(chats[3]));
     }
 
     #[test]
