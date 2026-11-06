@@ -21,7 +21,7 @@
 //! language = "en"       # the interface's language: en or ru
 //! mouse = true          # false: the mouse is the terminal's (selection as in tmux)
 //! read_markers = true   # let senders see that their messages were read
-//! show_readers = true   # show room reader counts and the Read by list
+//! show_readers = true   # show room read marks and the Read by list
 //! typing = true         # let chats see that one is typing
 //! bell = true           # older switch: false is [notify] bell_on = "none"
 //!
@@ -166,7 +166,7 @@ pub struct Ui {
     pub viewer: String,
     /// Tell senders when their messages were read here (XEP-0333), as others do.
     pub read_markers: bool,
-    /// Show room reader counts and the list of who read a message.
+    /// Show room read marks and the list of who read a message.
     pub show_readers: bool,
     /// The mouse is omtalk's; `false` leaves it to the terminal (and tmux), which then
     /// selects and pastes as for any program. The leader key and m switch it.

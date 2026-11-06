@@ -55,6 +55,8 @@ pub struct Incoming {
     pub sender: BareJid,
     /// The sender's nick, in a group chat.
     pub nick: Option<String>,
+    /// Stable room occupant identity (XEP-0421), independent of the current nick.
+    pub occupant_id: Option<String>,
     /// The sending device; `None` for plain text, which names none.
     pub device: Option<DeviceId>,
     pub direction: Direction,
@@ -323,6 +325,7 @@ impl Omemo {
                     peer: envelope.peer,
                     sender: envelope.sender,
                     nick: envelope.nick,
+                    occupant_id: envelope.meta.occupant_id,
                     device: None,
                     direction: envelope.direction,
                     encrypted: false,
@@ -343,6 +346,7 @@ impl Omemo {
                     peer: envelope.peer,
                     sender: envelope.sender,
                     nick: envelope.nick,
+                    occupant_id: envelope.meta.occupant_id,
                     device: None,
                     direction: envelope.direction,
                     encrypted: true,
@@ -369,6 +373,7 @@ impl Omemo {
                 peer: envelope.peer,
                 sender: envelope.sender,
                 nick: envelope.nick,
+                occupant_id: envelope.meta.occupant_id,
                 device: Some(self.device_id),
                 direction: envelope.direction,
                 encrypted: true,
@@ -504,6 +509,7 @@ impl Omemo {
             peer: envelope.peer,
             sender: envelope.sender,
             nick: envelope.nick,
+            occupant_id: envelope.meta.occupant_id,
             device: Some(device),
             direction: envelope.direction,
             encrypted: true,

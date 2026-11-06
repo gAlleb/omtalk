@@ -40,6 +40,29 @@ fn prefix(account: &BareJid, room: &BareJid) -> String {
     )
 }
 
+/// The author's occupant ID is metadata about a message, not another reader.
+/// Keep it separately so anonymous history remains attributable after a restart.
+pub fn author_key(account: &BareJid, room: &BareJid, message: &str) -> String {
+    format!(
+        "room-message-author/{}/{}",
+        URL_SAFE_NO_PAD.encode(format!("{account}\0{room}")),
+        URL_SAFE_NO_PAD.encode(message)
+    )
+}
+
+pub fn author_ids(message: &omtalk_omemo::Incoming) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    if message.nick.is_some() {
+        if message.sender != message.peer {
+            ids.insert(format!("jid:{}", message.sender));
+        }
+        if let Some(id) = &message.occupant_id {
+            ids.insert(format!("occupant:{id}"));
+        }
+    }
+    ids
+}
+
 pub fn checkpoint(
     chat: &crate::app::Chat,
     mark: &omtalk_xmpp::room_reads::RoomRead,
@@ -192,10 +215,17 @@ impl Readers {
                 changed |= old_count != 0;
                 continue;
             };
+            let own_author = line.outgoing
+                || line.author_ids.iter().any(|id| {
+                    id == &own_key
+                        || id
+                            .strip_prefix("occupant:")
+                            .is_some_and(|id| self.own.contains(id))
+                });
             for (reader, points) in &readers {
-                // Reading somebody else's message counts; one's own message is
-                // not made "read by someone" merely by displaying it here.
-                if line.outgoing && *reader == own_key {
+                // The author is not a recipient. Self still counts when reading
+                // somebody else's message, but never when reading one's own.
+                if (own_author && *reader == own_key) || line.author_ids.contains(*reader) {
                     continue;
                 }
                 if let Some((_, info)) = points.range(*position..).next() {
@@ -463,6 +493,13 @@ mod tests {
         assert_eq!(chat.lines[0].readers["jid:me@example.org"].at, Some(200));
         assert!(chat.lines[1].readers.is_empty());
         assert_eq!(chat.lines[1].delivery, Some(crate::app::Delivery::Sent));
+        // Anonymous MAM may omit our real JID/direction, but the stored occupant
+        // identity still identifies the author when self-presence is available.
+        chat.lines[1].outgoing = false;
+        chat.lines[1].author_ids.insert("occupant:self-id".into());
+        chat.readers
+            .apply(&store, &chat.account, &chat.jid, &mut chat.lines);
+        assert!(chat.lines[1].readers.is_empty());
     }
 
     #[test]

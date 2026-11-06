@@ -230,7 +230,7 @@ impl Settings {
             row(
                 "ui",
                 "show_readers",
-                tr!("Show who read and how many", "Показывать кто прочитал и сколько"),
+                tr!("Show who read messages", "Показывать, кто прочитал"),
                 Value::Bool(ui.show_readers),
             ),
             row(

@@ -68,6 +68,8 @@ pub struct Line {
     pub reactions: BTreeMap<String, Vec<String>>,
     /// Individual room participants whose displayed frontier includes this message.
     pub readers: BTreeMap<String, crate::readers::Reader>,
+    /// Stable identities of this message's author, never inferred from a nickname.
+    pub author_ids: BTreeSet<String>,
     /// The id of the message this one answers (XEP-0461).
     pub reply_to: Option<String>,
     /// The id the archive gave it (a room's, in a room): replies in rooms name that.
@@ -170,6 +172,7 @@ impl Line {
             echoed: false,
             reactions: BTreeMap::new(),
             readers: BTreeMap::new(),
+            author_ids: BTreeSet::new(),
             reply_to: None,
             archive_id: None,
             media,
@@ -2064,6 +2067,7 @@ impl App {
         if line.id.is_none() {
             line.id = message.id.clone();
         }
+        line.author_ids.extend(crate::readers::author_ids(message));
         true
     }
 
@@ -2083,6 +2087,7 @@ impl App {
                 .find(|l| l.outgoing && l.id.as_ref() == Some(id))
         {
             line.echoed = true;
+            line.author_ids.extend(crate::readers::author_ids(message));
             if message.archive_id.is_some() {
                 line.archive_id = message.archive_id.clone();
             }
@@ -2121,6 +2126,7 @@ impl App {
             })
         {
             line.echoed = true;
+            line.author_ids.extend(crate::readers::author_ids(message));
             if message.archive_id.is_some() {
                 line.archive_id = message.archive_id.clone();
             }
@@ -2146,6 +2152,7 @@ impl App {
         line.untrusted = message.untrusted;
         line.reply_to = message.reply_to.clone();
         line.archive_id = message.archive_id.clone();
+        line.author_ids = crate::readers::author_ids(message);
         if message.direction == Direction::Incoming {
             line.id = message.id.clone();
         }
@@ -2237,6 +2244,7 @@ impl App {
                     echoed: false,
                     reactions: BTreeMap::new(),
                     readers: BTreeMap::new(),
+                    author_ids: BTreeSet::new(),
                     reply_to: None,
                     archive_id: None,
                     media: None,
@@ -6072,6 +6080,7 @@ mod tests {
                     app.read_markers = read_markers;
                     for i in 1..=2 {
                         let incoming = Incoming {
+                            occupant_id: None,
                             peer: peer.clone(),
                             sender: jid("lynx@example.org"),
                             nick: Some("lynx".into()),
@@ -6542,6 +6551,7 @@ mod tests {
         for i in 1..=8 {
             let id = format!("r{i}");
             let archived = Incoming {
+                occupant_id: None,
                 peer: jid("team@muc.example.org"),
                 sender: jid("bob@example.org"),
                 nick: Some("bob".into()),
@@ -6594,6 +6604,7 @@ mod tests {
         app.select(carol);
         for (i, id) in ["b2", "b3", "b4"].into_iter().enumerate() {
             let archived = Incoming {
+                occupant_id: None,
                 peer: jid("bob@example.org"),
                 sender: jid("bob@example.org"),
                 nick: None,
@@ -6820,6 +6831,7 @@ mod tests {
         let sent = type_text(&mut app, "привет, IRC");
         assert_eq!(sent.len(), 1);
         let back = Incoming {
+            occupant_id: None,
             peer: jid("#chan%irc.example.org@irc.example.org"),
             sender: me.clone(),
             nick: Some("s[x]".into()),
@@ -6866,6 +6878,7 @@ mod tests {
             type_text(&mut app, "https://example.org/cat.png");
             let id = app.chats[room].lines.last().unwrap().id.clone().unwrap();
             let back = Incoming {
+                occupant_id: None,
                 peer,
                 sender: me.clone(),
                 nick: Some("me".into()),
@@ -6908,6 +6921,7 @@ mod tests {
             ChatKind::Room { nick: "me".into() },
         );
         let message = |text: String, at: Option<i64>| Incoming {
+            occupant_id: None,
             peer: jid("team@muc.example.org"),
             sender: jid("bob@example.org"),
             nick: Some("bob".into()),
@@ -6965,6 +6979,7 @@ mod tests {
             app.select(index);
             app.focused = false;
             let message = Incoming {
+                occupant_id: None,
                 peer: peer.clone(),
                 sender: jid("bob@example.org"),
                 nick: room.then(|| "bob".into()),
@@ -7102,6 +7117,7 @@ mod tests {
         let me = jid("me@example.org");
         let bob = app.chat(&me, &jid("bob@example.org"), ChatKind::Direct);
         let message = |text: &str, id: &str, replaces: Option<&str>, direction| Incoming {
+            occupant_id: None,
             peer: jid("bob@example.org"),
             sender: jid("bob@example.org"),
             nick: None,
@@ -7137,6 +7153,7 @@ mod tests {
         let carol = app.chat(&me, &jid("carol@example.org"), ChatKind::Direct);
         app.select(bob);
         let incoming = |from: &str| Incoming {
+            occupant_id: None,
             peer: jid(from),
             sender: jid(from),
             nick: None,

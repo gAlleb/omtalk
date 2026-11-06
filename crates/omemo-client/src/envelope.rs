@@ -36,6 +36,8 @@ pub(crate) struct Envelope {
 /// What a message says about itself, besides its content.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Meta {
+    /// Stable identity of a group message's author, supplied by the room.
+    pub occupant_id: Option<String>,
     /// The sender's id for it: origin-id (XEP-0359), which rooms keep, else the stanza's.
     pub id: Option<String>,
     /// The sender would like to know when it is read (XEP-0333).
@@ -215,6 +217,9 @@ fn content_of(mut message: Message) -> Option<(Content, Meta)> {
             .flatten()
     });
     let meta = Meta {
+        occupant_id: (message.type_ == MessageType::Groupchat)
+            .then(|| omtalk_xmpp::room_reads::occupant_id(&message.payloads))
+            .flatten(),
         id: origin.or_else(|| message.id.as_ref().map(|id| id.0.clone())),
         markable: message
             .payloads
@@ -379,6 +384,31 @@ mod tests {
         let mut error = Message::error(Some(own().into())).with_body(Lang::default(), "bounce".into());
         error.from = Some("peer@example.org/pc".parse().unwrap());
         assert!(open(&own(), error).is_none(), "an error is not a message to show");
+    }
+
+    #[test]
+    fn room_author_ids_survive_live_and_archived_envelopes_without_using_nicknames() {
+        let room: BareJid = "room@muc.example.org".parse().unwrap();
+        let parse = |payload: &str| -> Message {
+            format!("<message xmlns='jabber:client' type='groupchat' from='room@muc.example.org/Anya'><body>hi</body>{payload}</message>")
+                .parse::<Element>().unwrap().try_into().unwrap()
+        };
+        let payload = "<occupant-id xmlns='urn:xmpp:occupant-id:0' id='stable-anya'/>";
+        let live = open_group(&own(), parse(payload), |_, _| None).unwrap().unwrap();
+        let archived = open_room_archived(&own(), &room, parse(payload))
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.sender, room);
+        assert_eq!(live.meta.occupant_id.as_deref(), Some("stable-anya"));
+        assert_eq!(live.meta.occupant_id, archived.meta.occupant_id);
+        let ambiguous = format!("{payload}{payload}");
+        let archived = open_room_archived(&own(), &room, parse(&ambiguous))
+            .unwrap()
+            .unwrap();
+        assert!(archived.meta.occupant_id.is_none());
+        let mut direct = parse(payload);
+        direct.type_ = MessageType::Chat;
+        assert!(open(&own(), direct).unwrap().meta.occupant_id.is_none());
     }
 
     #[test]

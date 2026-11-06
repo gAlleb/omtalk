@@ -23,6 +23,23 @@ impl Store {
             .optional()?)
     }
 
+    /// Fetch a bounded set of keys without scanning all kept state or issuing a
+    /// query for every message in a history page. Missing keys are omitted.
+    pub fn kept_many(&self, keys: &[String]) -> Result<std::collections::BTreeMap<String, String>, Error> {
+        let db = self.db.lock().unwrap();
+        let mut found = std::collections::BTreeMap::new();
+        for chunk in keys.chunks(256) {
+            let slots = vec!["?"; chunk.len()].join(",");
+            let mut query = db.prepare(&format!("SELECT key, value FROM kept WHERE key IN ({slots})"))?;
+            let rows = query.query_map(rusqlite::params_from_iter(chunk), |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for row in rows {
+                let (key, value) = row?;
+                found.insert(key, value);
+            }
+        }
+        Ok(found)
+    }
+
     /// Everything kept under a key that starts with `prefix`, the keys without it.
     pub fn kept_under(&self, prefix: &str) -> Result<Vec<(String, String)>, Error> {
         let db = self.db.lock().unwrap();
@@ -53,6 +70,26 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_keys_are_fetched_in_batches_without_unrelated_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let mut keys = Vec::new();
+        for n in 0..300 {
+            let key = format!("author/'{n}/%_");
+            store.keep(&key, Some(&format!("occupant-{n}"))).unwrap();
+            keys.push(key);
+        }
+        store.keep("author/unrelated", Some("other")).unwrap();
+        keys.push("missing".into());
+        keys.push(keys[0].clone());
+        let found = store.kept_many(&keys).unwrap();
+        assert_eq!(found.len(), 300);
+        assert_eq!(found[&keys[0]], "occupant-0");
+        assert_eq!(found[&keys[299]], "occupant-299");
+        assert!(store.kept_many(&[]).unwrap().is_empty());
+    }
 
     #[test]
     fn a_value_is_kept_across_a_restart_and_goes_when_told() {

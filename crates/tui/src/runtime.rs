@@ -907,7 +907,7 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
             let messages = store
                 .recent_messages(account, &summary.chat, HISTORY)
                 .unwrap_or_default();
-            let mut lines = stored_lines(messages);
+            let mut lines = stored_lines(store, account, messages);
             with_reactions(
                 store,
                 account,
@@ -987,7 +987,17 @@ fn with_reactions(store: &Store, account: &BareJid, chat: &BareJid, room: bool, 
 }
 
 /// Messages from the store as the chat shows them.
-fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
+fn stored_lines(store: &Store, account: &BareJid, messages: Vec<StoredMessage>) -> Vec<Line> {
+    let keys: Vec<_> = messages
+        .iter()
+        .filter(|m| m.nick.is_some())
+        .filter_map(|m| {
+            m.archive_id
+                .as_ref()
+                .map(|id| crate::readers::author_key(account, &m.chat, id))
+        })
+        .collect();
+    let occupants = store.kept_many(&keys).unwrap_or_default();
     messages
         .into_iter()
         .map(|message| {
@@ -1004,6 +1014,18 @@ fn stored_lines(messages: Vec<StoredMessage>) -> Vec<Line> {
                 message.outgoing,
                 message.shared_file,
             );
+            if message.nick.is_some() {
+                if message.sender != message.chat {
+                    line.author_ids.insert(format!("jid:{}", message.sender));
+                }
+                if let Some(id) = message
+                    .archive_id
+                    .as_ref()
+                    .and_then(|id| occupants.get(&crate::readers::author_key(account, &message.chat, id)))
+                {
+                    line.author_ids.insert(format!("occupant:{id}"));
+                }
+            }
             line.id = message.id;
             line.reply_to = message.reply_to;
             line.archive_id = message.archive_id;
@@ -1995,6 +2017,12 @@ fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
 /// Keeps a message in the store (a correction in the message it corrects); when it was.
 fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
     let at = message.at.unwrap_or_else(now);
+    if message.nick.is_some()
+        && let (Some(message_id), Some(occupant_id)) = (&message.archive_id, &message.occupant_id)
+    {
+        let key = crate::readers::author_key(account, &message.peer, message_id);
+        let _ = shared.store.keep(&key, Some(occupant_id));
+    }
     if let (Some(id), Some(archive_id)) = (&message.id, &message.archive_id) {
         let _ = shared.store.set_archive_id(
             account,
@@ -3086,6 +3114,8 @@ async fn perform(action: Action, shared: Shared) {
             // what is kept going into the store and coming from there in order.
             let page = |have| {
                 let mut lines = stored_lines(
+                    &shared.store,
+                    &account,
                     shared
                         .store
                         .older_messages(&account, &chat, have, OLDER_PAGE)
@@ -3174,6 +3204,8 @@ async fn perform(action: Action, shared: Shared) {
             at,
         } => {
             let mut lines = stored_lines(
+                &shared.store,
+                &account,
                 shared
                     .store
                     .messages_since(&account, &chat, at, JUMP_LIMIT)
@@ -3842,7 +3874,7 @@ async fn perform(action: Action, shared: Shared) {
                 .recent_messages(&account, &peer, HISTORY)
                 .unwrap_or_default();
             if !kept.is_empty() {
-                let mut lines = stored_lines(kept);
+                let mut lines = stored_lines(&shared.store, &account, kept);
                 with_reactions(&shared.store, &account, &peer, false, &mut lines);
                 tell(Msg::Restored {
                     account,
@@ -4388,7 +4420,163 @@ async fn fetch_media(link: String, shared: Shared) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn local_room_reading_updates_the_count_without_a_reply_or_network_echo() {
+    fn reader_lists_exclude_the_author_in_live_messages_and_after_restart() {
+        use super::*;
+        use crate::config::Modifier;
+        use crate::readers::{Checkpoint, Reader};
+        for anonymous in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let shared = Shared {
+                accounts: Default::default(),
+                read_sync: Default::default(),
+                cache: dir.path().join("cache"),
+                viewer: String::new(),
+                auto_download: false,
+                image_links: false,
+                avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                avatar_loads: Default::default(),
+                room_read_support: Default::default(),
+                store: Store::open(&path).unwrap(),
+                tx,
+            };
+            let me: BareJid = "me@example.org".parse().unwrap();
+            let anya: BareJid = "anya@example.org".parse().unwrap();
+            let room: BareJid = "room@muc.example.org".parse().unwrap();
+            shared.store.remember_room(&me, &room, "Me").unwrap();
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            let index = app.chat(&me, &room, ChatKind::Room { nick: "Me".into() });
+            app.focused = false;
+            for outgoing in [false, true] {
+                let message = Incoming {
+                    peer: room.clone(),
+                    sender: if outgoing {
+                        me.clone()
+                    } else if anonymous {
+                        room.clone()
+                    } else {
+                        anya.clone()
+                    },
+                    nick: Some(if outgoing { "Me" } else { "Anya" }.into()),
+                    occupant_id: Some(if outgoing { "stable-me" } else { "stable-anya" }.into()),
+                    device: None,
+                    direction: if outgoing {
+                        Direction::Outgoing
+                    } else {
+                        Direction::Incoming
+                    },
+                    encrypted: false,
+                    text: Some("hello".into()),
+                    at: Some(if outgoing { 101 } else { 100 }),
+                    not_for_this_device: false,
+                    id: Some(format!("client-{outgoing}")),
+                    markable: false,
+                    archive_id: Some(format!("room-{outgoing}")),
+                    untrusted: false,
+                    reply_to: None,
+                    replaces: None,
+                    shared_file: false,
+                };
+                let at = keep(&shared, &me, &message);
+                app.on_incoming(&me, &message, at);
+            }
+            let author = if anonymous {
+                "occupant:stable-anya"
+            } else {
+                "jid:anya@example.org"
+            };
+            let chat = &mut app.chats[index];
+            chat.readers.record(
+                &shared.store,
+                &me,
+                &room,
+                Checkpoint {
+                    reader: author.into(),
+                    message: "room-false".into(),
+                    info: Reader {
+                        name: "Anya".into(),
+                        at: Some(190),
+                        received: 191,
+                    },
+                },
+            );
+            chat.readers.apply(&shared.store, &me, &room, &mut chat.lines);
+            assert!(
+                chat.lines[0].readers.is_empty(),
+                "the author's marker alone is not a read receipt"
+            );
+            for (reader, name) in [
+                ("jid:me@example.org", "Me"),
+                (author, "Anya renamed"),
+                ("jid:lynx@example.org", "lynx"),
+            ] {
+                chat.readers.record(
+                    &shared.store,
+                    &me,
+                    &room,
+                    Checkpoint {
+                        reader: reader.into(),
+                        message: "room-true".into(),
+                        info: Reader {
+                            name: name.into(),
+                            at: Some(200),
+                            received: 201,
+                        },
+                    },
+                );
+            }
+            chat.readers.apply(&shared.store, &me, &room, &mut chat.lines);
+            let expected: Vec<_> = chat.lines.iter().map(|l| l.readers.clone()).collect();
+            assert_eq!(
+                expected[0].keys().map(String::as_str).collect::<Vec<_>>(),
+                ["jid:lynx@example.org", "jid:me@example.org"]
+            );
+            assert_eq!(expected[1].len(), 2);
+            assert!(expected[1].contains_key(author));
+            assert!(expected[1].contains_key("jid:lynx@example.org"));
+            assert!(!expected[1].contains_key("jid:me@example.org"));
+            for line in 0..2 {
+                app.show_readers(index, line);
+                let shown = app.reaction_details.as_ref().unwrap().readers.as_ref().unwrap();
+                assert_eq!(shown.len(), 2);
+                assert!(shown.iter().all(|r| r.at == Some(200)));
+                assert_eq!(shown.iter().any(|r| r.name == "Me"), line == 0);
+                assert_eq!(shown.iter().any(|r| r.name == "Anya renamed"), line == 1);
+            }
+            drop(app);
+            drop(shared);
+            let store = Store::open(&path).unwrap();
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            load_history(&mut app, &store, std::slice::from_ref(&me));
+            let chat = app.chats.iter_mut().find(|c| c.jid == room).unwrap();
+            assert_eq!(
+                chat.lines.iter().map(|l| l.readers.clone()).collect::<Vec<_>>(),
+                expected
+            );
+            // Somebody else reused the writer's old nick: they remain a reader.
+            chat.readers.record(
+                &store,
+                &me,
+                &room,
+                Checkpoint {
+                    reader: "occupant:different-person".into(),
+                    message: "room-true".into(),
+                    info: Reader {
+                        name: "Anya".into(),
+                        at: Some(250),
+                        received: 251,
+                    },
+                },
+            );
+            chat.readers.apply(&store, &me, &room, &mut chat.lines);
+            assert!(chat.lines[0].readers.contains_key("occupant:different-person"));
+            assert!(!chat.lines[0].readers.contains_key(author));
+        }
+    }
+
+    #[test]
+    fn local_room_reading_updates_the_list_without_a_reply_or_network_echo() {
         use super::*;
         use crate::config::Modifier;
         use omtalk_omemo::Direction;
@@ -4404,6 +4592,7 @@ mod tests {
         app.input = "untouched draft".into();
         let receive = |app: &mut App, at, outgoing| {
             let message = Incoming {
+                occupant_id: None,
                 peer: room.clone(),
                 sender: if outgoing {
                     me.clone()
@@ -4577,7 +4766,7 @@ mod tests {
             Msg::Jumped {
                 account: me.clone(),
                 chat: room.clone(),
-                lines: stored_lines(vec![stored]),
+                lines: stored_lines(&shared.store, &me, vec![stored]),
                 at: 100,
             },
             &shared,
@@ -5202,6 +5391,7 @@ mod tests {
         let me: BareJid = "me@example.org".parse().unwrap();
         let room: BareJid = "chat5@muc.example.org".parse().unwrap();
         let message = |at: i64| Incoming {
+            occupant_id: None,
             peer: room.clone(),
             sender: "bob@example.org".parse().unwrap(),
             nick: Some("bob".into()),
@@ -5277,6 +5467,7 @@ mod tests {
         let me: BareJid = "me@example.org".parse().unwrap();
         let room: BareJid = "chat5@muc.example.org".parse().unwrap();
         let message = |at: i64| Incoming {
+            occupant_id: None,
             peer: room.clone(),
             sender: "bob@example.org".parse().unwrap(),
             nick: Some("bob".into()),

@@ -1126,7 +1126,7 @@ pub struct Look<'a> {
     pub own_name: Option<&'a str>,
     /// A room: one's messages there are in once the room sends them round.
     pub room: bool,
-    /// Hide the optional room reader count and list, preserving ordinary delivery.
+    /// Hide the optional room read marks and reader list, preserving ordinary delivery.
     pub hide_readers: bool,
     pub audio_info: Option<&'a std::collections::BTreeMap<PathBuf, Result<crate::audio::Info, String>>>,
     pub playback: Option<&'a crate::audio::Playback>,
@@ -1182,15 +1182,7 @@ pub fn message_rows(
     // Compact marks stay beside text without rewrapping when a reader arrives.
     // The regular layout puts them after the time on its existing header row.
     let reader_space = if room && !hide_readers && compact {
-        // Reserve up to three digits before the first marker arrives, including
-        // the 9→10 and 99→100 transitions. Larger rooms still show the full count.
-        5 + lines
-            .iter()
-            .map(|l| l.readers.len())
-            .max()
-            .unwrap_or(0)
-            .max(999)
-            .ilog10() as usize
+        3 // Space and two ticks, reserved even before the first read marker.
     } else {
         0
     };
@@ -1778,7 +1770,6 @@ fn push_delivery(
     // Reuse the ordinary delivery mark: another pair below every message would
     // duplicate it and double the height of a short conversation.
     if readers {
-        let mark = format!("{mark} {}", line.readers.len());
         // Pictures have a caption/header before their pixel rows. Attach its read
         // mark there; text and audio use their last content row. Never add a footer.
         let last = if below {
@@ -5426,6 +5417,7 @@ mod tests {
         let me = jid("me@home.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
         let missed = omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("bob@home.org"),
             sender: jid("bob@home.org"),
             nick: None,
@@ -5541,6 +5533,7 @@ mod tests {
             panic!("{sent:?}")
         };
         let echo = omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("team@muc.home.org"),
             sender: me.clone(),
             nick: Some("me".into()),
@@ -5565,6 +5558,7 @@ mod tests {
 
         // Bob's markable message: read at once while his chat is open, later otherwise.
         let from_bob = omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("bob@home.org"),
             sender: jid("bob@home.org"),
             nick: None,
@@ -6042,6 +6036,7 @@ mod tests {
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("bob печатает…") && text.contains("bob …"), "{text}");
         let from_bob = omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("bob@home.org"),
             sender: jid("bob@home.org"),
             nick: None,
@@ -6100,6 +6095,7 @@ mod tests {
         let bob = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
         app.select(bob);
         let from_bob = |id: &str| omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("bob@home.org"),
             sender: jid("bob@home.org"),
             nick: None,
@@ -6160,6 +6156,7 @@ mod tests {
         );
         app.notify.bell_on = crate::notify::When::ALL;
         let said = |text: &str| omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("team@muc.home.org"),
             nick: Some("Алиса".into()),
             text: Some(text.into()),
@@ -6902,6 +6899,7 @@ mod tests {
             .occupants
             .insert("Алиса".into(), Some(jid("alice@home.org")));
         let said = omtalk_omemo::Incoming {
+            occupant_id: None,
             peer: jid("team@muc.home.org"),
             sender: jid("team@muc.home.org"),
             nick: Some("Алиса".into()),
@@ -7190,10 +7188,13 @@ mod tests {
                     1,
                     "readers must reuse the delivery ticks: {text}"
                 );
-                assert!(text.contains("✓✓ 2"), "keep the count beside the ticks: {text}");
+                assert!(
+                    !text.contains("✓✓ 2"),
+                    "reader names belong in the popup, without a count: {text}"
+                );
                 let (mut hit, index) = app.areas.reader_rows[0];
                 assert_eq!(index, 0);
-                hit.x += hit.width - 1; // The count itself opens the list too.
+                hit.x += hit.width - 1; // Both ticks open the list.
                 assert!(
                     app.on_mouse(click(hit, MouseButton::Left)).is_empty(),
                     "must not open the attachment or send a reaction"
@@ -7293,15 +7294,16 @@ mod tests {
             app.config_ui.show_readers = true;
             let text = screen(&mut app, 120, 25);
             if compact {
-                assert!(text.contains("incoming message ✓✓ 1"), "{text}");
-                assert!(text.contains("own message ✓✓ 1"), "{text}");
+                assert!(text.contains("incoming message ✓✓"), "{text}");
+                assert!(text.contains("own message ✓✓"), "{text}");
             } else {
                 let clock = Local.timestamp_opt(100, 0).unwrap().format("%H:%M");
-                assert!(text.contains(&format!("Anya  {clock} ✓✓ 1")), "{text}");
-                assert!(text.contains(&format!("Me  {clock} ✓✓ 1")), "{text}");
+                assert!(text.contains(&format!("Anya  {clock} ✓✓")), "{text}");
+                assert!(text.contains(&format!("Me  {clock} ✓✓")), "{text}");
                 assert!(!text.contains("message ✓"), "ticks belong to the header: {text}");
             }
             assert_eq!(app.areas.reader_rows.len(), 2);
+            assert!(!text.contains("✓✓ 1"), "no reader count in either layout: {text}");
             app.config_ui.show_readers = false;
             for delivery in [Delivery::Sent, Delivery::Read] {
                 // Older in-memory/durable read statuses must not keep double ticks.
@@ -7326,7 +7328,7 @@ mod tests {
             assert!(app.reaction_details.is_none());
             app.config_ui.show_readers = true;
             let text = screen(&mut app, 120, 25);
-            assert_eq!(text.matches("✓✓ 1").count(), 2, "records survive hiding: {text}");
+            assert_eq!(text.matches("✓✓").count(), 2, "records survive hiding: {text}");
         }
     }
 
@@ -7371,7 +7373,7 @@ mod tests {
             }
             let after = screen(&mut app, 120, 25);
             assert_eq!(
-                after.replace("✓✓ 1", "    "),
+                after.replace("✓✓", "  "),
                 before,
                 "reader updates must not add a footer under every message"
             );
@@ -7441,12 +7443,12 @@ mod tests {
                         );
                         let text: String = marked[0].text.spans.iter().map(|s| s.content.as_ref()).collect();
                         assert!(
-                            text.ends_with(" ✓✓ 1") && text.trim() != "✓✓ 1",
+                            text.ends_with(" ✓✓") && text.trim() != "✓✓",
                             "on an existing row, never below: {text}"
                         );
                         if !compact {
                             let clock = Local.timestamp_opt(100, 0).unwrap().format("%H:%M");
-                            assert_eq!(text, format!("Anya  {clock} ✓✓ 1"));
+                            assert_eq!(text, format!("Anya  {clock} ✓✓"));
                         }
                         assert!(
                             marked[0].text.width() <= width,
