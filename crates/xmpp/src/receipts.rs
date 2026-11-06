@@ -120,6 +120,11 @@ pub enum Mark {
 /// else could wrap a made-up marker in one.
 pub fn marks(own: &xmpp_parsers::jid::BareJid, message: &Message) -> Vec<(Mark, xmpp_parsers::jid::BareJid)> {
     let mut found = Vec::new();
+    // Room markers identify a participant and a room-assigned stanza-id. They
+    // must not go through the direct-chat delivery path, which discards the nick.
+    if message.type_ == MessageType::Groupchat {
+        return found;
+    }
     let mut look = |payloads: &[Element], chat: &xmpp_parsers::jid::BareJid| {
         for p in payloads {
             let id = p.attr(xml_ncname!("id")).map(str::to_owned);

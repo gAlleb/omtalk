@@ -23,6 +23,7 @@ pub mod presence;
 pub mod reactions;
 pub mod receipts;
 pub mod replies;
+pub mod room_reads;
 pub mod roster;
 pub mod services;
 pub mod upload;

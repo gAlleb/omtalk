@@ -570,6 +570,16 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             let height = inner.height as usize;
             let max_scroll = rows.len().saturating_sub(height);
             let chat = &mut app.chats[index];
+            if std::mem::take(&mut chat.restore_reader_anchor)
+                && chat.scroll > 0
+                && chat.jump_to.is_none()
+                && let Some((id, offset, top)) = &chat.reader_anchor
+                && let Some(line) = chat.lines.iter().position(|l| l.archive_id.as_ref() == Some(id))
+                && let Some(row) = rows.iter().position(|r| r.line == Some(line))
+            {
+                let start = (row + offset).saturating_sub(*top);
+                chat.scroll = rows.len().saturating_sub(start + height);
+            }
             // Shown from a search result: that message at the top.
             if let Some(at) = chat.jump_to.take()
                 && let Some(row) = rows.iter().position(|r| {
@@ -583,6 +593,16 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             chat.scroll = chat.scroll.min(max_scroll);
             let end = rows.len() - chat.scroll;
             let start = end.saturating_sub(height);
+            chat.reader_anchor = if chat.scroll > 0 {
+                rows[start..end].iter().enumerate().find_map(|(top, row)| {
+                    let line = row.line?;
+                    let id = chat.lines.get(line)?.archive_id.clone()?;
+                    let first = rows.iter().position(|r| r.line == Some(line))?;
+                    Some((id, start + top - first, top))
+                })
+            } else {
+                None
+            };
             app.areas.top_shown = start == 0;
             // Newest at the bottom, like every chat; a short history sits low too.
             let shown = &rows[start..end];
@@ -604,6 +624,15 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     }
                 }
                 if let Some(line) = row.line {
+                    if let Some((from, to)) = row.readers {
+                        let from = (from as u16).min(inner.width);
+                        let to = (to as u16).min(inner.width);
+                        if to > from {
+                            app.areas
+                                .reader_rows
+                                .push((Rect::new(inner.x + from, y, to - from, 1), line));
+                        }
+                    }
                     app.areas
                         .message_lines
                         .push((Rect::new(inner.x, y, inner.width, 1), line));
@@ -1066,6 +1095,7 @@ pub struct Row {
     /// Which message (its index among the chat's lines) this row belongs to.
     pub line: Option<usize>,
     pub reactions: bool,
+    pub readers: Option<(usize, usize)>,
     pub links: Vec<crate::links::Hit>,
     pub audio: Option<(PathBuf, usize, bool)>,
     pub save: Option<(PathBuf, usize, usize)>,
@@ -1092,6 +1122,7 @@ impl From<TextLine<'static>> for Row {
             fetch: None,
             line: None,
             reactions: false,
+            readers: None,
             links: Vec::new(),
             audio: None,
             save: None,
@@ -1324,6 +1355,7 @@ pub fn message_rows(
                         fetch: None,
                         line: None,
                         reactions: false,
+                        readers: None,
                         links: Vec::new(),
                         audio: None,
                         save: None,
@@ -1407,6 +1439,7 @@ pub fn message_rows(
                     .then(|| slot.link.clone()),
                 line: None,
                 reactions: false,
+                readers: None,
                 links: Vec::new(),
                 audio: None,
                 save,
@@ -1624,7 +1657,12 @@ pub fn message_rows(
         let plain: Vec<String> = rows[*start..end]
             .iter()
             .map(|row| {
-                if row.picture.is_some() || row.open.is_some() || row.fetch.is_some() || row.reactions {
+                if row.picture.is_some()
+                    || row.open.is_some()
+                    || row.fetch.is_some()
+                    || row.reactions
+                    || row.readers.is_some()
+                {
                     String::new()
                 } else {
                     row.text.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -1664,6 +1702,28 @@ fn push_reactions(rows: &mut Vec<Row>, line: &Line, body_width: usize, pad: &str
             row.reactions = true;
             rows.push(row);
         }
+    }
+    if !line.readers.is_empty() {
+        let text = format!("✓✓ {}", line.readers.len());
+        let width = pad.width() + body_width;
+        let append = !line.reactions.is_empty()
+            && rows
+                .last()
+                .is_some_and(|r| r.reactions && r.text.width() + 2 + text.width() <= width);
+        if !append {
+            rows.push(TextLine::from(Span::raw(pad.to_owned())).into());
+        }
+        let row = rows.last_mut().unwrap();
+        if append {
+            row.text.spans.push(Span::raw("  "));
+        }
+        let start = row.text.width();
+        let text = truncate(&text, body_width);
+        let end = start + text.width();
+        row.text
+            .spans
+            .push(Span::styled(text, Style::default().fg(theme::accent())));
+        row.readers = Some((start, end));
     }
 }
 
@@ -2685,6 +2745,36 @@ fn reaction_details(frame: &mut Frame, app: &mut App, screen: Rect) {
         return;
     }
     let mut rows = Vec::new();
+    if let Some(readers) = &details.readers {
+        if readers.is_empty() {
+            rows.push(TextLine::from(tr!(
+                "No read markers received",
+                "Отметок прочтения пока нет"
+            )));
+        }
+        for reader in readers {
+            let (label, at) = match reader.at {
+                Some(at) => (tr!("marker", "отметка"), at),
+                None => (tr!("received", "получена"), reader.received),
+            };
+            let time = chrono::DateTime::from_timestamp(at, 0)
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format("%d.%m.%Y %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|| tr!("time unknown", "время неизвестно").into());
+            for part in wrap(
+                &format!("{} — {label}: {time}", reader.name),
+                width.saturating_sub(4) as usize,
+            ) {
+                rows.push(TextLine::from(Span::styled(
+                    part,
+                    Style::default().fg(theme::text()),
+                )));
+            }
+        }
+    }
     for (emoji, people) in &details.rows {
         let text = format!("{emoji} {} — {}", people.len(), people.join(", "));
         for part in wrap(&text, width.saturating_sub(4) as usize) {
@@ -2702,7 +2792,12 @@ fn reaction_details(frame: &mut Frame, app: &mut App, screen: Rect) {
         width,
         height,
     );
-    let block = pane(tr!("Reactions", "Реакции"), true).title_bottom(
+    let title = if details.readers.is_some() {
+        tr!("Read by", "Кто прочитал")
+    } else {
+        tr!("Reactions", "Реакции")
+    };
+    let block = pane(title, true).title_bottom(
         TextLine::from(Span::styled(
             tr!(" ↑↓ scroll · Esc close ", " ↑↓ листать · Esc закрыть "),
             Style::default().fg(theme::dim()),
@@ -2737,7 +2832,8 @@ fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     let width = columns * 4 + 2;
     let rows = crate::app::QUICK_REACTIONS.len().div_ceil(columns as usize) as u16;
-    let height = (rows + 2).min(screen.height);
+    let room = app.chats.get(picker.chat).is_some_and(|c| c.is_room());
+    let height = (rows + 2 + u16::from(room)).min(screen.height);
     let x = picker.x.clamp(screen.x, screen.right() - width);
     let y = if picker.y >= screen.y + height {
         picker.y - height
@@ -2764,6 +2860,11 @@ fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
         }
         frame.render_widget(Paragraph::new(format!(" {reaction}")), place);
         app.areas.reaction_buttons.push((place, reaction));
+    }
+    if room && rows < inner.height {
+        let place = Rect::new(inner.x, inner.y + rows, inner.width, 1);
+        frame.render_widget(Paragraph::new(tr!("Read by…", "Кто прочитал…")), place);
+        app.areas.reader_button = Some(place);
     }
 }
 
@@ -7000,6 +7101,163 @@ mod tests {
                 .is_empty()
         );
         assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn room_readers_open_beside_reactions_and_from_the_message_menu() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "Me".into() },
+        );
+        app.select(room);
+        app.input = "untouched draft".into();
+        let mut line = Line::message_sharing(
+            100,
+            "Me".into(),
+            "https://example.org/audio.ogg".into(),
+            true,
+            true,
+            true,
+        );
+        line.archive_id = Some("room-id".into());
+        line.reactions.insert("Anya".into(), vec!["👍".into()]);
+        line.readers.insert(
+            "jid:anya@example.org".into(),
+            crate::readers::Reader {
+                name: "Anya".into(),
+                at: Some(1_799_000_000),
+                received: 1_799_000_010,
+            },
+        );
+        line.readers.insert(
+            "jid:bob@example.org".into(),
+            crate::readers::Reader {
+                name: "Bob".into(),
+                at: None,
+                received: 1_799_000_020,
+            },
+        );
+        app.chats[room].lines.push(line);
+        let click = |rect: Rect, button| MouseEvent {
+            kind: MouseEventKind::Down(button),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        for compact in [false, true] {
+            for icons in [theme::nerd(), theme::text_icons()] {
+                app.compact = compact;
+                app.icons = icons;
+                let text = screen(&mut app, 120, 30);
+                assert!(text.contains("👍 1  ✓✓ 2"), "{text}");
+                let (hit, index) = app.areas.reader_rows[0];
+                assert_eq!(index, 0);
+                assert!(
+                    app.on_mouse(click(hit, MouseButton::Left)).is_empty(),
+                    "must not open the attachment or send a reaction"
+                );
+                let text = screen(&mut app, 120, 30);
+                assert!(text.contains("Anya —") && text.contains("Bob —"), "{text}");
+                assert!(text.contains("marker:") || text.contains("отметка:"), "{text}");
+                assert!(text.contains("received:") || text.contains("получена:"), "{text}");
+                app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                screen(&mut app, 120, 30);
+                let (row, _) = app.areas.message_lines.iter().find(|(_, i)| *i == 0).unwrap();
+                app.on_mouse(click(*row, MouseButton::Right));
+                screen(&mut app, 120, 30);
+                assert_eq!(app.areas.reaction_buttons.len(), 12, "keep all emoji choices");
+                let button = app
+                    .areas
+                    .reader_button
+                    .expect("room messages offer Read by under the emoji");
+                assert!(app.on_mouse(click(button, MouseButton::Left)).is_empty());
+                assert_eq!(
+                    app.reaction_details
+                        .as_ref()
+                        .unwrap()
+                        .readers
+                        .as_ref()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert!(app.picker.is_none());
+                app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                assert_eq!(app.input, "untouched draft");
+                assert_eq!(app.chats[room].lines[0].reactions.len(), 1);
+            }
+        }
+        app.chats[room].lines[0].readers.clear();
+        screen(&mut app, 120, 30);
+        assert!(app.areas.reader_rows.is_empty());
+        app.show_readers(room, 0);
+        let text = screen(&mut app, 120, 30);
+        assert!(
+            text.contains("No read markers") || text.contains("Отметок прочтения пока нет"),
+            "absence of a marker is not proof of unread: {text}"
+        );
+    }
+
+    #[test]
+    fn new_reader_footers_keep_the_visible_message_while_scrolled_up() {
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "Me".into() },
+        );
+        app.select(room);
+        for i in 0..60 {
+            let mut line = Line::message(
+                100 + i,
+                "Anya".into(),
+                format!("message {i:03} {}", "wrapped text ".repeat(7)),
+                false,
+                false,
+            );
+            line.archive_id = Some(format!("room-{i}"));
+            app.chats[room].lines.push(line);
+        }
+        for compact in [false, true] {
+            app.compact = compact;
+            for line in &mut app.chats[room].lines {
+                line.readers.clear();
+            }
+            app.chats[room].scroll = 48;
+            screen(&mut app, 120, 25);
+            let before = app.chats[room].reader_anchor.clone();
+            assert!(before.is_some());
+            for line in &mut app.chats[room].lines {
+                line.readers.insert(
+                    "reader".into(),
+                    crate::readers::Reader {
+                        name: "Reader".into(),
+                        at: None,
+                        received: 300,
+                    },
+                );
+            }
+            app.chats[room].restore_reader_anchor = true;
+            screen(&mut app, 120, 25);
+            assert_eq!(
+                app.chats[room].reader_anchor, before,
+                "new counters must not pull the visible text backwards"
+            );
+            assert!(!app.areas.top_shown);
+            assert!(!app.chats[room].older_loading);
+            app.chats[room].scroll = 0;
+            app.chats[room].restore_reader_anchor = true;
+            screen(&mut app, 120, 25);
+            assert_eq!(
+                app.chats[room].scroll, 0,
+                "at the end, continue following new messages"
+            );
+        }
     }
 
     #[test]

@@ -66,6 +66,8 @@ pub struct Line {
     /// Reactions to it (XEP-0444): whose (a nick in a room, an address otherwise), and
     /// all of theirs.
     pub reactions: BTreeMap<String, Vec<String>>,
+    /// Individual room participants whose displayed frontier includes this message.
+    pub readers: BTreeMap<String, crate::readers::Reader>,
     /// The id of the message this one answers (XEP-0461).
     pub reply_to: Option<String>,
     /// The id the archive gave it (a room's, in a room): replies in rooms name that.
@@ -167,6 +169,7 @@ impl Line {
             edited: false,
             echoed: false,
             reactions: BTreeMap::new(),
+            readers: BTreeMap::new(),
             reply_to: None,
             archive_id: None,
             media,
@@ -190,6 +193,7 @@ pub struct DeviceRow {
 
 #[derive(Debug, Clone)]
 pub struct Chat {
+    pub readers: crate::readers::Readers,
     pub account: BareJid,
     pub jid: BareJid,
     pub kind: ChatKind,
@@ -202,6 +206,10 @@ pub struct Chat {
     pub bot: bool,
     /// Rows scrolled up from the newest.
     pub scroll: usize,
+    /// Visible archive ID, row within that message and distance from the top.
+    /// Incoming reader footers keep this position while one reads older history.
+    pub reader_anchor: Option<(String, usize, usize)>,
+    pub restore_reader_anchor: bool,
     /// Older messages asked for (scrolled to the top), not here yet.
     pub older_loading: bool,
     /// Nothing older to be had: the store and the archive have given all.
@@ -274,6 +282,7 @@ impl Chat {
 
     pub fn new(account: BareJid, jid: BareJid, kind: ChatKind) -> Self {
         Self {
+            readers: crate::readers::Readers::default(),
             account,
             jid,
             kind,
@@ -283,6 +292,8 @@ impl Chat {
             muted: false,
             bot: false,
             scroll: 0,
+            reader_anchor: None,
+            restore_reader_anchor: false,
             older_loading: false,
             older_done: false,
             older_before: None,
@@ -412,6 +423,8 @@ pub struct Areas {
     /// The reactions of the picker open over a message, each where it is drawn.
     pub reaction_buttons: Vec<(Rect, &'static str)>,
     pub reaction_rows: Vec<(Rect, usize)>,
+    pub reader_rows: Vec<(Rect, usize)>,
+    pub reader_button: Option<Rect>,
     pub reaction_details: Rect,
     /// The search results on screen, each with its index.
     pub search_rows: Vec<(Rect, usize)>,
@@ -890,6 +903,7 @@ pub struct Picker {
 #[derive(Debug, Clone)]
 pub struct ReactionDetails {
     pub rows: Vec<(String, Vec<String>)>,
+    pub readers: Option<Vec<crate::readers::Reader>>,
     pub scroll: usize,
 }
 
@@ -2228,6 +2242,7 @@ impl App {
                     edited: false,
                     echoed: false,
                     reactions: BTreeMap::new(),
+                    readers: BTreeMap::new(),
                     reply_to: None,
                     archive_id: None,
                     media: None,
@@ -2808,7 +2823,28 @@ impl App {
         self.picker = None;
         self.selection = None;
         self.selecting = false;
-        self.reaction_details = Some(ReactionDetails { rows, scroll: 0 });
+        self.reaction_details = Some(ReactionDetails {
+            rows,
+            readers: None,
+            scroll: 0,
+        });
+        Vec::new()
+    }
+
+    pub fn show_readers(&mut self, chat: usize, line: usize) -> Vec<Action> {
+        let Some(line) = self.chats.get(chat).and_then(|c| c.lines.get(line)) else {
+            return Vec::new();
+        };
+        let mut readers: Vec<_> = line.readers.values().cloned().collect();
+        readers.sort_by(|a, b| a.name.cmp(&b.name));
+        self.picker = None;
+        self.selection = None;
+        self.selecting = false;
+        self.reaction_details = Some(ReactionDetails {
+            rows: Vec::new(),
+            readers: Some(readers),
+            scroll: 0,
+        });
         Vec::new()
     }
 
@@ -5202,6 +5238,9 @@ impl App {
             return match mouse.kind {
                 MouseEventKind::Down(_) => {
                     self.picker = None;
+                    if inside_opt(self.areas.reader_button) {
+                        return self.show_readers(picker.chat, picker.line);
+                    }
                     let chosen = self.areas.reaction_buttons.iter().find(|(r, _)| inside(*r));
                     match chosen.map(|&(_, reaction)| reaction) {
                         Some(reaction) => self.react_line(picker.chat, picker.line, reaction),
@@ -5213,6 +5252,12 @@ impl App {
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) && inside_opt(self.areas.chat_end) {
             return self.chat_end();
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(chat) = self.selected
+            && let Some((_, line)) = self.areas.reader_rows.iter().find(|(r, _)| inside(*r))
+        {
+            return self.show_readers(chat, *line);
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(chat) = self.selected

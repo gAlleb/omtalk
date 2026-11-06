@@ -289,6 +289,36 @@ impl Store {
         Ok(())
     }
 
+    /// Resolve room-assigned IDs in batches, using the same stable ordering as
+    /// history. Opaque IDs must never be ordered lexically.
+    pub fn room_message_positions(
+        &self,
+        account: &BareJid,
+        room: &BareJid,
+        ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, (i64, i64)>, Error> {
+        let db = self.db.lock().unwrap();
+        let mut positions = std::collections::BTreeMap::new();
+        for chunk in ids.chunks(256) {
+            let slots = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT archive_id, at, rowid FROM message_history WHERE account = ? AND chat = ? AND archive_id IN ({slots}) ORDER BY at, rowid"
+            );
+            let mut query = db.prepare(&sql)?;
+            let values = [account.as_str(), room.as_str()]
+                .into_iter()
+                .chain(chunk.iter().map(String::as_str));
+            let rows = query.query_map(rusqlite::params_from_iter(values), |r| {
+                Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+            })?;
+            for row in rows {
+                let (id, position) = row?;
+                positions.insert(id, position);
+            }
+        }
+        Ok(positions)
+    }
+
     /// The last `limit` messages of a chat, oldest first.
     pub fn recent_messages(
         &self,
@@ -540,6 +570,52 @@ mod tests {
             untrusted: false,
             edited: false,
         }
+    }
+
+    #[test]
+    fn room_read_positions_are_scoped_and_order_opaque_ids_by_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("positions.db")).unwrap();
+        let me = jid("me@example.org");
+        let other = jid("other@example.org");
+        let room = jid("room@muc.example.org");
+        let elsewhere = jid("elsewhere@muc.example.org");
+        let ids: Vec<_> = (0..530).map(|i| format!("opaque-{}", 530 - i)).collect();
+        for id in &ids {
+            let mut msg = message(room.as_str(), "text", 100);
+            msg.archive_id = Some(id.clone());
+            store.save_message(&me, &msg).unwrap();
+        }
+        let mut msg = message(room.as_str(), "unrelated", 50);
+        msg.archive_id = Some(ids[0].clone());
+        store.save_message(&other, &msg).unwrap();
+        msg.chat = elsewhere.clone();
+        store.save_message(&me, &msg).unwrap();
+        let mut query = ids.clone();
+        query.push("unknown".into());
+        let positions = store.room_message_positions(&me, &room, &query).unwrap();
+        assert_eq!(positions.len(), ids.len());
+        assert_eq!(positions[&ids[0]].0, 100);
+        assert!(ids.windows(2).all(|ids| positions[&ids[0]] < positions[&ids[1]]));
+        assert_eq!(
+            store.room_message_positions(&other, &room, &ids).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store.room_message_positions(&me, &elsewhere, &ids).unwrap().len(),
+            1
+        );
+        assert!(store.room_message_positions(&me, &room, &[]).unwrap().is_empty());
+        let version: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 17,
+            "readers must not force an incompatible database upgrade"
+        );
     }
 
     #[test]

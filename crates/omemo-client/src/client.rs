@@ -138,6 +138,7 @@ pub struct CatchUp {
     /// Receipts and read markers on one's own messages that came while this client was
     /// closed, each with whose chat it is: the server keeps them in the archive too.
     pub marks: Vec<(Mark, BareJid)>,
+    pub room_reads: Vec<omtalk_xmpp::room_reads::RoomRead>,
 }
 
 /// Which devices a message reached.
@@ -530,7 +531,12 @@ impl Omemo {
         let mut messages = Vec::new();
         let mut marks = Vec::new();
         let mut caught = self
-            .catch_up_archive(None, |m| messages.push(m), |m, chat| marks.push((m, chat)))
+            .catch_up_archive(
+                None,
+                |m| messages.push(m),
+                |m, chat| marks.push((m, chat)),
+                |_| {},
+            )
             .await?;
         caught.messages = messages;
         caught.marks = marks;
@@ -545,7 +551,7 @@ impl Omemo {
         each: impl FnMut(Incoming) + Send,
         marked: impl FnMut(Mark, BareJid) + Send,
     ) -> Result<CatchUp, Error> {
-        self.catch_up_archive(None, each, marked).await
+        self.catch_up_archive(None, each, marked, |_| {}).await
     }
 
     /// The same for a group chat's archive: what the room got while this device was not
@@ -554,10 +560,12 @@ impl Omemo {
     /// last [`ROOM_HISTORY`] messages are read instead.
     pub async fn catch_up_room(&self, room: &BareJid) -> Result<CatchUp, Error> {
         let mut messages = Vec::new();
+        let mut readers = Vec::new();
         let mut caught = self
-            .catch_up_archive(Some(room), |m| messages.push(m), |_, _| {})
+            .catch_up_archive(Some(room), |m| messages.push(m), |_, _| {}, |m| readers.extend(m))
             .await?;
         caught.messages = messages;
+        caught.room_reads = readers;
         Ok(caught)
     }
 
@@ -567,7 +575,18 @@ impl Omemo {
         room: &BareJid,
         each: impl FnMut(Incoming) + Send,
     ) -> Result<CatchUp, Error> {
-        self.catch_up_archive(Some(room), each, |_, _| {}).await
+        self.catch_up_archive(Some(room), each, |_, _| {}, |_| {}).await
+    }
+
+    /// Room read checkpoints are delivered as each page is read, so a later page
+    /// failure does not discard the earlier pages' markers.
+    pub async fn catch_up_room_with_readers(
+        &self,
+        room: &BareJid,
+        each: impl FnMut(Incoming) + Send,
+        readers: impl FnMut(Vec<omtalk_xmpp::room_reads::RoomRead>) + Send,
+    ) -> Result<CatchUp, Error> {
+        self.catch_up_archive(Some(room), each, |_, _| {}, readers).await
     }
 
     /// Reads an archive from where this device stopped. Each page's messages go to `each`
@@ -577,10 +596,14 @@ impl Omemo {
         room: Option<&BareJid>,
         mut each: impl FnMut(Incoming) + Send,
         mut marked: impl FnMut(Mark, BareJid) + Send,
+        mut room_marked: impl FnMut(Vec<omtalk_xmpp::room_reads::RoomRead>) + Send,
     ) -> Result<CatchUp, Error> {
         let mut hand_out = |caught: &mut CatchUp| {
             caught.messages.drain(..).for_each(&mut each);
             caught.marks.drain(..).for_each(|(mark, chat)| marked(mark, chat));
+            if !caught.room_reads.is_empty() {
+                room_marked(std::mem::take(&mut caught.room_reads));
+            }
         };
         let own = self.account.jid().clone();
         let archive = room.cloned().unwrap_or_else(|| own.clone());
@@ -722,6 +745,13 @@ impl Omemo {
     ) {
         let own = self.account.jid().clone();
         let at = archived.stamp.as_ref().map(|s| s.0.timestamp());
+        if let Some(room) = room
+            && let Some(mut marker) = omtalk_xmpp::room_reads::parse(&archived.message)
+            && marker.room == *room
+        {
+            marker.at = at.or(marker.at);
+            caught.room_reads.push(marker);
+        }
         // A receipt or a read marker from someone else on one's own message; one's own
         // other clients' reading is in the server's read marks (XEP-0490).
         if room.is_none() {
@@ -1203,6 +1233,49 @@ fn stanza(type_: MessageType, to: BareJid, encrypted: xml::Encrypted, content: O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn archived_room_readers_keep_the_marker_time_and_never_become_chat_text() {
+        let mut config = omtalk_xmpp::AccountConfig::new("me@localhost".parse().unwrap(), "unused");
+        config.server = omtalk_xmpp::Server::StartTls {
+            host: "127.0.0.1".into(),
+            port: 9,
+        };
+        let (mut accounts, _events) = omtalk_xmpp::Accounts::new();
+        let account = accounts.add(config).await;
+        let omemo = Omemo::new(account, State::new(omemo::OwnKeys::generate(0).unwrap()));
+        let room: BareJid = "room@muc.localhost".parse().unwrap();
+        let xml = "<message xmlns='jabber:client' type='groupchat' from='room@muc.localhost/Anya'><displayed xmlns='urn:xmpp:chat-markers:0' id='referenced-message'/><x xmlns='http://jabber.org/protocol/muc#user'><item jid='anya@localhost'/></x><delay xmlns='urn:xmpp:delay' stamp='2026-11-05T10:00:00Z'/></message>";
+        let archived = omtalk_xmpp::mam::Archived {
+            id: "marker-archive-id".into(),
+            stamp: Some("2026-11-06T10:00:00Z".parse().unwrap()),
+            message: xml
+                .parse::<xmpp_parsers::minidom::Element>()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        };
+        let mut caught = CatchUp::default();
+        omemo
+            .open_archived(Some(&room), archived.clone(), &mut caught)
+            .await;
+        assert!(caught.messages.is_empty() && caught.failed.is_empty() && caught.marks.is_empty());
+        assert_eq!(caught.room_reads.len(), 1);
+        let mark = &caught.room_reads[0];
+        assert_eq!(mark.message, "referenced-message");
+        assert_eq!(mark.real_jid.as_ref().unwrap().as_str(), "anya@localhost");
+        assert_eq!(mark.at, Some(archived.stamp.as_ref().unwrap().0.timestamp()));
+        let mut elsewhere = CatchUp::default();
+        omemo
+            .open_archived(
+                Some(&"other@muc.localhost".parse().unwrap()),
+                archived.clone(),
+                &mut elsewhere,
+            )
+            .await;
+        omemo.open_archived(None, archived, &mut elsewhere).await;
+        assert!(elsewhere.room_reads.is_empty() && elsewhere.marks.is_empty());
+    }
 
     #[test]
     fn the_own_device_list_is_read_strictly_or_not_at_all() {

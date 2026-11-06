@@ -19,6 +19,7 @@ mod links;
 mod mpris;
 mod notify;
 mod read_sync;
+mod readers;
 mod room_admin;
 mod runtime;
 mod services;

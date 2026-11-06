@@ -266,6 +266,8 @@ enum Msg {
         room: BareJid,
         nick: String,
         real: Option<BareJid>,
+        /// Our stable room identity, from the room's self presence (XEP-0421).
+        own_occupant_id: Option<String>,
         present: bool,
         /// Leaving `nick` for this one (status 303).
         new_nick: Option<String>,
@@ -415,6 +417,17 @@ enum Msg {
         id: String,
         state: Delivery,
     },
+    RoomReads {
+        account: BareJid,
+        marks: Vec<omtalk_xmpp::room_reads::RoomRead>,
+        archived: bool,
+        received: i64,
+    },
+    ValidatedRoomReads {
+        account: BareJid,
+        room: BareJid,
+        points: Vec<crate::readers::Checkpoint>,
+    },
     /// What an address offers, for the services window.
     Listed {
         jid: Jid,
@@ -428,6 +441,9 @@ enum Msg {
         step: Result<CommandStep, String>,
     },
 }
+
+type RoomReadSupport =
+    Arc<std::sync::Mutex<HashMap<(BareJid, BareJid), Arc<tokio::sync::OnceCell<(bool, bool)>>>>>;
 
 #[derive(Clone)]
 struct Shared {
@@ -444,6 +460,7 @@ struct Shared {
     avatars: Arc<std::sync::atomic::AtomicBool>,
     /// Avatars being fetched now, by hash or by whose: one fetch each.
     avatar_loads: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    room_read_support: RoomReadSupport,
     store: Store,
     tx: mpsc::UnboundedSender<Msg>,
 }
@@ -516,6 +533,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         image_links: options.config.ui.image_links,
         avatars: Arc::new(options.config.ui.avatars.into()),
         avatar_loads: Arc::default(),
+        room_read_support: Default::default(),
         store: store.clone(),
         tx,
     };
@@ -898,6 +916,58 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
                 &mut lines,
             );
             app.chats[index].lines.extend(lines);
+            refresh_readers(app, store, account, &summary.chat);
+        }
+    }
+}
+
+fn refresh_readers(app: &mut App, store: &Store, account: &BareJid, room: &BareJid) {
+    if let Some(chat) = app
+        .chats
+        .iter_mut()
+        .find(|c| c.account == *account && c.jid == *room && c.is_room())
+    {
+        chat.restore_reader_anchor |= chat.readers.apply(store, account, room, &mut chat.lines);
+    }
+}
+
+async fn validate_room_reads(
+    shared: Shared,
+    account: BareJid,
+    room: BareJid,
+    mut points: Vec<crate::readers::Checkpoint>,
+) {
+    let key = (account.clone(), room.clone());
+    // One discovery request per room/session, also when many archive pages arrive
+    // together. The UI never waits for this network operation.
+    let cell = shared
+        .room_read_support
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_default()
+        .clone();
+    let support = cell
+        .get_or_try_init(|| async {
+            let (xmpp, _) = shared.accounts.get(&account).ok_or(())?;
+            let info = xmpp
+                .disco_info(&room.clone().into(), None)
+                .await
+                .map_err(|_| ())?;
+            Ok::<_, ()>((
+                info.features.contains(xmpp_parsers::ns::SID),
+                info.features.contains(omtalk_xmpp::room_reads::OCCUPANT_ID),
+            ))
+        })
+        .await;
+    if let Ok(&(true, occupant_ids)) = support {
+        points.retain(|p| occupant_ids || !p.reader.starts_with("occupant:"));
+        if !points.is_empty() {
+            let _ = shared.tx.send(Msg::ValidatedRoomReads {
+                account,
+                room,
+                points,
+            });
         }
     }
 }
@@ -1042,6 +1112,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if message.direction == omtalk_omemo::Direction::Incoming
                 && app.merge_duplicate(&account, &message)
             {
+                refresh_readers(app, &shared.store, &account, &message.peer);
                 return;
             }
             // A correction changes the message it names, where it is: no alert.
@@ -1124,6 +1195,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if let Some(text) = &message.text {
                 fetch_if_media(text, message.shared_file, shared);
             }
+            refresh_readers(app, &shared.store, &account, &message.peer);
         }
         Msg::Media { url, state } => {
             if let MediaState::Ready(path) = &state {
@@ -1177,6 +1249,50 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 }
             }
         }
+        Msg::RoomReads {
+            account,
+            marks,
+            archived,
+            received,
+        } => {
+            let Some(room) = marks.first().map(|m| m.room.clone()) else {
+                return;
+            };
+            if let Some(chat) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == room && c.is_room())
+            {
+                chat.readers.load(&shared.store, &account, &room);
+                // Freeze the presence identity now: while disco is pending this
+                // nickname can leave, change or be reused by somebody else.
+                let points: Vec<_> = marks
+                    .iter()
+                    .filter_map(|m| crate::readers::checkpoint(chat, m, archived, true, received))
+                    .collect();
+                if !points.is_empty() {
+                    tokio::spawn(validate_room_reads(shared.clone(), account, room, points));
+                }
+            }
+        }
+        Msg::ValidatedRoomReads {
+            account,
+            room,
+            points,
+        } => {
+            if let Some(chat) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == room && c.is_room())
+            {
+                for point in points {
+                    chat.readers.record(&shared.store, &account, &room, point);
+                }
+                chat.restore_reader_anchor |=
+                    chat.readers
+                        .apply(&shared.store, &account, &room, &mut chat.lines);
+            }
+        }
         Msg::ReadMarks { account, marks } => {
             flush_local_reads(app, &shared.store);
             restore_local_unread(app, &shared.store, &account);
@@ -1196,6 +1312,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             let newer = std::mem::take(&mut app.chats[index].lines);
             app.chats[index].lines = lines;
             app.chats[index].lines.extend(newer);
+            refresh_readers(app, &shared.store, &account, &chat);
         }
         Msg::Avatar { jid, hash } => match hash {
             Some(hash) => drop(app.avatars.insert(jid, hash)),
@@ -1257,6 +1374,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             let mut lines = lines;
             prepare_media(&mut lines, shared);
             app.jumped(&account, &chat, lines, at);
+            refresh_readers(app, &shared.store, &account, &chat);
         }
         Msg::Older {
             account,
@@ -1275,6 +1393,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 ),
             );
             app.older(&account, &chat, lines, before, done);
+            refresh_readers(app, &shared.store, &account, &chat);
         }
         Msg::RoomName { account, room, name } => {
             // Kept for the next start, which shows it before anything is asked.
@@ -1369,6 +1488,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         } => {
             // A new session hears every presence again; what was known is stale.
             if fresh {
+                shared
+                    .room_read_support
+                    .lock()
+                    .unwrap()
+                    .retain(|(a, _), _| *a != account);
                 app.online.retain(|(a, _), _| *a != account);
                 app.bot_checks.retain(|(a, _)| *a != account);
                 // A new session gets a complete room roster. A nick absent from it
@@ -1525,6 +1649,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             room,
             nick,
             real,
+            own_occupant_id,
             present,
             new_nick,
             status,
@@ -1552,6 +1677,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 None => None,
             };
             if let Some(chat) = index.map(|i| &mut app.chats[i]) {
+                if let Some(id) = own_occupant_id
+                    && chat.readers.remember_self(&shared.store, &account, &room, id)
+                {
+                    chat.restore_reader_anchor |=
+                        chat.readers
+                            .apply(&shared.store, &account, &room, &mut chat.lines);
+                }
                 if present {
                     if status == Default::default() {
                         chat.occupant_status.remove(&nick);
@@ -1714,6 +1846,14 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         reactions,
                     });
                 }
+                if let Some(mark) = omtalk_xmpp::room_reads::parse(message) {
+                    tell(Msg::RoomReads {
+                        account: account.clone(),
+                        marks: vec![mark],
+                        archived: false,
+                        received: now(),
+                    });
+                }
                 for (mark, from) in receipts::marks(&account, message) {
                     let (id, state) = match mark {
                         receipts::Mark::Received(id) => (id, Delivery::Delivered),
@@ -1819,6 +1959,10 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
                         room: occupant.room,
                         nick: occupant.nick,
                         real: occupant.real_jid,
+                        own_occupant_id: occupant
+                            .is_self
+                            .then(|| omtalk_xmpp::room_reads::occupant_id(&presence.payloads))
+                            .flatten(),
                         present: occupant.present,
                         new_nick: occupant.new_nick,
                         mark: crate::app::standing_mark(&occupant.affiliation, &occupant.role),
@@ -2297,16 +2441,27 @@ async fn join(
                 .unwrap_or_else(|| room.to_string());
             let mut read = 0;
             let caught = omemo
-                .catch_up_room_each(&room, |message| {
-                    read += 1;
-                    if read % 100 == 0 {
-                        tell(Msg::Status(trf!(
-                            "{name}: {read} from the archive…",
-                            "{name}: из архива {read}…"
-                        )));
-                    }
-                    deliver(shared, account, message);
-                })
+                .catch_up_room_with_readers(
+                    &room,
+                    |message| {
+                        read += 1;
+                        if read % 100 == 0 {
+                            tell(Msg::Status(trf!(
+                                "{name}: {read} from the archive…",
+                                "{name}: из архива {read}…"
+                            )));
+                        }
+                        deliver(shared, account, message);
+                    },
+                    |marks| {
+                        tell(Msg::RoomReads {
+                            account: account.clone(),
+                            marks,
+                            archived: true,
+                            received: now(),
+                        })
+                    },
+                )
                 .await;
             if read >= 100 {
                 tell(Msg::Status(trf!(
@@ -2932,6 +3087,14 @@ async fn perform(action: Action, shared: Shared) {
                 Ok((caught, oldest, complete)) => {
                     for message in caught.messages.iter().filter(|m| m.text.is_some()) {
                         keep(&shared, &account, message);
+                    }
+                    if !caught.room_reads.is_empty() {
+                        tell(Msg::RoomReads {
+                            account: account.clone(),
+                            marks: caught.room_reads,
+                            archived: true,
+                            received: now(),
+                        });
                     }
                     // Said in the status line: a notice would go to the bottom, far from
                     // the old messages it is about.
@@ -4198,6 +4361,122 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn room_readers_freeze_presence_identity_and_require_advertised_features() {
+        use super::*;
+        use crate::config::Modifier;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            room_read_support: Default::default(),
+            store: Store::open(&dir.path().join("state.db")).unwrap(),
+            tx,
+        };
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let room: BareJid = "room@muc.example.org".parse().unwrap();
+        let anya: BareJid = "anya@example.org".parse().unwrap();
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let index = app.chat(&me, &room, ChatKind::Room { nick: "Me".into() });
+        app.chats[index].occupants.insert("Anya".into(), Some(anya));
+        let set_support = |ids, occupants| {
+            let cell = tokio::sync::OnceCell::new();
+            cell.set((ids, occupants)).unwrap();
+            shared
+                .room_read_support
+                .lock()
+                .unwrap()
+                .insert((me.clone(), room.clone()), Arc::new(cell));
+        };
+        set_support(true, true);
+        let xml = "<message xmlns='jabber:client' type='groupchat' from='room@muc.example.org/Anya'><displayed xmlns='urn:xmpp:chat-markers:0' id='target'/></message>";
+        let message = xml
+            .parse::<xmpp_parsers::minidom::Element>()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let mark = omtalk_xmpp::room_reads::parse(&message).unwrap();
+        apply(
+            &mut app,
+            Msg::RoomReads {
+                account: me.clone(),
+                marks: vec![mark],
+                archived: false,
+                received: 200,
+            },
+            &shared,
+        );
+        app.chats[index]
+            .occupants
+            .insert("Anya".into(), Some("replacement@example.org".parse().unwrap()));
+        let validated = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&validated, Msg::ValidatedRoomReads { points, .. } if points[0].reader == "jid:anya@example.org")
+        );
+        apply(&mut app, validated, &shared);
+        let stored = StoredMessage {
+            chat: room.clone(),
+            sender: me.clone(),
+            nick: Some("Me".into()),
+            outgoing: true,
+            encrypted: false,
+            body: "hello".into(),
+            at: 100,
+            id: Some("client-id".into()),
+            delivery: Some(omtalk_store::Delivery::Sent),
+            shared_file: false,
+            reply_to: None,
+            archive_id: Some("target".into()),
+            untrusted: false,
+            edited: false,
+        };
+        shared.store.save_message(&me, &stored).unwrap();
+        apply(
+            &mut app,
+            Msg::Jumped {
+                account: me.clone(),
+                chat: room.clone(),
+                lines: stored_lines(vec![stored]),
+                at: 100,
+            },
+            &shared,
+        );
+        let line = &app.chats[index].lines[0];
+        assert_eq!(line.readers.len(), 1);
+        assert_eq!(line.readers["jid:anya@example.org"].received, 200);
+        assert_eq!(line.delivery, Some(Delivery::Read));
+        for (ids, occupant_ids, expected) in [(false, true, 0), (true, false, 1), (true, true, 2)] {
+            set_support(ids, occupant_ids);
+            let points = ["jid:anya@example.org", "occupant:anon"].map(|id| crate::readers::Checkpoint {
+                reader: id.into(),
+                message: "target".into(),
+                info: crate::readers::Reader {
+                    name: id.into(),
+                    at: None,
+                    received: 200,
+                },
+            });
+            validate_room_reads(shared.clone(), me.clone(), room.clone(), points.to_vec()).await;
+            if expected == 0 {
+                assert!(rx.try_recv().is_err());
+            } else {
+                assert!(
+                    matches!(rx.try_recv().unwrap(), Msg::ValidatedRoomReads { points, .. } if points.len() == expected)
+                );
+            }
+        }
+    }
+
     #[test]
     fn local_notification_overrides_survive_restart_and_reset_to_inherit() {
         use super::*;
@@ -4237,6 +4516,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: Store::open(&dir.path().join("state.db")).unwrap(),
             tx,
         };
@@ -4291,6 +4571,7 @@ mod tests {
                     room: room.clone(),
                     nick: "V_for_Vendetta_".into(),
                     real: None,
+                    own_occupant_id: None,
                     present: true,
                     new_nick: None,
                     status: Default::default(),
@@ -4321,6 +4602,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };
@@ -4355,6 +4637,7 @@ mod tests {
             image_links: true,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: Store::open(&dir.path().join("history.db")).unwrap(),
             tx,
         };
@@ -4469,6 +4752,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: Store::open(&dir.path().join("history.db")).unwrap(),
             tx,
         };
@@ -4529,6 +4813,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };
@@ -4715,6 +5000,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };
@@ -4808,6 +5094,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };
@@ -4882,6 +5169,7 @@ mod tests {
             image_links: false,
             avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };
@@ -4941,6 +5229,7 @@ mod tests {
             image_links: false,
             avatars: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };
@@ -5067,6 +5356,7 @@ mod tests {
             image_links: false,
             avatars: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             avatar_loads: Default::default(),
+            room_read_support: Default::default(),
             store: store.clone(),
             tx,
         };

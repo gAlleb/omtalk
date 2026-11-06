@@ -663,15 +663,18 @@ async fn receipts_and_read_markers_go_through_the_server() {
                     from.to_bare() == room && from.resource().is_some_and(|nick| nick.as_str() == "reader")
                 }) =>
         {
-            m.payloads
-                .iter()
-                .find(|p| p.is("displayed", xmpp_parsers::ns::DISPLAYED_MARKERS))
-                .cloned()
+            assert!(
+                receipts::marks(alice.jid(), m).is_empty(),
+                "a room reader must not be collapsed to its bare room address"
+            );
+            omtalk_xmpp::room_reads::parse(m)
         }
         _ => None,
     })
     .await;
-    assert_eq!(read.attr("id"), Some(stanza_id.id.as_str()));
+    assert_eq!(read.message, stanza_id.id);
+    assert_eq!(read.room, room);
+    assert_eq!(read.nick, "reader");
     alice.stop().await;
     bob.stop().await;
 }

@@ -220,6 +220,15 @@ Click the reaction row to see who reacted. `/reactions` opens the same list for 
 selected message, or the latest message with reactions. It shows room nicks or contact
 names; arrows or the wheel scroll, `Esc` or a click outside closes it.
 
+In rooms, `✓✓ 3` beside reactions means three other participants have sent a read
+marker covering that message. Click the count, or right-click the message and choose
+**Read by…**, to see names and times. “Marker” is the marker's supplied timestamp;
+“received” is when this client first received it when no timestamp was available.
+These are reported read positions, not exact reading times. Markers survive restarts
+and are restored from room history when the server archives them. This requires
+stable room IDs (XEP-0359) and identifiable participants (real JIDs or XEP-0421);
+missing markers do not mean that nobody read the message.
+
 ### Files and pictures
 
 Send a file with `/upload path` (with path completion), the paperclip, or by dropping a
