@@ -927,7 +927,7 @@ fn refresh_readers(app: &mut App, store: &Store, account: &BareJid, room: &BareJ
         .iter_mut()
         .find(|c| c.account == *account && c.jid == *room && c.is_room())
     {
-        chat.restore_reader_anchor |= chat.readers.apply(store, account, room, &mut chat.lines);
+        chat.readers.apply(store, account, room, &mut chat.lines);
     }
 }
 
@@ -1288,9 +1288,8 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 for point in points {
                     chat.readers.record(&shared.store, &account, &room, point);
                 }
-                chat.restore_reader_anchor |=
-                    chat.readers
-                        .apply(&shared.store, &account, &room, &mut chat.lines);
+                chat.readers
+                    .apply(&shared.store, &account, &room, &mut chat.lines);
             }
         }
         Msg::ReadMarks { account, marks } => {
@@ -1680,9 +1679,8 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 if let Some(id) = own_occupant_id
                     && chat.readers.remember_self(&shared.store, &account, &room, id)
                 {
-                    chat.restore_reader_anchor |=
-                        chat.readers
-                            .apply(&shared.store, &account, &room, &mut chat.lines);
+                    chat.readers
+                        .apply(&shared.store, &account, &room, &mut chat.lines);
                 }
                 if present {
                     if status == Default::default() {

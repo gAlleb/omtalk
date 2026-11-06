@@ -133,7 +133,7 @@ impl Readers {
         self.marks.insert(id, mark);
     }
 
-    /// Whether any footer's count changed (and may change its rendered height).
+    /// Whether any message's reader count changed.
     pub fn apply(&mut self, store: &Store, account: &BareJid, room: &BareJid, lines: &mut [Line]) -> bool {
         self.load(store, account, room);
         if self.marks.is_empty() {

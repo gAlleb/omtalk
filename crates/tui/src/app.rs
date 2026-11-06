@@ -206,10 +206,6 @@ pub struct Chat {
     pub bot: bool,
     /// Rows scrolled up from the newest.
     pub scroll: usize,
-    /// Visible archive ID, row within that message and distance from the top.
-    /// Incoming reader footers keep this position while one reads older history.
-    pub reader_anchor: Option<(String, usize, usize)>,
-    pub restore_reader_anchor: bool,
     /// Older messages asked for (scrolled to the top), not here yet.
     pub older_loading: bool,
     /// Nothing older to be had: the store and the archive have given all.
@@ -292,8 +288,6 @@ impl Chat {
             muted: false,
             bot: false,
             scroll: 0,
-            reader_anchor: None,
-            restore_reader_anchor: false,
             older_loading: false,
             older_done: false,
             older_before: None,

@@ -570,16 +570,6 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             let height = inner.height as usize;
             let max_scroll = rows.len().saturating_sub(height);
             let chat = &mut app.chats[index];
-            if std::mem::take(&mut chat.restore_reader_anchor)
-                && chat.scroll > 0
-                && chat.jump_to.is_none()
-                && let Some((id, offset, top)) = &chat.reader_anchor
-                && let Some(line) = chat.lines.iter().position(|l| l.archive_id.as_ref() == Some(id))
-                && let Some(row) = rows.iter().position(|r| r.line == Some(line))
-            {
-                let start = (row + offset).saturating_sub(*top);
-                chat.scroll = rows.len().saturating_sub(start + height);
-            }
             // Shown from a search result: that message at the top.
             if let Some(at) = chat.jump_to.take()
                 && let Some(row) = rows.iter().position(|r| {
@@ -593,16 +583,6 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
             chat.scroll = chat.scroll.min(max_scroll);
             let end = rows.len() - chat.scroll;
             let start = end.saturating_sub(height);
-            chat.reader_anchor = if chat.scroll > 0 {
-                rows[start..end].iter().enumerate().find_map(|(top, row)| {
-                    let line = row.line?;
-                    let id = chat.lines.get(line)?.archive_id.clone()?;
-                    let first = rows.iter().position(|r| r.line == Some(line))?;
-                    Some((id, start + top - first, top))
-                })
-            } else {
-                None
-            };
             app.areas.top_shown = start == 0;
             // Newest at the bottom, like every chat; a short history sits low too.
             let shown = &rows[start..end];
@@ -1194,6 +1174,13 @@ pub fn message_rows(
     // Where a compact message's time and name go: its first row, in place of the pad.
     let mut heads: Vec<(usize, Vec<Span<'static>>)> = Vec::new();
     let body_width = width.saturating_sub(gutter).max(1);
+    // Keep room read marks beside the text, without rewrapping it when a reader
+    // arrives. The space is reserved before there are any read markers as well.
+    let content_width = if room {
+        body_width.saturating_sub(3).max(1)
+    } else {
+        body_width
+    };
     // Where each message's rows begin, to tell afterwards which rows are whose.
     let mut starts = Vec::with_capacity(lines.len());
     for line in lines {
@@ -1300,9 +1287,9 @@ pub fn message_rows(
         // the picture under it.
         if let Some(slot) = line.media.as_ref().filter(|s| s.preview) {
             let text_width = if line.encrypted {
-                body_width
+                content_width
             } else {
-                body_width.saturating_sub(marker.width()).max(1)
+                content_width.saturating_sub(marker.width()).max(1)
             };
             let mut first = true;
             for styled in styled_wrap(&slot.link, text_width, Style::default().fg(theme::text())) {
@@ -1414,7 +1401,7 @@ pub fn message_rows(
                     + state.width()
                     + 2
                     + tr!("save", "сохранить").width();
-                truncate(&slot.name, width.saturating_sub(reserved))
+                truncate(&slot.name, width.saturating_sub(reserved + usize::from(room) * 3))
             } else {
                 slot.name.clone()
             };
@@ -1477,7 +1464,7 @@ pub fn message_rows(
                     .into();
                     controls.audio = Some((path.clone(), gutter, false));
                     rows.push(controls);
-                    let width = body_width.min(60);
+                    let width = content_width.min(60);
                     let mut wave: Row =
                         audio_wave(&pad, width, info.and_then(|r| r.as_ref().ok()), state).into();
                     wave.audio = Some((path, gutter, true));
@@ -1490,9 +1477,9 @@ pub fn message_rows(
         }
         let mut first = true;
         let text_width = if line.encrypted {
-            body_width
+            content_width
         } else {
-            body_width.saturating_sub(marker.width()).max(1)
+            content_width.saturating_sub(marker.width()).max(1)
         };
         // An action, "/me waves": "* bob waves", as IRC and Gajim show it (XEP-0245).
         if let Some(action) = crate::app::action_of(&line.text) {
@@ -1657,12 +1644,7 @@ pub fn message_rows(
         let plain: Vec<String> = rows[*start..end]
             .iter()
             .map(|row| {
-                if row.picture.is_some()
-                    || row.open.is_some()
-                    || row.fetch.is_some()
-                    || row.reactions
-                    || row.readers.is_some()
-                {
+                if row.picture.is_some() || row.open.is_some() || row.fetch.is_some() || row.reactions {
                     String::new()
                 } else {
                     row.text.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -1702,28 +1684,6 @@ fn push_reactions(rows: &mut Vec<Row>, line: &Line, body_width: usize, pad: &str
             row.reactions = true;
             rows.push(row);
         }
-    }
-    if !line.readers.is_empty() {
-        let text = format!("✓✓ {}", line.readers.len());
-        let width = pad.width() + body_width;
-        let append = !line.reactions.is_empty()
-            && rows
-                .last()
-                .is_some_and(|r| r.reactions && r.text.width() + 2 + text.width() <= width);
-        if !append {
-            rows.push(TextLine::from(Span::raw(pad.to_owned())).into());
-        }
-        let row = rows.last_mut().unwrap();
-        if append {
-            row.text.spans.push(Span::raw("  "));
-        }
-        let start = row.text.width();
-        let text = truncate(&text, body_width);
-        let end = start + text.width();
-        row.text
-            .spans
-            .push(Span::styled(text, Style::default().fg(theme::accent())));
-        row.readers = Some((start, end));
     }
 }
 
@@ -1765,14 +1725,45 @@ fn push_delivery(
     // One's message in a room from another client of one's: the room sent it round, so
     // it is in, as one sent from here is once the room sends it back.
     let sent = Delivery::Sent;
-    let Some(delivery) = line
-        .delivery
-        .as_ref()
-        .or((room && line.outgoing).then_some(&sent))
-    else {
+    let read = Delivery::Read;
+    let readers = room
+        && !line.readers.is_empty()
+        && matches!(
+            line.delivery,
+            None | Some(Delivery::Sent | Delivery::Delivered | Delivery::Read)
+        );
+    let Some(delivery) = readers.then_some(&read).or_else(|| {
+        line.delivery
+            .as_ref()
+            .or((room && line.outgoing).then_some(&sent))
+    }) else {
         return;
     };
     let (mark, style) = delivery_mark(delivery);
+    // Reuse the ordinary delivery mark: another pair below every message would
+    // duplicate it and double the height of a short conversation.
+    if readers {
+        // Pictures have a caption/header before their pixel rows. Attach its read
+        // mark there; text and audio use their last content row. Never add a footer.
+        let last = if below {
+            rows.iter_mut().rfind(|r| r.picture.is_none())
+        } else if line.text.trim().is_empty() {
+            None
+        } else {
+            // Wrapping a trailing space/newline may leave an empty row. Put the
+            // mark by the last actual text instead of turning that row into a footer.
+            rows.iter_mut()
+                .rfind(|r| r.picture.is_none() && r.text.spans.iter().any(|s| !s.content.trim().is_empty()))
+        };
+        if let Some(last) = last
+            && last.text.width() + 1 + mark.width() <= body_width + gutter
+        {
+            let start = last.text.width() + 1;
+            last.readers = Some((start, start + mark.width()));
+            last.text.spans.push(Span::styled(format!(" {mark}"), style));
+        }
+        return;
+    }
     let last = rows.last_mut().expect("a message has a row");
     if !below && last.text.width() + mark.width() < body_width + gutter {
         last.text.spans.push(Span::styled(format!(" {mark}"), style));
@@ -7104,7 +7095,7 @@ mod tests {
     }
 
     #[test]
-    fn room_readers_open_beside_reactions_and_from_the_message_menu() {
+    fn room_readers_open_from_existing_delivery_ticks_and_the_message_menu() {
         use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         let me = jid("me@example.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
@@ -7124,6 +7115,7 @@ mod tests {
             true,
         );
         line.archive_id = Some("room-id".into());
+        line.delivery = Some(Delivery::Read);
         line.reactions.insert("Anya".into(), vec!["👍".into()]);
         line.readers.insert(
             "jid:anya@example.org".into(),
@@ -7153,7 +7145,13 @@ mod tests {
                 app.compact = compact;
                 app.icons = icons;
                 let text = screen(&mut app, 120, 30);
-                assert!(text.contains("👍 1  ✓✓ 2"), "{text}");
+                assert!(text.contains("👍 1"), "{text}");
+                assert_eq!(
+                    text.matches("✓✓").count(),
+                    1,
+                    "readers must reuse the delivery ticks: {text}"
+                );
+                assert!(!text.contains("✓✓ 2"), "no separate reader count: {text}");
                 let (hit, index) = app.areas.reader_rows[0];
                 assert_eq!(index, 0);
                 assert!(
@@ -7191,6 +7189,18 @@ mod tests {
                 assert_eq!(app.chats[room].lines[0].reactions.len(), 1);
             }
         }
+        // Making inline ticks clickable must leave a URL on the same row clickable.
+        let url = "https://example.org/page";
+        let line = &mut app.chats[room].lines[0];
+        line.text = url.into();
+        line.media = None;
+        line.shared_file = false;
+        screen(&mut app, 120, 30);
+        let (hit, _) = app.areas.links.iter().find(|(_, target)| target == url).unwrap();
+        assert_eq!(
+            app.on_mouse(click(*hit, MouseButton::Left)),
+            vec![Action::OpenUrl(url.into())]
+        );
         app.chats[room].lines[0].readers.clear();
         screen(&mut app, 120, 30);
         assert!(app.areas.reader_rows.is_empty());
@@ -7203,7 +7213,7 @@ mod tests {
     }
 
     #[test]
-    fn new_reader_footers_keep_the_visible_message_while_scrolled_up() {
+    fn reader_updates_do_not_add_rows_or_move_scrolled_history() {
         let me = jid("me@example.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
         let room = app.chat(
@@ -7229,9 +7239,8 @@ mod tests {
                 line.readers.clear();
             }
             app.chats[room].scroll = 48;
-            screen(&mut app, 120, 25);
-            let before = app.chats[room].reader_anchor.clone();
-            assert!(before.is_some());
+            let before = screen(&mut app, 120, 25);
+            let scroll = app.chats[room].scroll;
             for line in &mut app.chats[room].lines {
                 line.readers.insert(
                     "reader".into(),
@@ -7242,21 +7251,88 @@ mod tests {
                     },
                 );
             }
-            app.chats[room].restore_reader_anchor = true;
-            screen(&mut app, 120, 25);
+            let after = screen(&mut app, 120, 25);
             assert_eq!(
-                app.chats[room].reader_anchor, before,
-                "new counters must not pull the visible text backwards"
+                after.replace("✓✓", "  "),
+                before,
+                "reader updates must not add a footer under every message"
             );
+            assert!(
+                !app.areas.reader_rows.is_empty(),
+                "incoming messages also have inline marks"
+            );
+            assert_eq!(app.chats[room].scroll, scroll);
             assert!(!app.areas.top_shown);
             assert!(!app.chats[room].older_loading);
             app.chats[room].scroll = 0;
-            app.chats[room].restore_reader_anchor = true;
             screen(&mut app, 120, 25);
             assert_eq!(
                 app.chats[room].scroll, 0,
                 "at the end, continue following new messages"
             );
+        }
+    }
+
+    #[test]
+    fn room_read_marks_stay_beside_long_incoming_and_outgoing_text() {
+        for compact in [false, true] {
+            for outgoing in [false, true] {
+                for encrypted in [false, true] {
+                    // Enough room for the full unencrypted warning plus content.
+                    for width in [40, 60, 100] {
+                        let mut line = Line::message(
+                            100,
+                            "Anya".into(),
+                            "длинное сообщение 🙂 ".repeat(8),
+                            encrypted,
+                            outgoing,
+                        );
+                        if outgoing {
+                            line.delivery = Some(Delivery::Read);
+                        }
+                        let render = |line: &Line| {
+                            message_rows(
+                                std::slice::from_ref(line),
+                                width,
+                                theme::nerd(),
+                                &|_| false,
+                                "me",
+                                Look {
+                                    compact,
+                                    room: true,
+                                    ..Look::default()
+                                },
+                            )
+                        };
+                        let before = render(&line);
+                        line.readers.insert(
+                            "reader".into(),
+                            crate::readers::Reader {
+                                name: "Reader".into(),
+                                at: None,
+                                received: 300,
+                            },
+                        );
+                        let after = render(&line);
+                        assert_eq!(after.len(), before.len(), "a read mark must not add a row");
+                        let marked: Vec<_> = after.iter().filter(|r| r.readers.is_some()).collect();
+                        assert_eq!(
+                            marked.len(),
+                            1,
+                            "one clickable mark: compact={compact} outgoing={outgoing} encrypted={encrypted} width={width}"
+                        );
+                        let text: String = marked[0].text.spans.iter().map(|s| s.content.as_ref()).collect();
+                        assert!(
+                            text.ends_with(" ✓✓") && text.trim() != "✓✓",
+                            "beside text, never below: {text}"
+                        );
+                        assert!(
+                            marked[0].text.width() <= width,
+                            "the mark fits without covering text"
+                        );
+                    }
+                }
+            }
         }
     }
 
