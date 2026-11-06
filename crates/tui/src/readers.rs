@@ -56,19 +56,20 @@ pub fn checkpoint(
     } else {
         chat.occupants.get(&mark.nick).and_then(Option::as_ref)
     };
-    if mark
+    let is_own = mark
         .occupant_id
         .as_ref()
         .is_some_and(|id| chat.readers.own.contains(id))
         || real == Some(&chat.account)
-        || (!archived && matches!(&chat.kind, crate::app::ChatKind::Room { nick } if nick == &mark.nick))
-    {
-        return None;
-    }
-    let reader = match real {
-        Some(jid) => format!("jid:{jid}"),
-        None if occupant_ids => format!("occupant:{}", mark.occupant_id.as_ref()?),
-        None => return None,
+        || (!archived && matches!(&chat.kind, crate::app::ChatKind::Room { nick } if nick == &mark.nick));
+    let reader = if is_own {
+        format!("jid:{}", chat.account)
+    } else {
+        match real {
+            Some(jid) => format!("jid:{jid}"),
+            None if occupant_ids => format!("occupant:{}", mark.occupant_id.as_ref()?),
+            None => return None,
+        }
     };
     Some(Checkpoint {
         reader,
@@ -155,19 +156,28 @@ impl Readers {
             );
         }
         let mut readers: BTreeMap<&str, BTreeMap<(i64, i64), &Reader>> = BTreeMap::new();
+        let own_key = format!("jid:{account}");
         for mark in self.marks.values() {
-            if mark
+            let reader = if mark
                 .reader
                 .strip_prefix("occupant:")
                 .is_some_and(|id| self.own.contains(id))
             {
-                continue;
-            }
+                own_key.as_str()
+            } else {
+                mark.reader.as_str()
+            };
             if let Some(position) = self.positions.get(&mark.message) {
                 readers
-                    .entry(&mark.reader)
+                    .entry(reader)
                     .or_default()
-                    .insert(*position, &mark.info);
+                    .entry(*position)
+                    .and_modify(|info| {
+                        if mark.info.at.unwrap_or(mark.info.received) < info.at.unwrap_or(info.received) {
+                            *info = &mark.info;
+                        }
+                    })
+                    .or_insert(&mark.info);
             }
         }
         let mut changed = false;
@@ -183,20 +193,16 @@ impl Readers {
                 continue;
             };
             for (reader, points) in &readers {
+                // Reading somebody else's message counts; one's own message is
+                // not made "read by someone" merely by displaying it here.
+                if line.outgoing && *reader == own_key {
+                    continue;
+                }
                 if let Some((_, info)) = points.range(*position..).next() {
                     line.readers.insert((*reader).to_owned(), (*info).clone());
                 }
             }
             changed |= old_count != line.readers.len();
-            if line.outgoing
-                && !line.readers.is_empty()
-                && matches!(
-                    line.delivery,
-                    Some(crate::app::Delivery::Sent | crate::app::Delivery::Delivered)
-                )
-            {
-                line.delivery = Some(crate::app::Delivery::Read);
-            }
         }
         changed
     }
@@ -388,41 +394,75 @@ mod tests {
             "occupant:room-stable-anya"
         );
         mark.real_jid = Some(chat.account.clone());
-        assert!(checkpoint(&chat, &mark, true, true, 300).is_none());
+        assert_eq!(
+            checkpoint(&chat, &mark, true, true, 300).unwrap().reader,
+            "jid:me@example.org"
+        );
         mark.nick = "me".into();
-        assert!(checkpoint(&chat, &mark, false, true, 300).is_none());
+        assert_eq!(
+            checkpoint(&chat, &mark, false, true, 300).unwrap().reader,
+            "jid:me@example.org"
+        );
         mark.room = jid("different@muc.example.org");
         assert!(checkpoint(&chat, &mark, true, true, 300).is_none());
     }
 
     #[test]
-    fn anonymous_own_markers_are_excluded_across_nick_changes_and_restarts() {
+    fn own_reading_counts_once_on_incoming_messages_across_nick_changes_and_restarts() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("history.db")).unwrap();
         let mut chat = room();
         let line = save(&store, &chat, "target", 100);
         chat.lines.push(line);
+        let mut own_line = save(&store, &chat, "own", 101);
+        own_line.outgoing = true;
+        own_line.delivery = Some(crate::app::Delivery::Sent);
+        chat.lines.push(own_line);
         chat.readers.record(
             &store,
             &chat.account,
             &chat.jid,
-            point("occupant:self-id", "target", Some(200), 200),
+            point("occupant:self-id", "own", Some(200), 200),
         );
         chat.readers
             .remember_self(&store, &chat.account, &chat.jid, "self-id".into());
         chat.readers = Readers::default();
         chat.readers
             .apply(&store, &chat.account, &chat.jid, &mut chat.lines);
-        assert!(chat.lines[0].readers.is_empty());
+        assert_eq!(chat.lines[0].readers.len(), 1);
+        assert_eq!(chat.lines[0].readers["jid:me@example.org"].at, Some(200));
+        assert!(
+            chat.lines[1].readers.is_empty(),
+            "self does not read own messages"
+        );
         let own = RoomRead {
             room: chat.jid.clone(),
             nick: "old-own-nick".into(),
-            message: "target".into(),
+            message: "own".into(),
             occupant_id: Some("self-id".into()),
             real_jid: None,
             at: Some(200),
         };
-        assert!(checkpoint(&chat, &own, true, true, 300).is_none());
+        let echoed = checkpoint(&chat, &own, true, true, 300).unwrap();
+        assert_eq!(echoed.reader, "jid:me@example.org");
+        chat.readers.record(&store, &chat.account, &chat.jid, echoed);
+        chat.readers.record(
+            &store,
+            &chat.account,
+            &chat.jid,
+            point("jid:me@example.org", "own", Some(250), 250),
+        );
+        chat.readers = Readers::default();
+        chat.readers
+            .apply(&store, &chat.account, &chat.jid, &mut chat.lines);
+        assert_eq!(
+            chat.lines[0].readers.len(),
+            1,
+            "local and echoed reads are one person"
+        );
+        assert_eq!(chat.lines[0].readers["jid:me@example.org"].at, Some(200));
+        assert!(chat.lines[1].readers.is_empty());
+        assert_eq!(chat.lines[1].delivery, Some(crate::app::Delivery::Sent));
     }
 
     #[test]

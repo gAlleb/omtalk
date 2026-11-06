@@ -220,8 +220,9 @@ Click the reaction row to see who reacted. `/reactions` opens the same list for 
 selected message, or the latest message with reactions. It shows room nicks or contact
 names; arrows or the wheel scroll, `Esc` or a click outside closes it.
 
-In rooms, a single `✓✓` beside an incoming or outgoing message indicates that other
-participants have read it. Click the mark, or right-click the message and choose
+In rooms, `✓✓ N` on an incoming or outgoing message shows how many participants
+have read it. Your own reading counts immediately on other people's messages;
+it does not count on your own messages. Click the mark or number, or right-click the message and choose
 **Read by…**, to see their names and times. “Marker” is the marker's
 supplied timestamp; “received” is when this client first received it when no
 timestamp was available.
@@ -229,6 +230,13 @@ These are reported read positions, not exact reading times. Markers survive rest
 and are restored from room history when the server archives them. This requires
 stable room IDs (XEP-0359) and identifiable participants (real JIDs or XEP-0421);
 missing markers do not mean that nobody read the message.
+The regular layout puts the mark after the time (`Nick  14:03 ✓✓ 3`) above the
+message; the compact layout keeps it to the right of the message text.
+
+In `/settings`, **Show who read and how many** (`[ui] show_readers`, on by default)
+controls the count and reader list. Off restores the earlier room display: no ticks
+on incoming messages and a single `✓` on your sent messages. This does not change
+`read_markers`, which controls sending read markers to others.
 
 ### Files and pictures
 
@@ -477,6 +485,7 @@ image_links = false    # true: preview standalone HTTPS image links
 auto_download = true   # false: download received files only on a click
 mouse = true           # false: the mouse belongs to the terminal (tmux-style selection); prefix+m toggles
 read_markers = true    # false: the other side does not see that you read their messages
+show_readers = true    # room reader counts and the Read by list; false: ordinary sent ticks
 typing = true          # false: the other side does not see that you are typing
 avatars = false        # true: the contact's or room's avatar in the right pane
 compact = false        # true: time and name on the message's line, as in IRC clients

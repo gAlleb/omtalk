@@ -549,6 +549,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     peer: peer.as_deref(),
                     own_name: own_name.as_deref(),
                     room: chat.is_room(),
+                    hide_readers: !app.config_ui.show_readers,
                     audio_info: Some(&app.audio_info),
                     playback: Some(&app.playback),
                 },
@@ -1125,6 +1126,8 @@ pub struct Look<'a> {
     pub own_name: Option<&'a str>,
     /// A room: one's messages there are in once the room sends them round.
     pub room: bool,
+    /// Hide the optional room reader count and list, preserving ordinary delivery.
+    pub hide_readers: bool,
     pub audio_info: Option<&'a std::collections::BTreeMap<PathBuf, Result<crate::audio::Info, String>>>,
     pub playback: Option<&'a crate::audio::Playback>,
 }
@@ -1143,6 +1146,7 @@ pub fn message_rows(
         peer,
         own_name,
         room,
+        hide_readers,
         audio_info,
         playback,
     } = look;
@@ -1174,13 +1178,23 @@ pub fn message_rows(
     // Where a compact message's time and name go: its first row, in place of the pad.
     let mut heads: Vec<(usize, Vec<Span<'static>>)> = Vec::new();
     let body_width = width.saturating_sub(gutter).max(1);
-    // Keep room read marks beside the text, without rewrapping it when a reader
-    // arrives. The space is reserved before there are any read markers as well.
-    let content_width = if room {
-        body_width.saturating_sub(3).max(1)
+    let header_delivery = room && !hide_readers && !compact;
+    // Compact marks stay beside text without rewrapping when a reader arrives.
+    // The regular layout puts them after the time on its existing header row.
+    let reader_space = if room && !hide_readers && compact {
+        // Reserve up to three digits before the first marker arrives, including
+        // the 9→10 and 99→100 transitions. Larger rooms still show the full count.
+        5 + lines
+            .iter()
+            .map(|l| l.readers.len())
+            .max()
+            .unwrap_or(0)
+            .max(999)
+            .ilog10() as usize
     } else {
-        body_width
+        0
     };
+    let content_width = body_width.saturating_sub(reader_space).max(1);
     // Where each message's rows begin, to tell afterwards which rows are whose.
     let mut starts = Vec::with_capacity(lines.len());
     for line in lines {
@@ -1281,6 +1295,9 @@ pub fn message_rows(
                 header.who = Some((line.who.clone(), who_shown.width() as u16));
             }
             rows.push(header);
+            if header_delivery {
+                push_delivery(&mut rows, line, room, true, body_width, gutter, false);
+            }
         }
         let marker = icons.plain_mark;
         // A picture from an ordinary link: the link first, as the message it is, then
@@ -1348,7 +1365,9 @@ pub fn message_rows(
                         save: None,
                     });
                 }
-                push_delivery(&mut rows, line, room, body_width, gutter, true);
+                if !header_delivery {
+                    push_delivery(&mut rows, line, room, !hide_readers, body_width, gutter, true);
+                }
                 push_reactions(&mut rows, line, body_width, &pad);
                 continue;
             }
@@ -1401,7 +1420,7 @@ pub fn message_rows(
                     + state.width()
                     + 2
                     + tr!("save", "сохранить").width();
-                truncate(&slot.name, width.saturating_sub(reserved + usize::from(room) * 3))
+                truncate(&slot.name, width.saturating_sub(reserved + reader_space))
             } else {
                 slot.name.clone()
             };
@@ -1471,7 +1490,9 @@ pub fn message_rows(
                     rows.push(wave);
                 }
             }
-            push_delivery(&mut rows, line, room, body_width, gutter, false);
+            if !header_delivery {
+                push_delivery(&mut rows, line, room, !hide_readers, body_width, gutter, false);
+            }
             push_reactions(&mut rows, line, body_width, &pad);
             continue;
         }
@@ -1518,7 +1539,9 @@ pub fn message_rows(
                 rows.push(TextLine::from(spans).into());
                 first = false;
             }
-            push_delivery(&mut rows, line, room, body_width, gutter, false);
+            if !header_delivery {
+                push_delivery(&mut rows, line, room, !hide_readers, body_width, gutter, false);
+            }
             push_reactions(&mut rows, line, body_width, &pad);
             continue;
         }
@@ -1618,7 +1641,9 @@ pub fn message_rows(
                 first = false;
             }
         }
-        push_delivery(&mut rows, line, room, body_width, gutter, false);
+        if !header_delivery {
+            push_delivery(&mut rows, line, room, !hide_readers, body_width, gutter, false);
+        }
         push_reactions(&mut rows, line, body_width, &pad);
     }
     for (at, head) in heads {
@@ -1718,6 +1743,7 @@ fn push_delivery(
     rows: &mut Vec<Row>,
     line: &Line,
     room: bool,
+    show_readers: bool,
     body_width: usize,
     gutter: usize,
     below: bool,
@@ -1727,12 +1753,21 @@ fn push_delivery(
     let sent = Delivery::Sent;
     let read = Delivery::Read;
     let readers = room
+        && show_readers
         && !line.readers.is_empty()
         && matches!(
             line.delivery,
             None | Some(Delivery::Sent | Delivery::Delivered | Delivery::Read)
         );
     let Some(delivery) = readers.then_some(&read).or_else(|| {
+        if room && !show_readers {
+            if !line.outgoing {
+                return None;
+            }
+            if matches!(line.delivery, Some(Delivery::Delivered | Delivery::Read)) {
+                return Some(&sent);
+            }
+        }
         line.delivery
             .as_ref()
             .or((room && line.outgoing).then_some(&sent))
@@ -1743,6 +1778,7 @@ fn push_delivery(
     // Reuse the ordinary delivery mark: another pair below every message would
     // duplicate it and double the height of a short conversation.
     if readers {
+        let mark = format!("{mark} {}", line.readers.len());
         // Pictures have a caption/header before their pixel rows. Attach its read
         // mark there; text and audio use their last content row. Never add a footer.
         let last = if below {
@@ -2823,7 +2859,7 @@ fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     let width = columns * 4 + 2;
     let rows = crate::app::QUICK_REACTIONS.len().div_ceil(columns as usize) as u16;
-    let room = app.chats.get(picker.chat).is_some_and(|c| c.is_room());
+    let room = app.config_ui.show_readers && app.chats.get(picker.chat).is_some_and(|c| c.is_room());
     let height = (rows + 2 + u16::from(room)).min(screen.height);
     let x = picker.x.clamp(screen.x, screen.right() - width);
     let y = if picker.y >= screen.y + height {
@@ -4248,8 +4284,11 @@ mod tests {
             .join("\n");
         assert_eq!(chat.matches("Стёпочка").count(), 2, "{text}");
         assert!(!chat.contains("я  "), "{text}");
-        // Both marked as in the room, the one from Monal too.
-        assert!(chat.contains("из Monal ✓"), "{text}");
+        // Both marked as in the room, after the time, the one from Monal too.
+        for at in [1_700_000_000, 1_700_000_600] {
+            let clock = Local.timestamp_opt(at, 0).unwrap().format("%H:%M");
+            assert!(chat.contains(&format!("Стёпочка  {clock} ✓")), "{text}");
+        }
     }
 
     #[test]
@@ -7151,9 +7190,10 @@ mod tests {
                     1,
                     "readers must reuse the delivery ticks: {text}"
                 );
-                assert!(!text.contains("✓✓ 2"), "no separate reader count: {text}");
-                let (hit, index) = app.areas.reader_rows[0];
+                assert!(text.contains("✓✓ 2"), "keep the count beside the ticks: {text}");
+                let (mut hit, index) = app.areas.reader_rows[0];
                 assert_eq!(index, 0);
+                hit.x += hit.width - 1; // The count itself opens the list too.
                 assert!(
                     app.on_mouse(click(hit, MouseButton::Left)).is_empty(),
                     "must not open the attachment or send a reaction"
@@ -7213,6 +7253,84 @@ mod tests {
     }
 
     #[test]
+    fn hiding_room_readers_restores_plain_sent_ticks_and_hides_the_reader_menu() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "Me".into() },
+        );
+        app.select(room);
+        for outgoing in [false, true] {
+            let mut line = Line::message(
+                100,
+                if outgoing { "Me" } else { "Anya" }.into(),
+                if outgoing {
+                    "own message"
+                } else {
+                    "incoming message"
+                }
+                .into(),
+                true,
+                outgoing,
+            );
+            line.archive_id = Some(format!("room-{outgoing}"));
+            line.delivery = outgoing.then_some(Delivery::Sent);
+            line.readers.insert(
+                "jid:bob@example.org".into(),
+                crate::readers::Reader {
+                    name: "Bob".into(),
+                    at: Some(200),
+                    received: 200,
+                },
+            );
+            app.chats[room].lines.push(line);
+        }
+        for compact in [false, true] {
+            app.compact = compact;
+            app.config_ui.show_readers = true;
+            let text = screen(&mut app, 120, 25);
+            if compact {
+                assert!(text.contains("incoming message ✓✓ 1"), "{text}");
+                assert!(text.contains("own message ✓✓ 1"), "{text}");
+            } else {
+                let clock = Local.timestamp_opt(100, 0).unwrap().format("%H:%M");
+                assert!(text.contains(&format!("Anya  {clock} ✓✓ 1")), "{text}");
+                assert!(text.contains(&format!("Me  {clock} ✓✓ 1")), "{text}");
+                assert!(!text.contains("message ✓"), "ticks belong to the header: {text}");
+            }
+            assert_eq!(app.areas.reader_rows.len(), 2);
+            app.config_ui.show_readers = false;
+            for delivery in [Delivery::Sent, Delivery::Read] {
+                // Older in-memory/durable read statuses must not keep double ticks.
+                app.chats[room].lines[1].delivery = Some(delivery);
+                let text = screen(&mut app, 120, 25);
+                assert!(text.contains("own message ✓"), "{text}");
+                assert_eq!(text.matches('✓').count(), 1, "{text}");
+                assert!(app.areas.reader_rows.is_empty());
+            }
+            let (row, _) = app.areas.message_lines.iter().find(|(_, i)| *i == 0).unwrap();
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: row.x + 4,
+                row: row.y,
+                modifiers: KeyModifiers::NONE,
+            });
+            screen(&mut app, 120, 25);
+            assert_eq!(app.areas.reaction_buttons.len(), 12);
+            assert!(app.areas.reader_button.is_none());
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            app.show_readers(room, 0);
+            assert!(app.reaction_details.is_none());
+            app.config_ui.show_readers = true;
+            let text = screen(&mut app, 120, 25);
+            assert_eq!(text.matches("✓✓ 1").count(), 2, "records survive hiding: {text}");
+        }
+    }
+
+    #[test]
     fn reader_updates_do_not_add_rows_or_move_scrolled_history() {
         let me = jid("me@example.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
@@ -7253,7 +7371,7 @@ mod tests {
             }
             let after = screen(&mut app, 120, 25);
             assert_eq!(
-                after.replace("✓✓", "  "),
+                after.replace("✓✓ 1", "    "),
                 before,
                 "reader updates must not add a footer under every message"
             );
@@ -7274,7 +7392,7 @@ mod tests {
     }
 
     #[test]
-    fn room_read_marks_stay_beside_long_incoming_and_outgoing_text() {
+    fn room_read_marks_use_the_header_or_compact_text_without_extra_rows() {
         for compact in [false, true] {
             for outgoing in [false, true] {
                 for encrypted in [false, true] {
@@ -7323,9 +7441,13 @@ mod tests {
                         );
                         let text: String = marked[0].text.spans.iter().map(|s| s.content.as_ref()).collect();
                         assert!(
-                            text.ends_with(" ✓✓") && text.trim() != "✓✓",
-                            "beside text, never below: {text}"
+                            text.ends_with(" ✓✓ 1") && text.trim() != "✓✓ 1",
+                            "on an existing row, never below: {text}"
                         );
+                        if !compact {
+                            let clock = Local.timestamp_opt(100, 0).unwrap().format("%H:%M");
+                            assert_eq!(text, format!("Anya  {clock} ✓✓ 1"));
+                        }
                         assert!(
                             marked[0].text.width() <= width,
                             "the mark fits without covering text"

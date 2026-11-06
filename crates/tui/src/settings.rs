@@ -229,6 +229,12 @@ impl Settings {
             ),
             row(
                 "ui",
+                "show_readers",
+                tr!("Show who read and how many", "Показывать кто прочитал и сколько"),
+                Value::Bool(ui.show_readers),
+            ),
+            row(
+                "ui",
                 "typing",
                 tr!("Send typing", "Отправлять «печатает»"),
                 Value::Bool(ui.typing),

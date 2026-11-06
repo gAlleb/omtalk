@@ -2826,6 +2826,9 @@ impl App {
     }
 
     pub fn show_readers(&mut self, chat: usize, line: usize) -> Vec<Action> {
+        if !self.config_ui.show_readers {
+            return Vec::new();
+        }
         let Some(line) = self.chats.get(chat).and_then(|c| c.lines.get(line)) else {
             return Vec::new();
         };
@@ -4263,6 +4266,18 @@ impl App {
                 self.config_ui.read_markers = *on;
                 Ok(())
             }
+            ("show_readers", Value::Bool(on)) => {
+                self.config_ui.show_readers = *on;
+                if !on
+                    && self
+                        .reaction_details
+                        .as_ref()
+                        .is_some_and(|d| d.readers.is_some())
+                {
+                    self.reaction_details = None;
+                }
+                Ok(())
+            }
             ("typing", Value::Bool(on)) => {
                 self.send_typing = *on;
                 self.config_ui.typing = *on;
@@ -5570,6 +5585,56 @@ pub fn action_of(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reader_display_setting_survives_restart_without_changing_read_marker_privacy() {
+        use crate::settings::{Value, Written};
+        let mut app = app();
+        assert!(app.config_ui.show_readers);
+        app.read_markers = false;
+        app.config_ui.read_markers = false;
+        let me = jid("me@example.org");
+        let room = app.chat(
+            &me,
+            &jid("room@muc.example.org"),
+            ChatKind::Room { nick: "Me".into() },
+        );
+        app.chats[room]
+            .lines
+            .push(Line::message(100, "Anya".into(), "hello".into(), true, false));
+        app.show_readers(room, 0);
+        assert!(app.reaction_details.is_some());
+        app.open_settings();
+        let row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(|s| s.key == "show_readers")
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for on in [false, true] {
+            app.settings.as_mut().unwrap().rows[row].value = Value::Bool(on);
+            let actions = app.apply_setting(row);
+            assert_eq!(app.config_ui.show_readers, on);
+            assert!(!app.read_markers && !app.config_ui.read_markers);
+            assert!(app.reaction_details.is_none());
+            assert_eq!(actions.len(), 1);
+            for action in actions {
+                let Action::Setting { section, key, value } = action else {
+                    panic!("unexpected action")
+                };
+                assert_eq!(key, "show_readers");
+                assert_eq!(value, Written::Bool(on));
+                crate::settings::write(&path, section, key, &value).unwrap();
+            }
+            assert_eq!(crate::config::load(&path).unwrap().ui.show_readers, on);
+            app.open_settings();
+            assert_eq!(app.settings.as_ref().unwrap().rows[row].value, Value::Bool(on));
+        }
+    }
+
     #[test]
     fn image_link_previews_are_optional_and_do_not_hide_real_uploads() {
         use crate::settings::{Value, Written};

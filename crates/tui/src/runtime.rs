@@ -2088,6 +2088,34 @@ fn flush_local_reads(app: &mut App, store: &Store) {
                 "позиция прочитанного не сохранилась: {problem}"
             );
             app.local_reads.insert((account, chat), point);
+            continue;
+        }
+        if let Some(id) = point.archive_id
+            && let Some(room) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == chat && c.is_room())
+        {
+            let at = now();
+            let name = match &room.kind {
+                ChatKind::Room { nick } if !nick.is_empty() => nick.clone(),
+                _ => account.to_string(),
+            };
+            room.readers.record(
+                store,
+                &account,
+                &chat,
+                crate::readers::Checkpoint {
+                    reader: format!("jid:{account}"),
+                    message: id,
+                    info: crate::readers::Reader {
+                        name,
+                        at: Some(at),
+                        received: at,
+                    },
+                },
+            );
+            room.readers.apply(store, &account, &chat, &mut room.lines);
         }
     }
 }
@@ -4359,6 +4387,111 @@ async fn fetch_media(link: String, shared: Shared) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_room_reading_updates_the_count_without_a_reply_or_network_echo() {
+        use super::*;
+        use crate::config::Modifier;
+        use omtalk_omemo::Direction;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let room: BareJid = "room@muc.example.org".parse().unwrap();
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let index = app.chat(&me, &room, ChatKind::Room { nick: "Me".into() });
+        app.select(index);
+        app.on_focus(false);
+        app.read_markers = false;
+        app.input = "untouched draft".into();
+        let receive = |app: &mut App, at, outgoing| {
+            let message = Incoming {
+                peer: room.clone(),
+                sender: if outgoing {
+                    me.clone()
+                } else {
+                    "anya@example.org".parse().unwrap()
+                },
+                nick: Some(if outgoing { "Me" } else { "Anya" }.into()),
+                device: None,
+                direction: if outgoing {
+                    Direction::Outgoing
+                } else {
+                    Direction::Incoming
+                },
+                encrypted: false,
+                text: Some(format!("message {at}")),
+                at: None,
+                not_for_this_device: false,
+                id: Some(format!("sender-{at}")),
+                markable: false,
+                archive_id: Some(format!("room-{at}")),
+                untrusted: false,
+                reply_to: None,
+                replaces: None,
+                shared_file: false,
+            };
+            store
+                .save_message(
+                    &me,
+                    &StoredMessage {
+                        chat: room.clone(),
+                        sender: message.sender.clone(),
+                        nick: message.nick.clone(),
+                        outgoing,
+                        encrypted: false,
+                        body: message.text.clone().unwrap(),
+                        at,
+                        id: message.id.clone(),
+                        delivery: outgoing.then_some(omtalk_store::Delivery::Sent),
+                        shared_file: false,
+                        reply_to: None,
+                        archive_id: message.archive_id.clone(),
+                        untrusted: false,
+                        edited: false,
+                    },
+                )
+                .unwrap();
+            let actions = app.on_incoming(&me, &message, at);
+            assert!(
+                actions
+                    .iter()
+                    .all(|a| matches!(a, Action::Displayed { marker: None, .. }))
+            );
+            flush_local_reads(app, &store);
+        };
+        receive(&mut app, 100, false);
+        assert!(
+            app.chats[index].lines[0].readers.is_empty(),
+            "not read without focus"
+        );
+        assert_eq!(app.chats[index].unread, 1);
+        app.on_focus(true);
+        flush_local_reads(&mut app, &store);
+        let first = app.chats[index].lines[0].readers["jid:me@example.org"].clone();
+        assert_eq!(first.name, "Me");
+        assert!(first.at.is_some());
+        assert_eq!(app.chats[index].unread, 0);
+        receive(&mut app, 101, false);
+        assert_eq!(
+            app.chats[index].lines[1].readers.len(),
+            1,
+            "new visible message is read immediately"
+        );
+        assert_eq!(app.chats[index].lines[0].readers["jid:me@example.org"], first);
+        // The cursor can end on one's own outgoing message, but it does not get
+        // a self-reader. Restarting or reading again keeps the original time.
+        receive(&mut app, 102, true);
+        app.on_focus(true);
+        flush_local_reads(&mut app, &store);
+        let chat = &mut app.chats[index];
+        chat.readers = crate::readers::Readers::default();
+        chat.readers.apply(&store, &me, &room, &mut chat.lines);
+        assert_eq!(chat.lines[0].readers.len(), 1);
+        assert_eq!(chat.lines[0].readers["jid:me@example.org"], first);
+        assert_eq!(chat.lines[1].readers.len(), 1);
+        assert!(chat.lines[2].readers.is_empty());
+        assert_eq!(app.input, "untouched draft");
+    }
+
     #[tokio::test]
     async fn room_readers_freeze_presence_identity_and_require_advertised_features() {
         use super::*;
@@ -4452,7 +4585,11 @@ mod tests {
         let line = &app.chats[index].lines[0];
         assert_eq!(line.readers.len(), 1);
         assert_eq!(line.readers["jid:anya@example.org"].received, 200);
-        assert_eq!(line.delivery, Some(Delivery::Read));
+        assert_eq!(
+            line.delivery,
+            Some(Delivery::Sent),
+            "reader display must not overwrite ordinary delivery"
+        );
         for (ids, occupant_ids, expected) in [(false, true, 0), (true, false, 1), (true, true, 2)] {
             set_support(ids, occupant_ids);
             let points = ["jid:anya@example.org", "occupant:anon"].map(|id| crate::readers::Checkpoint {
