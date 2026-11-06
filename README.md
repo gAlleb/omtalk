@@ -241,6 +241,12 @@ controls the read marks and reader list. Off restores the earlier room display: 
 on incoming messages and a single `✓` on your sent messages. This does not change
 `read_markers`, which controls sending read markers to others.
 
+IRC channels through biboumi keep the earlier display regardless of this setting:
+one `✓` on your sent messages, no ticks on incoming messages and no reader list.
+The room's advertised protocol is remembered between starts; until it is known,
+the earlier display is used. Unread counters and read-position synchronization
+continue to work.
+
 ### Files and pictures
 
 Send a file with `/upload path` (with path completion), the paperclip, or by dropping a

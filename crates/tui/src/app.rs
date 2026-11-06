@@ -231,6 +231,8 @@ pub struct Chat {
     pub members: Vec<BareJid>,
     /// A room's own name, if it has one.
     pub name: Option<String>,
+    /// IRC gateway or XMPP room, as disco identifies it; None until known.
+    pub room_irc: Option<bool>,
     /// A room's subject (topic), as it last said.
     pub topic: Option<String>,
     /// The peer's devices; `None` until read.
@@ -301,6 +303,7 @@ impl Chat {
             occupant_mark: BTreeMap::new(),
             members: Vec::new(),
             name: None,
+            room_irc: None,
             topic: None,
             devices: None,
             markable: None,
@@ -311,6 +314,10 @@ impl Chat {
 
     pub fn is_room(&self) -> bool {
         matches!(self.kind, ChatKind::Room { .. })
+    }
+
+    pub fn has_room_readers(&self) -> bool {
+        self.is_room() && self.room_irc == Some(false)
     }
 
     pub fn title(&self) -> String {
@@ -2837,7 +2844,12 @@ impl App {
         if !self.config_ui.show_readers {
             return Vec::new();
         }
-        let Some(line) = self.chats.get(chat).and_then(|c| c.lines.get(line)) else {
+        let Some(line) = self
+            .chats
+            .get(chat)
+            .filter(|c| c.has_room_readers())
+            .and_then(|c| c.lines.get(line))
+        else {
             return Vec::new();
         };
         let mut readers: Vec<_> = line.readers.values().cloned().collect();
@@ -5606,6 +5618,7 @@ mod tests {
             &jid("room@muc.example.org"),
             ChatKind::Room { nick: "Me".into() },
         );
+        app.chats[room].room_irc = Some(false);
         app.chats[room]
             .lines
             .push(Line::message(100, "Anya".into(), "hello".into(), true, false));

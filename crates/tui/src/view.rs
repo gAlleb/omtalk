@@ -549,7 +549,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     peer: peer.as_deref(),
                     own_name: own_name.as_deref(),
                     room: chat.is_room(),
-                    hide_readers: !app.config_ui.show_readers,
+                    hide_readers: !app.config_ui.show_readers || !chat.has_room_readers(),
                     audio_info: Some(&app.audio_info),
                     playback: Some(&app.playback),
                 },
@@ -2850,7 +2850,7 @@ fn reaction_picker(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     let width = columns * 4 + 2;
     let rows = crate::app::QUICK_REACTIONS.len().div_ceil(columns as usize) as u16;
-    let room = app.config_ui.show_readers && app.chats.get(picker.chat).is_some_and(|c| c.is_room());
+    let room = app.config_ui.show_readers && app.chats.get(picker.chat).is_some_and(|c| c.has_room_readers());
     let height = (rows + 2 + u16::from(room)).min(screen.height);
     let x = picker.x.clamp(screen.x, screen.right() - width);
     let y = if picker.y >= screen.y + height {
@@ -4257,6 +4257,7 @@ mod tests {
                 nick: "Стёпочка".into(),
             },
         );
+        app.chats[room].room_irc = Some(false);
         app.select(room);
         // From here, then from Monal (the room names it by the nick).
         app.push(
@@ -7141,6 +7142,7 @@ mod tests {
             &jid("room@muc.example.org"),
             ChatKind::Room { nick: "Me".into() },
         );
+        app.chats[room].room_irc = Some(false);
         app.select(room);
         app.input = "untouched draft".into();
         let mut line = Line::message_sharing(
@@ -7263,6 +7265,7 @@ mod tests {
             &jid("room@muc.example.org"),
             ChatKind::Room { nick: "Me".into() },
         );
+        app.chats[room].room_irc = Some(false);
         app.select(room);
         for outgoing in [false, true] {
             let mut line = Line::message(
@@ -7333,6 +7336,76 @@ mod tests {
     }
 
     #[test]
+    fn biboumi_keeps_sent_ticks_without_reader_marks_or_the_reader_menu() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        let me = jid("me@example.org");
+        for address in [
+            "#chat%irc.example.org@gateway.example.org",
+            "#chat@gateway.example.org",
+        ] {
+            let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+            let room = app.chat(&me, &jid(address), ChatKind::Room { nick: "Me".into() });
+            app.select(room);
+            for outgoing in [false, true] {
+                let mut line = Line::message(
+                    100,
+                    if outgoing { "Me" } else { "Anya" }.into(),
+                    if outgoing {
+                        "own message"
+                    } else {
+                        "incoming message"
+                    }
+                    .into(),
+                    false,
+                    outgoing,
+                );
+                // Cached markers from the previous version must never reappear.
+                line.readers.insert(
+                    "jid:reader@example.org".into(),
+                    crate::readers::Reader {
+                        name: "Reader".into(),
+                        at: Some(200),
+                        received: 200,
+                    },
+                );
+                line.delivery = Some(Delivery::Read);
+                app.chats[room].lines.push(line);
+            }
+            for irc in [None, Some(true)] {
+                app.chats[room].room_irc = irc;
+                for compact in [false, true] {
+                    app.compact = compact;
+                    for enabled in [false, true] {
+                        app.config_ui.show_readers = enabled;
+                        let text = screen(&mut app, 120, 25);
+                        assert!(text.contains("own message ✓"), "{text}");
+                        assert_eq!(text.matches('✓').count(), 1, "{text}");
+                        assert!(app.areas.reader_rows.is_empty());
+                        let (row, _) = app.areas.message_lines.iter().find(|(_, i)| *i == 0).unwrap();
+                        app.on_mouse(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Right),
+                            column: row.x + 4,
+                            row: row.y,
+                            modifiers: KeyModifiers::NONE,
+                        });
+                        screen(&mut app, 120, 25);
+                        assert_eq!(app.areas.reaction_buttons.len(), 12, "keep reactions");
+                        assert!(app.areas.reader_button.is_none());
+                        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                        app.show_readers(room, 0);
+                        assert!(app.reaction_details.is_none());
+                    }
+                }
+            }
+            // Even an IRC-looking JID can identify a real XMPP room.
+            app.chats[room].room_irc = Some(false);
+            let text = screen(&mut app, 120, 25);
+            assert_eq!(text.matches("✓✓").count(), 2, "{text}");
+            assert_eq!(app.areas.reader_rows.len(), 2);
+        }
+    }
+
+    #[test]
     fn reader_updates_do_not_add_rows_or_move_scrolled_history() {
         let me = jid("me@example.org");
         let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
@@ -7341,6 +7414,7 @@ mod tests {
             &jid("room@muc.example.org"),
             ChatKind::Room { nick: "Me".into() },
         );
+        app.chats[room].room_irc = Some(false);
         app.select(room);
         for i in 0..60 {
             let mut line = Line::message(

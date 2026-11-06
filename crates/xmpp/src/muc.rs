@@ -12,11 +12,33 @@ use xmpp_parsers::ns;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza_error::DefinedCondition;
 
-use crate::{Account, Error};
+use crate::{Account, Error, services::ServiceInfo};
 
 const MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 const MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
 const ROOM_CONFIG: &str = "http://jabber.org/protocol/muc#roomconfig";
+
+/// The room's name and whether it bridges IRC, from the same disco response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomInfo {
+    pub name: Option<String>,
+    /// None when the response does not identify a conference service.
+    pub irc: Option<bool>,
+}
+
+impl From<ServiceInfo> for RoomInfo {
+    fn from(info: ServiceInfo) -> Self {
+        let mut conferences = info.identities.into_iter().filter(|i| i.category == "conference");
+        let first = conferences.next();
+        let irc = first
+            .as_ref()
+            .map(|i| i.kind == "irc" || conferences.any(|i| i.kind == "irc"));
+        Self {
+            name: first.and_then(|i| i.name).filter(|n| !n.trim().is_empty()),
+            irc,
+        }
+    }
+}
 
 /// Someone in a room, as their presence describes them.
 #[derive(Debug, Clone, PartialEq)]
@@ -220,13 +242,12 @@ impl Account {
 
     /// The room's own name (its disco#info identity), if it has one.
     pub async fn room_name(&self, room: &BareJid) -> Result<Option<String>, Error> {
-        let info = self.disco_info(&room.clone().into(), None).await?;
-        Ok(info
-            .identities
-            .into_iter()
-            .find(|i| i.category == "conference")
-            .and_then(|i| i.name)
-            .filter(|n| !n.trim().is_empty()))
+        Ok(self.room_info(room).await?.name)
+    }
+
+    /// Reuses the room-name lookup; identifying an IRC gateway needs no extra query.
+    pub async fn room_info(&self, room: &BareJid) -> Result<RoomInfo, Error> {
+        Ok(self.disco_info(&room.clone().into(), None).await?.into())
     }
 
     /// Names the room, as its owner (muc#roomconfig_roomname).
@@ -424,6 +445,27 @@ pub fn invitation_of(message: &xmpp_parsers::message::Message) -> Option<(BareJi
 #[cfg(test)]
 mod invitation_tests {
     use super::*;
+
+    #[test]
+    fn room_info_distinguishes_irc_from_xmpp_without_guessing_from_the_name() {
+        use xmpp_parsers::disco::DiscoInfoResult;
+        for (category, kind, irc) in [
+            ("conference", "irc", Some(true)),
+            ("conference", "text", Some(false)),
+            ("client", "pc", None),
+        ] {
+            let xml = format!(
+                "<query xmlns='http://jabber.org/protocol/disco#info'>\
+                 <identity category='{category}' type='{kind}' name='#chat on irc.example.org'/>\
+                 <feature var='http://jabber.org/protocol/disco#info'/>\
+                 </query>"
+            );
+            let element = Element::from_reader_with_prefixes(xml.as_bytes(), None).unwrap();
+            let info = RoomInfo::from(ServiceInfo::from(DiscoInfoResult::try_from(element).unwrap()));
+            assert_eq!(info.irc, irc);
+            assert_eq!(info.name.is_some(), irc.is_some());
+        }
+    }
 
     /// As biboumi sends them (from a log of Stefan's): the others with an address of
     /// no resource, oneself with one.

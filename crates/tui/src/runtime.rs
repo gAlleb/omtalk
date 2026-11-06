@@ -335,6 +335,11 @@ enum Msg {
         room: BareJid,
         name: Option<String>,
     },
+    RoomInfo {
+        account: BareJid,
+        room: BareJid,
+        info: omtalk_xmpp::muc::RoomInfo,
+    },
     /// What `/search` found.
     Found {
         account: BareJid,
@@ -889,9 +894,15 @@ fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let types: HashMap<String, String> = store
+            .kept_under(&format!("{KEPT_ROOM_TYPE}{account}/"))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         for (room, nick) in &rooms {
             let index = app.chat(account, room, ChatKind::Room { nick: nick.clone() });
             app.chats[index].name = names.get(room.as_str()).cloned();
+            app.chats[index].room_irc = room_irc(types.get(room.as_str()).map(String::as_str));
         }
         for summary in store
             .chats(account)
@@ -925,7 +936,7 @@ fn refresh_readers(app: &mut App, store: &Store, account: &BareJid, room: &BareJ
     if let Some(chat) = app
         .chats
         .iter_mut()
-        .find(|c| c.account == *account && c.jid == *room && c.is_room())
+        .find(|c| c.account == *account && c.jid == *room && c.is_room() && c.room_irc != Some(true))
     {
         chat.readers.apply(store, account, room, &mut chat.lines);
     }
@@ -1283,7 +1294,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if let Some(chat) = app
                 .chats
                 .iter_mut()
-                .find(|c| c.account == account && c.jid == room && c.is_room())
+                .find(|c| c.account == account && c.jid == room && c.is_room() && c.room_irc != Some(true))
             {
                 chat.readers.load(&shared.store, &account, &room);
                 // Freeze the presence identity now: while disco is pending this
@@ -1305,7 +1316,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if let Some(chat) = app
                 .chats
                 .iter_mut()
-                .find(|c| c.account == account && c.jid == room && c.is_room())
+                .find(|c| c.account == account && c.jid == room && c.is_room() && c.room_irc != Some(true))
             {
                 for point in points {
                     chat.readers.record(&shared.store, &account, &room, point);
@@ -1415,6 +1426,35 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             );
             app.older(&account, &chat, lines, before, done);
             refresh_readers(app, &shared.store, &account, &chat);
+        }
+        Msg::RoomInfo { account, room, info } => {
+            let _ = shared.store.keep(
+                &format!("{KEPT_ROOM_TYPE}{account}/{room}"),
+                info.irc.map(|irc| if irc { "irc" } else { "xmpp" }),
+            );
+            if let Some(chat) = app
+                .chats
+                .iter_mut()
+                .find(|c| c.account == account && c.jid == room)
+            {
+                chat.room_irc = info.irc;
+                if info.irc == Some(true) {
+                    chat.readers = crate::readers::Readers::default();
+                    for line in &mut chat.lines {
+                        line.readers.clear();
+                    }
+                }
+            }
+            refresh_readers(app, &shared.store, &account, &room);
+            apply(
+                app,
+                Msg::RoomName {
+                    account,
+                    room,
+                    name: info.name,
+                },
+                shared,
+            );
         }
         Msg::RoomName { account, room, name } => {
             // Kept for the next start, which shows it before anything is asked.
@@ -1645,6 +1685,16 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     .kept(&format!("{KEPT_ROOM_NAME}{account}/{room}"))
                     .ok()
                     .flatten();
+            }
+            if app.chats[index].room_irc.is_none() {
+                app.chats[index].room_irc = room_irc(
+                    shared
+                        .store
+                        .kept(&format!("{KEPT_ROOM_TYPE}{account}/{room}"))
+                        .ok()
+                        .flatten()
+                        .as_deref(),
+                );
             }
             if open || app.selected.is_none() {
                 for action in app.select(index) {
@@ -2122,7 +2172,7 @@ fn flush_local_reads(app: &mut App, store: &Store) {
             && let Some(room) = app
                 .chats
                 .iter_mut()
-                .find(|c| c.account == account && c.jid == chat && c.is_room())
+                .find(|c| c.account == account && c.jid == chat && c.is_room() && c.room_irc != Some(true))
         {
             let at = now();
             let name = match &room.kind {
@@ -2480,11 +2530,11 @@ async fn join(
                 open,
             });
             // Its name for the list at once, not only once it is opened.
-            if let Ok(name) = xmpp.room_name(&room).await {
-                tell(Msg::RoomName {
+            if let Ok(info) = xmpp.room_info(&room).await {
+                tell(Msg::RoomInfo {
                     account: account.clone(),
                     room: room.clone(),
-                    name,
+                    info,
                 });
             }
             // Kept page by page; the room shows its newest, the rest comes on scrolling up.
@@ -3632,11 +3682,11 @@ async fn perform(action: Action, shared: Shared) {
                             ));
                         }
                         tokio::spawn(async move {
-                            if let Ok(name) = xmpp.room_name(&room).await {
-                                let _ = shared.tx.send(Msg::RoomName {
+                            if let Ok(info) = xmpp.room_info(&room).await {
+                                let _ = shared.tx.send(Msg::RoomInfo {
                                     account: account.clone(),
                                     room: room.clone(),
-                                    name,
+                                    info,
                                 });
                             }
                             let members = read_members(&xmpp, &room).await;
@@ -3703,8 +3753,8 @@ async fn perform(action: Action, shared: Shared) {
         }
         Action::RoomName { account, room } => {
             let Some((xmpp, _)) = get(&account) else { return };
-            if let Ok(name) = xmpp.room_name(&room).await {
-                tell(Msg::RoomName { account, room, name });
+            if let Ok(info) = xmpp.room_info(&room).await {
+                tell(Msg::RoomInfo { account, room, info });
             }
         }
         Action::SetTopic { account, room, topic } => {
@@ -4058,6 +4108,17 @@ const KEPT_NICKNAME: &str = "nickname/";
 
 /// Where rooms' names are kept: this, then "account/room".
 const KEPT_ROOM_NAME: &str = "room-name/";
+
+/// The discovered room protocol, read before rendering saved history.
+const KEPT_ROOM_TYPE: &str = "room-type/";
+
+fn room_irc(kept: Option<&str>) -> Option<bool> {
+    match kept {
+        Some("irc") => Some(true),
+        Some("xmpp") => Some(false),
+        _ => None,
+    }
+}
 
 /// Where the chat open when omtalk was left is kept: "account\tchat".
 const KEPT_OPEN: &str = "open";
@@ -4447,6 +4508,18 @@ mod tests {
             shared.store.remember_room(&me, &room, "Me").unwrap();
             let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
             let index = app.chat(&me, &room, ChatKind::Room { nick: "Me".into() });
+            apply(
+                &mut app,
+                Msg::RoomInfo {
+                    account: me.clone(),
+                    room: room.clone(),
+                    info: omtalk_xmpp::muc::RoomInfo {
+                        name: None,
+                        irc: Some(false),
+                    },
+                },
+                &shared,
+            );
             app.focused = false;
             for outgoing in [false, true] {
                 let message = Incoming {
@@ -4550,6 +4623,10 @@ mod tests {
             let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
             load_history(&mut app, &store, std::slice::from_ref(&me));
             let chat = app.chats.iter_mut().find(|c| c.jid == room).unwrap();
+            assert!(
+                chat.has_room_readers(),
+                "XMPP reader lists survive offline restarts"
+            );
             assert_eq!(
                 chat.lines.iter().map(|l| l.readers.clone()).collect::<Vec<_>>(),
                 expected
@@ -4573,6 +4650,123 @@ mod tests {
             assert!(chat.lines[0].readers.contains_key("occupant:different-person"));
             assert!(!chat.lines[0].readers.contains_key(author));
         }
+    }
+
+    #[test]
+    fn biboumi_room_type_survives_restart_without_disabling_unread_tracking() {
+        use super::*;
+        use crate::config::Modifier;
+        use crate::readers::{Checkpoint, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        let me: BareJid = "me@example.org".parse().unwrap();
+        let room: BareJid = "#chat@gateway.example.org".parse().unwrap();
+        store.remember_room(&me, &room, "Me").unwrap();
+        store
+            .save_message(
+                &me,
+                &StoredMessage {
+                    chat: room.clone(),
+                    sender: "anya@gateway.example.org".parse().unwrap(),
+                    nick: Some("Anya".into()),
+                    outgoing: false,
+                    encrypted: false,
+                    body: "hello".into(),
+                    at: 100,
+                    id: Some("sender-1".into()),
+                    archive_id: Some("room-1".into()),
+                    delivery: None,
+                    shared_file: false,
+                    reply_to: None,
+                    untrusted: false,
+                    edited: false,
+                },
+            )
+            .unwrap();
+        // An old locally generated reader checkpoint already exists on disk.
+        let old = Checkpoint {
+            reader: format!("jid:{me}"),
+            message: "room-1".into(),
+            info: Reader {
+                name: "Me".into(),
+                at: Some(110),
+                received: 110,
+            },
+        };
+        crate::readers::Readers::default().record(&store, &me, &room, old.clone());
+        let saved_readers = store.kept_under("room-readers/").unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: Default::default(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            room_read_support: Default::default(),
+            store: store.clone(),
+            tx,
+        };
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        load_history(&mut app, &store, std::slice::from_ref(&me));
+        let index = app.chats.iter().position(|c| c.jid == room).unwrap();
+        assert!(
+            !app.chats[index].has_room_readers(),
+            "do not flash old marks before discovery"
+        );
+        assert!(
+            !app.chats[index].lines[0].readers.is_empty(),
+            "exercise an existing record"
+        );
+        apply(
+            &mut app,
+            Msg::RoomInfo {
+                account: me.clone(),
+                room: room.clone(),
+                info: omtalk_xmpp::muc::RoomInfo {
+                    name: Some("#chat on irc.example.org".into()),
+                    irc: Some(true),
+                },
+            },
+            &shared,
+        );
+        assert!(app.chats[index].lines[0].readers.is_empty());
+        assert!(!app.chats[index].has_room_readers());
+        app.chats[index].unread = 1;
+        app.select(index);
+        flush_local_reads(&mut app, &store);
+        assert_eq!(app.chats[index].unread, 0);
+        assert_eq!(store.unread_after_mark(&me, &room, None).unwrap(), Some(0));
+        // A marker validated before the IRC identity arrived must also be ignored.
+        apply(
+            &mut app,
+            Msg::ValidatedRoomReads {
+                account: me.clone(),
+                room: room.clone(),
+                points: vec![Checkpoint {
+                    reader: "jid:other@example.org".into(),
+                    ..old
+                }],
+            },
+            &shared,
+        );
+        assert_eq!(store.kept_under("room-readers/").unwrap(), saved_readers);
+        drop(app);
+        drop(shared);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        load_history(&mut app, &store, std::slice::from_ref(&me));
+        restore_local_unread(&mut app, &store, &me);
+        let chat = app.chats.iter().find(|c| c.jid == room).unwrap();
+        assert_eq!(chat.room_irc, Some(true));
+        assert_eq!(chat.name.as_deref(), Some("#chat on irc.example.org"));
+        assert!(!chat.has_room_readers());
+        assert!(chat.lines[0].readers.is_empty());
+        assert_eq!(chat.unread, 0);
     }
 
     #[test]
