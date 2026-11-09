@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.12 — 2026-11-09
 
+- Ordinary XMPP rooms request read markers on outgoing messages and attachments, including OMEMO messages. Click a double check mark to see who read the message and when. The message author is excluded from the list. IRC rooms served by biboumi keep their existing indicators.
+- Scroll the chat list with the mouse wheel or touchpad while keeping the current conversation selected.
 - Long client statuses in the contact sidebar wrap onto additional lines instead of being truncated.
 - Desktop notifications offer a localized "Mark as read" action for the corresponding account and chat, without opening the conversation or disturbing the current draft. Dismissing a notification leaves unread state unchanged. Action waiting is asynchronous and notification stacking is isolated per account.
 
