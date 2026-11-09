@@ -505,6 +505,7 @@ pub enum Action {
         account: BareJid,
         to: BareJid,
         room: bool,
+        markable_room: bool,
         text: String,
         encrypted: bool,
         /// The message's id; its line, already shown as being sent, carries it too.
@@ -649,6 +650,7 @@ pub enum Action {
         account: BareJid,
         to: BareJid,
         room: bool,
+        markable_room: bool,
         path: PathBuf,
         encrypted: bool,
         id: String,
@@ -3173,6 +3175,7 @@ impl App {
             account: chat.account.clone(),
             to: chat.jid.clone(),
             room: chat.is_room(),
+            markable_room: chat.has_room_readers(),
             path,
             encrypted: chat.omemo,
             id: id.clone(),
@@ -3258,6 +3261,7 @@ impl App {
                 account: chat.account.clone(),
                 to: chat.jid.clone(),
                 room: chat.is_room(),
+                markable_room: chat.has_room_readers(),
                 text,
                 encrypted: chat.omemo,
                 id,
@@ -3282,6 +3286,7 @@ impl App {
             account: chat.account.clone(),
             to: chat.jid.clone(),
             room: chat.is_room(),
+            markable_room: chat.has_room_readers(),
             text: text.clone(),
             encrypted: chat.omemo,
             id: id.clone(),
@@ -5781,6 +5786,7 @@ mod tests {
                 account: jid("me@example.org"),
                 to: jid("bob@example.org"),
                 room: false,
+                markable_room: false,
                 text: "привет, Боб".into(),
                 encrypted: true,
                 id: id.clone(),
@@ -6076,6 +6082,28 @@ mod tests {
                 assert!(app.mark_chat_read(server).is_empty());
                 assert!(app.mark_chat_read(usize::MAX).is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn only_known_xmpp_rooms_request_read_marks_on_messages_and_uploads() {
+        let mut app = app();
+        let room = app.chat(
+            &jid("me@example.org"),
+            &jid("team@muc.example.org"),
+            ChatKind::Room { nick: "me".into() },
+        );
+        app.read_markers = false;
+        app.config_ui.show_readers = false;
+        for kind in [None, Some(true), Some(false)] {
+            app.chats[room].room_irc = kind;
+            let expected = kind == Some(false);
+            assert!(
+                matches!(app.send_to(room, "hello".into()).as_slice(), [Action::Send { markable_room, .. }] if *markable_room == expected)
+            );
+            assert!(
+                matches!(app.upload(room, "file.txt".into()).as_slice(), [Action::Upload { markable_room, .. }] if *markable_room == expected)
+            );
         }
     }
 

@@ -629,9 +629,7 @@ async fn receipts_and_read_markers_go_through_the_server() {
     )
     .with_body(Lang::default(), "read this room message".into());
     receipts::mark_outgoing(&mut message, "sender-original-1");
-    message
-        .payloads
-        .push(Element::builder("markable", xmpp_parsers::ns::DISPLAYED_MARKERS).build());
+    message.payloads.push(receipts::markable());
     alice.send(message).await.unwrap();
     let got = wait_for(&mut events, |e| match &e.event {
         Event::Message(m)
@@ -644,6 +642,11 @@ async fn receipts_and_read_markers_go_through_the_server() {
         _ => None,
     })
     .await;
+    assert!(
+        got.payloads
+            .iter()
+            .any(|p| p.is("markable", xmpp_parsers::ns::DISPLAYED_MARKERS))
+    );
     let stanza_id = got
         .payloads
         .iter()

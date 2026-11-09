@@ -99,10 +99,13 @@ pub fn mark_outgoing(message: &mut Message, id: &str) {
         message
             .payloads
             .push(Element::builder("request", ns::RECEIPTS).build());
-        message
-            .payloads
-            .push(Element::builder("markable", ns::DISPLAYED_MARKERS).build());
+        message.payloads.push(markable());
     }
+}
+
+/// Requests a displayed marker from clients that read this message.
+pub fn markable() -> Element {
+    Element::builder("markable", ns::DISPLAYED_MARKERS).build()
 }
 
 /// What a message says about an earlier one.

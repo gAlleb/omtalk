@@ -2929,6 +2929,7 @@ async fn perform(action: Action, shared: Shared) {
             account,
             to,
             room,
+            markable_room,
             text,
             encrypted,
             id,
@@ -2945,6 +2946,7 @@ async fn perform(action: Action, shared: Shared) {
             let mut extra = reply
                 .map(|(to, length)| omtalk_xmpp::replies::elements(&to, length))
                 .unwrap_or_default();
+            extra.extend(markable_room.then(receipts::markable));
             if let Some(original) = &replace {
                 extra.push(omtalk_xmpp::corrections::element(original));
             }
@@ -3484,6 +3486,7 @@ async fn perform(action: Action, shared: Shared) {
             account,
             to,
             room,
+            markable_room,
             path,
             encrypted,
             id,
@@ -3533,9 +3536,12 @@ async fn perform(action: Action, shared: Shared) {
                     },
                 );
             }
+            let extra = markable_room.then(receipts::markable);
             let sent = if encrypted {
                 let report = if room {
-                    omemo.send_group_with_id(&to, &link, &id).await
+                    omemo
+                        .send_group_with(&to, &link, &id, extra.into_iter().collect())
+                        .await
                 } else {
                     omemo.send_with_id(&to, &link, &id).await
                 };
@@ -3547,6 +3553,7 @@ async fn perform(action: Action, shared: Shared) {
                     Message::chat(Some(to.clone().into()))
                 }
                 .with_body(Lang::default(), link.clone());
+                message.payloads.extend(extra);
                 // Out-of-band data (XEP-0066): what Gajim and others show as the file.
                 message.payloads.push(
                     xmpp_parsers::minidom::Element::builder("x", "jabber:x:oob")
