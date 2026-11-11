@@ -1357,6 +1357,14 @@ pub fn message_rows(
                         save: None,
                     });
                 }
+                let label = tr!("save", "сохранить");
+                let mut controls: Row = TextLine::from(vec![
+                    Span::raw(pad.clone()),
+                    Span::styled(label, Style::default().fg(theme::accent())),
+                ])
+                .into();
+                controls.save = path.map(|path| (path, pad.width(), pad.width() + label.width()));
+                rows.push(controls);
                 if !header_delivery {
                     push_delivery(&mut rows, line, room, !hide_readers, body_width, gutter, true);
                 }
@@ -1405,7 +1413,7 @@ pub fn message_rows(
                 spans.push(Span::styled(marker, Style::default().fg(theme::warn())));
             }
             let path_audio = path.as_ref().filter(|p| crate::audio::supported(p)).cloned();
-            let name = if path_audio.is_some() {
+            let name = if path.is_some() {
                 let reserved = spans.iter().map(|s| s.content.width()).sum::<usize>()
                     + icon.width()
                     + 2
@@ -1421,7 +1429,7 @@ pub fn message_rows(
                 Style::default().fg(theme::text()).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(state, Style::default().fg(colour)));
-            let save = path_audio.as_ref().map(|path| {
+            let save = path.as_ref().map(|path| {
                 spans.push(Span::raw("  "));
                 let from: usize = spans.iter().map(|s| s.content.width()).sum();
                 let label = tr!("save", "сохранить");
@@ -4630,6 +4638,17 @@ mod tests {
                         "sender and file controls must not overlap"
                     );
                 }
+                let x = row[..row.find("сохранить").expect(&text)].width() as u16;
+                assert!(
+                    app.on_mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: x,
+                        row: y as u16,
+                        modifiers: KeyModifiers::NONE,
+                    })
+                    .is_empty()
+                );
+                assert!(app.file_save.is_some(), "save must open the destination dialog");
             }
         }
     }
@@ -7811,6 +7830,47 @@ mod tests {
         app.chats[bob].lines.push(line);
         let text = screen(&mut app, 100, 20);
         assert!(text.contains("👍 2  ❤ 1"), "one gets its count too: {text}");
+    }
+
+    #[test]
+    fn downloaded_files_keep_save_visible_with_long_names() {
+        for compact in [false, true] {
+            for name in ["clip.mp4", "archive.zip", "cat.png"] {
+                for ready in [false, true] {
+                    let path = PathBuf::from(format!("/cache/{name}"));
+                    let mut line = Line::message_sharing(
+                        1_700_000_000,
+                        "alice".into(),
+                        format!("https://example.org/{name}"),
+                        true,
+                        false,
+                        true,
+                    );
+                    let slot = line.media.as_mut().unwrap();
+                    slot.state = MediaState::Ready(path.clone());
+                    slot.name = "long-file-name-".repeat(20);
+                    let rows = message_rows(
+                        &[line],
+                        60,
+                        theme::text_icons(),
+                        &|_| ready,
+                        "me",
+                        Look {
+                            compact,
+                            ..Look::default()
+                        },
+                    );
+                    let row = rows
+                        .iter()
+                        .find(|row| row.save.is_some())
+                        .expect("downloaded file has Save");
+                    let (saved, from, to) = row.save.as_ref().unwrap();
+                    assert_eq!(saved, &path);
+                    assert!(*from < *to && *to <= 60, "Save must fit: {row:?}");
+                    assert!(row.text.to_string().contains(tr!("save", "сохранить")));
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.13 — 2026-11-11
+
+- Downloaded videos, images and other files offer a Save action that opens the destination dialog. Long attachment names leave room for Open and Save in both normal and compact layouts.
+
 ## 0.1.12 — 2026-11-09
 
 - Ordinary XMPP rooms request read markers on outgoing messages and attachments, including OMEMO messages. Click a double check mark to see who read the message and when. The message author is excluded from the list. IRC rooms served by biboumi keep their existing indicators.
