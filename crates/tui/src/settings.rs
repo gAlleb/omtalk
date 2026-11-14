@@ -309,16 +309,27 @@ impl Settings {
         muted: bool,
         prefs: &crate::notify::ChatNotify,
     ) {
+        use crate::notify::ChatEvents;
         const EVENTS: Options = &[
             ("inherit", "global settings", "как в общих"),
             ("all", "all messages", "все сообщения"),
             ("mention", "mentions only", "только упоминания"),
-        ];
-        const SOUND: Options = &[
-            ("inherit", "global settings", "как в общих"),
-            ("on", "on", "вкл"),
             ("off", "off", "выкл"),
         ];
+        let signal = |key, label, events| Setting {
+            section: "chat",
+            key,
+            label,
+            value: choice(
+                EVENTS,
+                match events {
+                    ChatEvents::Inherit => "inherit",
+                    ChatEvents::All => "all",
+                    ChatEvents::Mention => "mention",
+                    ChatEvents::Off => "off",
+                },
+            ),
+        };
         self.chat = Some((account, peer, title));
         self.rows.extend([
             Setting {
@@ -327,32 +338,13 @@ impl Settings {
                 label: tr!("Mute all notifications", "Мьют всех уведомлений"),
                 value: Value::Bool(muted),
             },
-            Setting {
-                section: "chat",
-                key: "messages",
-                label: tr!("Notify for", "Уведомлять о"),
-                value: choice(
-                    EVENTS,
-                    match prefs.mentions_only {
-                        None => "inherit",
-                        Some(false) => "all",
-                        Some(true) => "mention",
-                    },
-                ),
-            },
-            Setting {
-                section: "chat",
-                key: "sound",
-                label: tr!("Sound", "Звук"),
-                value: choice(
-                    SOUND,
-                    match prefs.sound {
-                        None => "inherit",
-                        Some(true) => "on",
-                        Some(false) => "off",
-                    },
-                ),
-            },
+            signal(
+                "desktop",
+                tr!("Desktop notifications", "Всплывающие уведомления"),
+                prefs.desktop,
+            ),
+            signal("sound", tr!("Sound", "Звук"), prefs.sound),
+            signal("bell", tr!("Terminal bell", "Терминальный звонок"), prefs.bell),
         ]);
     }
 

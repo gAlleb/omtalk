@@ -532,15 +532,12 @@ chat, including mentions. `/unmute` restores them. Direct chats, XMPP rooms and 
 channels behave alike. The chat list shows a mute icon (`[muted]` in text mode).
 Messages and unread counts continue; mutes survive restarts and are local to this omtalk.
 
-Open `/settings chat` for the current conversation (or the “This chat” section in
-`/settings`): mute all notifications; events “global settings / all messages / mentions
-only”; sound “global settings / on / off”. Mute overrides everything and retains the
-other choices. Preferences are local to each account+chat, including IRC bridges, persist
-across restarts, and do not change the global config. In direct chats, mentions match
-your published nickname, falling back to your account's local part. Explicit sound-on
-uses the global sound command and this chat's filter; with an inherited filter it sounds
-for all new messages in the chat. An empty sound command cannot play audio. Desktop
-notifications and bells disabled globally stay disabled. Archive and own messages never alert.
+In `/settings chat`, choose when to show desktop notifications, play a sound, or
+ring the terminal bell. Each signal has its own choice of global settings, all
+messages, mentions only, or off. For a popup on every room message with the usual
+sounds, set only “Desktop notifications” to “all messages”. Sound uses the configured
+sound command. Mute silences all three signals and preserves your choices.
+Settings are saved separately for each account and chat, including biboumi channels.
 
 An unfocused window does not mark messages read, even in the open chat. When focused,
 omtalk sends requested read markers to the contact or room (unless `read_markers = false`).

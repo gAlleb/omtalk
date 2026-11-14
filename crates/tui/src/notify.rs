@@ -75,27 +75,82 @@ impl Default for NotifyConfig {
     }
 }
 
-/// Local overrides; absent values preserve the global policy exactly.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Each signal can follow its global rule or select events for this chat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatEvents {
+    #[default]
+    Inherit,
+    All,
+    Mention,
+    Off,
+}
+
+impl ChatEvents {
+    fn applies(self, inherited: bool, mention: bool) -> bool {
+        match self {
+            Self::Inherit => inherited,
+            Self::All => true,
+            Self::Mention => mention,
+            Self::Off => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChatNotify {
-    pub mentions_only: Option<bool>,
-    pub sound: Option<bool>,
+    pub desktop: ChatEvents,
+    pub sound: ChatEvents,
+    pub bell: ChatEvents,
 }
 
 impl ChatNotify {
     pub fn alert(&self, global: &Notify, private: bool, mention: bool) -> Alert {
-        let mut alert = global.alert(private, mention);
-        let matches = self.mentions_only.map(|only| !only || mention);
-        if let Some(matches) = matches {
-            alert.desktop = matches && global.desktop_on != When::NEVER;
-            alert.bell = matches && global.bell_on != When::NEVER;
-            alert.sound = matches && !global.sound.is_empty() && global.sound_on != When::NEVER;
+        // The global mention rule refers to rooms. A local mention rule also
+        // supports matching the user's nickname in a direct chat.
+        let inherited = global.alert(private, mention && !private);
+        Alert {
+            desktop: self.desktop.applies(inherited.desktop, mention),
+            sound: !global.sound.is_empty() && self.sound.applies(inherited.sound, mention),
+            bell: self.bell.applies(inherited.bell, mention),
         }
-        if let Some(sound) = self.sound {
-            alert.sound = sound && !global.sound.is_empty() && matches.unwrap_or(true);
+    }
+
+    pub fn from_stored(value: &str, global: &Notify) -> Result<Self, toml::de::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Legacy {
+            mentions_only: Option<bool>,
+            sound: Option<bool>,
+            desktop_all: bool,
         }
-        alert
+        if let Ok(current) = toml::from_str(value) {
+            return Ok(current);
+        }
+        let old: Legacy = toml::from_str(value)?;
+        let filter = |only: Option<bool>, enabled: bool| match only {
+            None => ChatEvents::Inherit,
+            Some(_) if !enabled => ChatEvents::Off,
+            Some(true) => ChatEvents::Mention,
+            Some(false) => ChatEvents::All,
+        };
+        Ok(Self {
+            desktop: filter(
+                if old.desktop_all {
+                    Some(false)
+                } else {
+                    old.mentions_only
+                },
+                global.desktop_on != When::NEVER,
+            ),
+            sound: match old.sound {
+                Some(false) => ChatEvents::Off,
+                Some(true) => filter(Some(old.mentions_only.unwrap_or(false)), true),
+                None => filter(old.mentions_only, global.sound_on != When::NEVER),
+            },
+            bell: filter(old.mentions_only, global.bell_on != When::NEVER),
+        })
     }
 }
 
@@ -286,8 +341,9 @@ mod tests {
             );
         }
         let prefs = ChatNotify {
-            mentions_only: Some(true),
-            sound: Some(true),
+            desktop: ChatEvents::Mention,
+            sound: ChatEvents::Mention,
+            bell: ChatEvents::Mention,
         };
         assert_eq!(prefs.alert(&global, false, false), Alert::default());
         assert_eq!(
@@ -299,7 +355,7 @@ mod tests {
             }
         );
         let silent = ChatNotify {
-            sound: Some(false),
+            sound: ChatEvents::Off,
             ..prefs
         };
         assert_eq!(
@@ -313,6 +369,50 @@ mod tests {
         let mut no_command = global.clone();
         no_command.sound.clear();
         assert!(!prefs.alert(&no_command, false, true).sound);
+    }
+
+    #[test]
+    fn old_chat_preferences_restore_independent_signal_rules() {
+        use ChatEvents::*;
+        let global = NotifyConfig {
+            bell_on: "none".into(),
+            ..Default::default()
+        }
+        .ready()
+        .unwrap();
+        for (saved, desktop, sound, bell) in [
+            ("mentions_only = true", Mention, Mention, Off),
+            ("mentions_only = false\nsound = false", All, Off, Off),
+            ("sound = true", Inherit, All, Inherit),
+            ("desktop_all = true", All, Inherit, Inherit),
+            ("mentions_only = true\ndesktop_all = true", All, Mention, Off),
+        ] {
+            assert_eq!(
+                ChatNotify::from_stored(saved, &global).unwrap(),
+                ChatNotify { desktop, sound, bell },
+                "{saved}"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_exception_preserves_global_sound_and_bell_filters() {
+        let global = NotifyConfig {
+            bell_on: "mention".into(),
+            ..Default::default()
+        }
+        .ready()
+        .unwrap();
+        let prefs = ChatNotify {
+            desktop: ChatEvents::All,
+            ..Default::default()
+        };
+        for (private, mention) in [(false, false), (false, true), (true, false)] {
+            let alert = prefs.alert(&global, private, mention);
+            assert!(alert.desktop);
+            assert_eq!(alert.sound, private || mention);
+            assert_eq!(alert.bell, mention);
+        }
     }
 
     #[test]

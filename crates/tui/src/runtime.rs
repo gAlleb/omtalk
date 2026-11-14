@@ -629,7 +629,6 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
     }
     restore_mutes(&store, &mut app);
-    restore_chat_notify(&store, &mut app);
     restore_bots(&store, &mut app);
     app.read_markers = ui.read_markers;
     app.mouse = ui.mouse;
@@ -640,6 +639,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         notify.bell_on = crate::notify::When::NEVER;
     }
     app.notify = notify;
+    restore_chat_notify(&store, &mut app);
     app.config_ui = ui.clone();
     app.show_avatars = ui.avatars;
     app.compact = ui.compact;
@@ -4181,8 +4181,11 @@ fn save_chat_notify(
 fn restore_chat_notify(store: &Store, app: &mut App) {
     for (key, value) in store.kept_under(KEPT_CHAT_NOTIFY).unwrap_or_default() {
         if let Some((account, peer)) = key.split_once('/')
-            && let (Ok(account), Ok(peer), Ok(prefs)) =
-                (account.parse(), peer.parse(), toml::from_str(&value))
+            && let (Ok(account), Ok(peer), Ok(prefs)) = (
+                account.parse(),
+                peer.parse(),
+                crate::notify::ChatNotify::from_stored(&value, &app.notify),
+            )
         {
             app.chat_notify.insert((account, peer), prefs);
         }
@@ -5012,8 +5015,9 @@ mod tests {
         let other: BareJid = "other@example.org".parse().unwrap();
         let peer: BareJid = "#room%irc.example.org@bridge.example.org".parse().unwrap();
         let prefs = crate::notify::ChatNotify {
-            mentions_only: Some(true),
-            sound: Some(false),
+            desktop: crate::notify::ChatEvents::All,
+            sound: crate::notify::ChatEvents::Off,
+            bell: crate::notify::ChatEvents::Mention,
         };
         save_chat_notify(&store, &me, &peer, &prefs).unwrap();
         let mut app = App::new(vec![me.clone(), other.clone()], Modifier::Ctrl, 26, 30);

@@ -1445,7 +1445,7 @@ impl App {
         let prefs = self.chat_notify.get(&(account.clone(), message.peer.clone()));
         let mention = match kind {
             Some(ChatKind::Room { nick }) => crate::notify::mentions(text, nick),
-            Some(ChatKind::Direct) if prefs.is_some_and(|p| p.mentions_only == Some(true)) => self
+            Some(ChatKind::Direct) if prefs.is_some() => self
                 .nicknames
                 .get(&(account.clone(), account.clone()))
                 .map(String::as_str)
@@ -4211,23 +4211,20 @@ impl App {
                 .get(&(account.clone(), peer.clone()))
                 .cloned()
                 .unwrap_or_default();
-            match (setting.key, setting.value.text().as_str()) {
-                ("messages", value) => {
-                    prefs.mentions_only = match value {
-                        "all" => Some(false),
-                        "mention" => Some(true),
-                        _ => None,
-                    }
-                }
-                ("sound", value) => {
-                    prefs.sound = match value {
-                        "on" => Some(true),
-                        "off" => Some(false),
-                        _ => None,
-                    }
-                }
+            use crate::notify::ChatEvents;
+            let signal = match setting.key {
+                "desktop" => &mut prefs.desktop,
+                "sound" => &mut prefs.sound,
+                "bell" => &mut prefs.bell,
                 _ => return Vec::new(),
-            }
+            };
+            *signal = match setting.value.text().as_str() {
+                "all" => ChatEvents::All,
+                "mention" => ChatEvents::Mention,
+                "off" => ChatEvents::Off,
+                "inherit" => ChatEvents::Inherit,
+                _ => return Vec::new(),
+            };
             self.chat_notify
                 .insert((account.clone(), peer.clone()), prefs.clone());
             return vec![Action::SetChatNotify {
@@ -5887,12 +5884,12 @@ mod tests {
             Value::Choice(options, _) => options,
             _ => unreachable!(),
         };
-        app.settings.as_mut().unwrap().rows[row].value = Value::Choice(options, 2);
+        app.settings.as_mut().unwrap().rows[row].value = Value::Choice(options, 3);
         let server = app.server_chat(&me);
         app.select(server);
         assert!(
             matches!(&app.apply_setting(row)[..], [Action::SetChatNotify { account, chat, prefs }]
-            if *account == me && *chat == peer && prefs.sound == Some(false))
+            if *account == me && *chat == peer && prefs.sound == crate::notify::ChatEvents::Off)
         );
         let row = app
             .settings
@@ -7043,8 +7040,9 @@ mod tests {
             app.chat_notify.insert(
                 (me.clone(), peer.clone()),
                 crate::notify::ChatNotify {
-                    mentions_only: Some(true),
-                    sound: Some(false),
+                    desktop: crate::notify::ChatEvents::Mention,
+                    bell: crate::notify::ChatEvents::Mention,
+                    sound: crate::notify::ChatEvents::Off,
                 },
             );
             let alert = app.alert_for(&me, &message);
@@ -7055,8 +7053,9 @@ mod tests {
             app.chat_notify.insert(
                 (me.clone(), peer.clone()),
                 crate::notify::ChatNotify {
-                    mentions_only: Some(false),
-                    sound: Some(true),
+                    desktop: crate::notify::ChatEvents::All,
+                    bell: crate::notify::ChatEvents::All,
+                    sound: crate::notify::ChatEvents::All,
                 },
             );
             assert!(app.alert_for(&me, &ordinary).sound);

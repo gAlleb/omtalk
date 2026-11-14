@@ -6680,7 +6680,7 @@ mod tests {
             text.contains("Этот чат") && text.contains("Мьют всех уведомлений") && text.contains("Звук"),
             "{text}"
         );
-        assert_eq!(app.settings.as_ref().unwrap().rows.len(), 3);
+        assert_eq!(app.settings.as_ref().unwrap().rows.len(), 4);
         let area = app
             .areas
             .settings_rows
@@ -6699,9 +6699,9 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, Action::SetChatNotify { prefs, .. } if prefs.sound == Some(true)))
+                .any(|a| matches!(a, Action::SetChatNotify { prefs, .. } if prefs.sound == crate::notify::ChatEvents::All))
         );
-        assert_eq!(app.chat_notify[&(me, peer)].sound, Some(true));
+        assert_eq!(app.chat_notify[&(me, peer)].sound, crate::notify::ChatEvents::All);
     }
 
     #[test]

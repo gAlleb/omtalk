@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.14 — 2026-11-14
+
+- Tab completes room nicknames inside `/me` actions, including in biboumi channels.
+- Desktop notifications, sounds and terminal bells each have their own per-chat rule. Choose global settings, all messages, mentions only or off. A room can show a popup for every message while keeping sounds on mentions. Existing chat preferences are read automatically.
+
 ## 0.1.13 — 2026-11-11
 
 - Downloaded videos, images and other files offer a Save action that opens the destination dialog. Long attachment names leave room for Open and Save in both normal and compact layouts.

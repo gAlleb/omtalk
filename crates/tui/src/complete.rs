@@ -444,7 +444,7 @@ pub fn candidates(input: &str, cursor: usize, context: &Context) -> Option<(usiz
         Some("/services") if is_first_argument(&before, start_byte) => {
             matching(context.servers.iter().map(String::as_str), typed, "")
         }
-        Some(c) if c.starts_with('/') => Vec::new(),
+        Some(c) if c != "/me" && c.starts_with('/') => Vec::new(),
         // A nick: at the start of the line it addresses someone.
         _ if typed.is_empty() => Vec::new(),
         _ => matching(
@@ -595,6 +595,8 @@ mod tests {
             Some((0, vec!["Алиса: ".into()])),
             "case and Cyrillic"
         );
+        assert_eq!(complete("/me al"), Some((4, vec!["alex ".into()])));
+        assert_eq!(complete("/me потрогал а"), Some((13, vec!["Алиса ".into()])));
         assert_eq!(complete("спасибо, b"), Some((9, vec!["bob ".into()])));
         assert_eq!(complete("A").unwrap().1, ["alex: "], "Latin A is not Cyrillic А");
         assert_eq!(complete("привет "), None, "nothing typed, nothing guessed");
