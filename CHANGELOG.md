@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- In direct chats, the typing indicator shows the same contact name as incoming messages.
+- Incoming messages highlight your nickname in the theme’s accent colour, including in compact view and `/me` actions. Rooms use your room nickname. Direct chats use your published nickname or, if unset, your account login.
+
 ## 0.1.14 — 2026-11-14
 
 - Tab completes room nicknames inside `/me` actions, including in biboumi channels.

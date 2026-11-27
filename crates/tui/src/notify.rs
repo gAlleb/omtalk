@@ -198,27 +198,42 @@ impl Notify {
     }
 }
 
-/// Whether `text` names `nick`: as a word, any case, as people write "Алиса:" or "@алиса".
+/// Whole-nick matches in the lowercased text, as people write "Алиса:" or "@алиса".
+fn nick_matches<'a>(text: &'a str, nick: &'a str) -> impl Iterator<Item = std::ops::Range<usize>> + 'a {
+    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
+    text.match_indices(nick).filter_map(move |(start, matched)| {
+        let end = start + matched.len();
+        (boundary(text[..start].chars().next_back()) && boundary(text[end..].chars().next()))
+            .then_some(start..end)
+    })
+}
+
 pub fn mentions(text: &str, nick: &str) -> bool {
+    !nick.trim().is_empty()
+        && nick_matches(&text.to_lowercase(), &nick.to_lowercase())
+            .next()
+            .is_some()
+}
+
+/// Character ranges in the original text. Lowercasing can change byte and character
+/// counts (for example, İ), so offsets into the folded text cannot index the display.
+pub fn mention_ranges(text: &str, nick: &str) -> Vec<std::ops::Range<usize>> {
     if nick.trim().is_empty() {
-        return false;
+        return Vec::new();
     }
-    let text = text.to_lowercase();
-    let nick = nick.to_lowercase();
-    let is_word = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
-    let mut from = 0;
-    while let Some(at) = text[from..].find(&nick) {
-        let start = from + at;
-        let end = start + nick.len();
-        if is_word(text[..start].chars().next_back()) && is_word(text[end..].chars().next()) {
-            return true;
+    let mut chars = text.chars();
+    let (mut bytes, mut index) = (0, 0);
+    let mut original_index = |target| {
+        while bytes < target {
+            let c = chars.next().expect("lowercase offset within the original text");
+            bytes += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+            index += 1;
         }
-        from = start + nick.len().max(1);
-        while !text.is_char_boundary(from) {
-            from += 1;
-        }
-    }
-    false
+        index
+    };
+    nick_matches(&text.to_lowercase(), &nick.to_lowercase())
+        .map(|range| original_index(range.start)..original_index(range.end))
+        .collect()
 }
 
 /// Runs the sound command or notify-send, apart, quietly; reaped when done.
