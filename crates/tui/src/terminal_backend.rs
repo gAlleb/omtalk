@@ -56,10 +56,22 @@ pub fn image_picker() -> Picker {
     // passthrough setup while allowing the cell size to come from TIOCGWINSZ.
     #[allow(deprecated)]
     let mut picker = Picker::from_fontsize(font_size.unwrap_or(FontSize::new(10, 20)));
-    if let Some(protocol) = protocol {
-        picker.set_protocol_type(protocol);
-    }
+    picker.set_protocol_type(usable_protocol(
+        protocol.unwrap_or(picker.protocol_type()),
+        tmux,
+        picker.tmux_detected(),
+    ));
     picker
+}
+
+fn usable_protocol(protocol: ProtocolType, in_tmux: bool, picker_wraps_tmux: bool) -> ProtocolType {
+    // With TERM=screen-256color, TMUX alone identifies the multiplexer to us.
+    // The picker won't wrap graphics escapes for passthrough in that case.
+    if in_tmux && !picker_wraps_tmux {
+        ProtocolType::Halfblocks
+    } else {
+        protocol
+    }
 }
 
 fn measured_cell(width: u16, height: u16) -> Option<FontSize> {
@@ -195,6 +207,15 @@ mod tests {
             ("dumb", "", "", None),
         ] {
             assert_eq!(image_protocol(term, program, features), expected);
+        }
+    }
+
+    #[test]
+    fn graphics_inside_tmux_require_wrapped_output() {
+        for graphics in [ProtocolType::Kitty, ProtocolType::Iterm2, ProtocolType::Sixel] {
+            assert_eq!(usable_protocol(graphics, true, false), ProtocolType::Halfblocks);
+            assert_eq!(usable_protocol(graphics, true, true), graphics);
+            assert_eq!(usable_protocol(graphics, false, false), graphics);
         }
     }
 

@@ -6,7 +6,7 @@
 - A line that mentions your nickname has an accent background across the chat pane, including its wrapped continuation. The nickname itself is bold and underlined.
 - Unread counters show `@3` in the theme's warning colour when at least one of the three unread messages mentions you. Folded folders and accounts show the same indication. The counter follows read markers from other devices and edits to older unread messages.
 - The open-lock icon in the chat list gets its full display width on the first draw. The server row omits the chat encryption indicator.
-- Starting omtalk no longer sends graphics and cell-size queries through the keyboard stream. Delayed terminal replies can no longer appear in the draft.
+- Starting omtalk no longer sends graphics and cell-size queries through the keyboard stream. Delayed terminal replies can no longer appear in the draft. Inside tmux, image previews use text blocks when the graphics backend cannot wrap image commands for passthrough.
 - Resizing a pane with a draft or command suggestions open no longer crashes the editor on small terminal sizes. Terminal input errors are reported on exit.
 - In group chats, when two clients of one account converge on the same nickname, the old nickname disappears as soon as the room reports its departure.
 
