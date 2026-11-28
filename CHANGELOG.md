@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.16 — 2026-11-28
 
 - The built-in player can play AAC attachments whose channel count is first reported by the decoder, including MP4 audio sent with an `.mp3` filename.
 - A line that mentions your nickname has an accent background across the chat pane, including its wrapped continuation. The nickname itself is bold and underlined.
