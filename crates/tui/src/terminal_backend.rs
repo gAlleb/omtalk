@@ -2,7 +2,91 @@
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::{Cell, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Size};
+use ratatui_image::FontSize;
+use ratatui_image::picker::{Picker, ProtocolType};
 use std::io::{self, Write};
+use std::process::Command;
+
+/// Identify image support without sending a query through the keyboard input stream.
+/// In particular, a late Kitty APC or cell-size CSI after the probe's status reply
+/// would be decoded as keystrokes by crossterm.
+pub fn image_picker() -> Picker {
+    let term = std::env::var("TERM").unwrap_or_default();
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let tmux = program == "tmux" || term.starts_with("tmux") || std::env::var_os("TMUX").is_some();
+    let mut font_size = crossterm::terminal::window_size().ok().and_then(|size| {
+        measured_cell(
+            size.width.checked_div(size.columns)?,
+            size.height.checked_div(size.rows)?,
+        )
+    });
+
+    let protocol = if tmux {
+        // A long-running tmux server may have inherited the environment of a
+        // different terminal. Ask tmux about the client displaying this pane.
+        let mut command = Command::new("tmux");
+        command.args(["display-message", "-p"]);
+        if let Some(pane) = std::env::var_os("TMUX_PANE") {
+            command.arg("-t").arg(pane);
+        }
+        let format = "#{client_termname}\t#{client_termtype}\t#{client_termfeatures}\t#{window_cell_width}\t#{window_cell_height}";
+        command
+            .arg(format)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|output| {
+                let text = std::str::from_utf8(&output.stdout).ok()?;
+                let mut fields = text.trim_end_matches(['\r', '\n']).split('\t');
+                let protocol = image_protocol(fields.next()?, fields.next()?, fields.next()?);
+                if let (Some(w), Some(h)) = (fields.next(), fields.next()) {
+                    font_size = w
+                        .parse()
+                        .ok()
+                        .zip(h.parse().ok())
+                        .and_then(|(w, h)| measured_cell(w, h))
+                        .or(font_size);
+                }
+                protocol
+            })
+    } else {
+        image_protocol(&term, &program, "")
+    };
+    // This constructor retains the library's iTerm environment hints and tmux
+    // passthrough setup while allowing the cell size to come from TIOCGWINSZ.
+    #[allow(deprecated)]
+    let mut picker = Picker::from_fontsize(font_size.unwrap_or(FontSize::new(10, 20)));
+    if let Some(protocol) = protocol {
+        picker.set_protocol_type(protocol);
+    }
+    picker
+}
+
+fn measured_cell(width: u16, height: u16) -> Option<FontSize> {
+    (width > 0 && height > 0).then_some(FontSize::new(width, height))
+}
+
+fn image_protocol(term: &str, program: &str, features: &str) -> Option<ProtocolType> {
+    let program = program.to_ascii_lowercase();
+    if matches!(term, "xterm-kitty" | "xterm-ghostty")
+        || program.starts_with("kitty")
+        || program.starts_with("ghostty")
+    {
+        Some(ProtocolType::Kitty)
+    } else if program.starts_with("iterm") || program.starts_with("wezterm") || term == "wezterm" {
+        Some(ProtocolType::Iterm2)
+    } else if term.starts_with("alacritty") || program.starts_with("alacritty") {
+        Some(ProtocolType::Halfblocks)
+    } else if term.starts_with("foot")
+        || term == "mlterm"
+        || term.contains("sixel")
+        || features.split(',').any(|f| f == "sixel")
+    {
+        Some(ProtocolType::Sixel)
+    } else {
+        None
+    }
+}
 
 pub struct StableBackend<W: Write> {
     inner: CrosstermBackend<W>,
@@ -97,6 +181,22 @@ impl<W: Write> Backend for StableBackend<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphics_are_selected_from_the_terminal_or_tmux_client_without_a_keyboard_probe() {
+        use ProtocolType::*;
+        for (term, program, features, expected) in [
+            ("xterm-kitty", "", "", Some(Kitty)),
+            ("xterm-256color", "ghostty 1.2", "", Some(Kitty)),
+            ("alacritty", "", "", Some(Halfblocks)),
+            ("xterm-256color", "WezTerm", "", Some(Iterm2)),
+            ("xterm-256color", "", "RGB,sixel,usstyle", Some(Sixel)),
+            ("foot-direct", "", "", Some(Sixel)),
+            ("dumb", "", "", None),
+        ] {
+            assert_eq!(image_protocol(term, program, features), expected);
+        }
+    }
 
     // Model a terminal that draws the heart sequence in one column even though
     // the application's buffer reserves two. Only printable text and CSI from

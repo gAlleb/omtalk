@@ -875,6 +875,29 @@ async fn a_nick_change_is_seen_as_the_same_person_renamed() {
         ("гость", Some("mrak"))
     );
     assert_eq!(renamed.real_jid.as_ref(), Some(guest.jid()));
+
+    // Two resources can share a nick. Moving one leaves the old nick online
+    // until the second resource also moves to the new nick.
+    let (mut mobile_accounts, mut mobile_events) = Accounts::new();
+    let mobile = mobile_accounts.add(config("u15")).await;
+    online(&mut mobile_events, &[&mobile]).await;
+    mobile.join(&room, "mrak").await.unwrap();
+    guest.join(&room, "новый").await.unwrap();
+    wait_for(&mut events, |e| match &e.event {
+        Event::Presence(p) if e.account == *owner.jid() => {
+            muc::occupant(p).filter(|o| o.room == room && o.nick == "новый" && o.present)
+        }
+        _ => None,
+    })
+    .await;
+    mobile.join(&room, "новый").await.unwrap();
+    wait_for(&mut events, |e| match &e.event {
+        Event::Presence(p) if e.account == *owner.jid() => {
+            muc::occupant(p).filter(|o| o.room == room && o.nick == "mrak" && !o.present)
+        }
+        _ => None,
+    })
+    .await;
 }
 
 #[tokio::test]

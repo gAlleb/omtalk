@@ -70,10 +70,15 @@ struct UserItem {
     codes: Vec<u16>,
 }
 
-fn user_item(payloads: &[Element]) -> Option<UserItem> {
-    let x = payloads.iter().find(|p| p.is("x", ns::MUC_USER))?;
-    let item = x.children().find(|c| c.is("item", ns::MUC_USER))?;
-    let attr = |name| item.attr(name).map(str::to_owned);
+fn user_item(presence: &Presence) -> Option<UserItem> {
+    let x = presence.payloads.iter().find(|p| p.is("x", ns::MUC_USER))?;
+    let item = x.children().find(|c| c.is("item", ns::MUC_USER));
+    // When two resources reunite under one nick, Prosody announces the old
+    // nick's departure with an empty muc#user element. The from JID names it.
+    if item.is_none() && presence.type_ != PresenceType::Unavailable {
+        return None;
+    }
+    let attr = |name| item?.attr(name).map(str::to_owned);
     Some(UserItem {
         affiliation: attr(xml_ncname!("affiliation"))
             .and_then(|a| a.parse().ok())
@@ -96,7 +101,7 @@ fn user_item(payloads: &[Element]) -> Option<UserItem> {
 /// Reads a presence from a room occupant; `None` for any other presence.
 pub fn occupant(presence: &Presence) -> Option<Occupant> {
     let from = presence.from.as_ref()?.try_as_full().ok()?;
-    let item = user_item(&presence.payloads)?;
+    let item = user_item(presence)?;
     Some(Occupant {
         room: from.to_bare(),
         nick: from.resource().to_string(),
@@ -497,6 +502,22 @@ mod invitation_tests {
         .try_into()
         .unwrap();
         assert!(occupant(&own).expect("oneself").is_self);
+    }
+
+    #[test]
+    fn only_unavailable_muc_presence_can_omit_the_item() {
+        let from: Jid = "room@muc.example/old".parse().unwrap();
+        let mut presence = Presence::unavailable().with_from(from);
+        assert!(occupant(&presence).is_none(), "ordinary contact presence");
+        presence
+            .payloads
+            .push(Element::builder("x", ns::MUC_USER).build());
+        let departure = occupant(&presence).unwrap();
+        assert_eq!(departure.nick, "old");
+        assert!(!departure.present);
+        assert!(departure.new_nick.is_none());
+        presence.type_ = PresenceType::None;
+        assert!(occupant(&presence).is_none(), "available still needs an item");
     }
 
     #[test]

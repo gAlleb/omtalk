@@ -19,7 +19,6 @@ use omtalk_xmpp::services::{CommandAction, CommandStep};
 use omtalk_xmpp::{Account, AccountConfig, AccountEvent, Accounts, BareJid, Event, Jid, Server, muc};
 use omtalk_xmpp::{avatar, receipts};
 use ratatui::Terminal;
-use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use xmpp_parsers::message::{Lang, Message};
 
@@ -690,9 +689,7 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
         }
     }
 
-    // Asks the terminal what graphics it speaks (kitty, sixel), before anything else reads
-    // its answers; plain block characters where it speaks none, as Alacritty.
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let picker = crate::terminal_backend::image_picker();
     let mut pictures = Pictures::new();
     let mut terminal = Terminal::new(StableBackend::new(io::stdout())).map_err(|e| e.to_string())?;
     terminal.clear().map_err(|e| e.to_string())?;
@@ -718,11 +715,11 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
     // Folded folders and accounts, kept as they change.
     let mut folded = app.collapsed.clone();
     let mut opened = app.current().map(|c| format!("{}\t{}", c.account, c.jid));
-    loop {
+    let result = loop {
         flush_local_reads(&mut app, &shared.store);
-        terminal
-            .draw(|frame| view::draw(frame, &mut app, &mut pictures))
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = terminal.draw(|frame| view::draw(frame, &mut app, &mut pictures)) {
+            break Err(e.to_string());
+        }
         // The chat open now, for the next start.
         let open = app.current().map(|c| format!("{}\t{}", c.account, c.jid));
         if open != opened {
@@ -776,7 +773,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 // instead of as keys where each break would send.
                 Some(Ok(TermEvent::Paste(text))) => app.on_paste(&text),
                 Some(Ok(_)) => Vec::new(),
-                Some(Err(_)) | None => break,
+                Some(Err(e)) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => continue,
+                Some(Err(e)) => break Err(trf!("terminal input failed: {e}", "ошибка ввода терминала: {e}")),
+                None => break Err(tr!("terminal input closed", "ввод терминала закрыт").to_owned()),
             },
             Some(msg) = rx.recv() => {
                 // Drain what else is waiting, then draw once.
@@ -806,9 +805,9 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
                 }
                 Vec::new()
             }
-            _ = tokio::signal::ctrl_c() => break,
-            _ = hangup.recv() => break,
-            _ = terminate.recv() => break,
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+            _ = hangup.recv() => break Ok(()),
+            _ = terminate.recv() => break Ok(()),
         };
         if app.selected != selected_before {
             trace_scroll(&app, &format!("selection changed from {selected_before:?}"));
@@ -874,14 +873,14 @@ pub async fn run(options: Options, configs: Vec<AccountConfig>) -> Result<(), St
             tokio::spawn(perform(action, shared.clone()));
         }
         if app.quit {
-            break;
+            break Ok(());
         }
-    }
+    };
     audio.send(crate::audio::Command::Quit);
     // Leave cleanly, or rooms keep showing us online for minutes (XEP-0198 parking).
     futures::future::join_all(shared.accounts.values().map(|(account, _)| account.stop())).await;
     drop(accounts);
-    Ok(())
+    result
 }
 
 fn load_history(app: &mut App, store: &Store, accounts: &[BareJid]) {
@@ -1150,6 +1149,13 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             }
             // A correction changes the message it names, where it is: no alert.
             if app.correct(&account, &message) {
+                if let Some(index) = app
+                    .chats
+                    .iter()
+                    .position(|c| c.account == account && c.jid == message.peer)
+                {
+                    refresh_unread_mention(app, &shared.store, index);
+                }
                 return;
             }
             // Before the chat shows it, while it is still "not looked at".
@@ -1207,22 +1213,54 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             if let Some(action) = app.ask_writer_avatar(&account, &message) {
                 tokio::spawn(perform(action, shared.clone()));
             }
+            let previous_unread = app
+                .chats
+                .iter()
+                .find(|c| c.account == account && c.jid == message.peer)
+                .map_or(0, |chat| chat.unread);
             for action in app.on_incoming(&account, &message, at) {
                 tokio::spawn(perform(action, shared.clone()));
             }
             // Catch-up can bring older history after a local or remote read
             // frontier was already applied. Inserting it must not unread it again.
             flush_local_reads(app, &shared.store);
-            if let Some(chat) = app
+            if let Some(index) = app
                 .chats
-                .iter_mut()
-                .find(|c| c.account == account && c.jid == message.peer)
+                .iter()
+                .position(|c| c.account == account && c.jid == message.peer)
             {
+                let chat = &mut app.chats[index];
                 if let Some(id) = &chat.read_mark {
                     let _ = shared.store.read_remotely(&account, &chat.jid, id);
                 }
-                if let Ok(Some(unread)) = shared.store.unread_after_mark(&account, &chat.jid, None) {
-                    chat.unread = unread;
+                let before = chat.unread;
+                let durable_count = shared
+                    .store
+                    .unread_after_mark(&account, &chat.jid, None)
+                    .ok()
+                    .flatten();
+                if let Some(unread) = durable_count {
+                    chat.set_unread(unread);
+                }
+                let chat = &app.chats[index];
+                // For an ordinary message the existing badge stays valid. Consult
+                // history if a read frontier moved or a first mention might have arrived.
+                let frontier_changed = chat.unread < previous_unread && chat.unread_mention;
+                let first_mention = !chat.unread_mention
+                    && message.direction == omtalk_omemo::Direction::Incoming
+                    && message
+                        .text
+                        .as_deref()
+                        .zip(app.mention_nick(chat))
+                        .is_some_and(|(body, nick)| crate::notify::mentions(body, nick));
+                if durable_count.is_none() {
+                    // The network task can already have stored the next message.
+                    // With no read frontier, the UI's count follows delivery order.
+                    if first_mention && chat.unread > previous_unread {
+                        app.chats[index].unread_mention = true;
+                    }
+                } else if chat.unread > 0 && (frontier_changed || first_mention || before == 0) {
+                    refresh_unread_mention(app, &shared.store, index);
                 }
             }
             if let Some(text) = &message.text {
@@ -1327,9 +1365,22 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
         }
         Msg::ReadMarks { account, marks } => {
             flush_local_reads(app, &shared.store);
-            restore_local_unread(app, &shared.store, &account);
             // The user may have read further since a background task counted this.
             let marks = counted(&shared.store, &account, marks);
+            // A new read marker and new arrivals can leave the number unchanged
+            // while advancing which messages belong to the unread suffix.
+            for (jid, id, after) in &marks {
+                if let Some(index) = app.chats.iter().position(|chat| {
+                    chat.account == account
+                        && chat.jid == *jid
+                        && chat.unread > 0
+                        && *after == Some(chat.unread)
+                        && chat.read_mark.as_ref() != Some(id)
+                }) {
+                    refresh_unread_mention(app, &shared.store, index);
+                }
+            }
+            restore_local_unread(app, &shared.store, &account);
             for action in app.read_marks(&account, marks) {
                 tokio::spawn(perform(action, shared.clone()));
             }
@@ -1344,6 +1395,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             let newer = std::mem::take(&mut app.chats[index].lines);
             app.chats[index].lines = lines;
             app.chats[index].lines.extend(newer);
+            refresh_unread_mention(app, &shared.store, index);
             refresh_readers(app, &shared.store, &account, &chat);
         }
         Msg::Avatar { jid, hash } => match hash {
@@ -1388,7 +1440,17 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             let _ = shared
                 .store
                 .keep(&format!("{KEPT_NICKNAME}{account}/{jid}"), nick.as_deref());
-            app.nickname(&account, &jid, nick)
+            let own_changed =
+                account == jid && app.nicknames.get(&(account.clone(), jid.clone())) != nick.as_ref();
+            app.nickname(&account, &jid, nick);
+            if own_changed {
+                for index in 0..app.chats.len() {
+                    let chat = &app.chats[index];
+                    if chat.account == account && chat.kind == ChatKind::Direct && chat.unread > 0 {
+                        refresh_unread_mention(app, &shared.store, index);
+                    }
+                }
+            }
         }
         Msg::Reactions { account, reactions } => drop(app.reacted(&account, &reactions)),
         Msg::Found {
@@ -1678,6 +1740,7 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 shared.clone(),
             ));
             let index = app.chat(&account, &room, ChatKind::Room { nick });
+            refresh_unread_mention(app, &shared.store, index);
             // Its name as last told, until the room tells it again.
             if app.chats[index].name.is_none() {
                 app.chats[index].name = shared
@@ -1733,7 +1796,11 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                     .iter()
                     .position(|c| c.account == account && c.jid == room)
             {
+                let own = matches!(&app.chats[index].kind, ChatKind::Room {nick: me} if me == &nick);
                 app.rename_occupant(index, &nick, &new, now());
+                if own {
+                    refresh_unread_mention(app, &shared.store, index);
+                }
                 return;
             }
             // Entering, the room tells who is there before it confirms the entry: the
@@ -2198,10 +2265,37 @@ fn flush_local_reads(app: &mut App, store: &Store) {
     }
 }
 
+/// Rebuild from the same incoming suffix the counter represents. A mention
+/// can be older than all lines loaded into the TUI after a restart.
+fn refresh_unread_mention(app: &mut App, store: &Store, index: usize) {
+    let chat = &app.chats[index];
+    let mentioned = app.mention_nick(chat).is_some_and(|nick| {
+        chat.unread != 0
+            && store
+                .recent_incoming_match(&chat.account, &chat.jid, chat.unread, |body| {
+                    crate::notify::mentions(body, nick)
+                })
+                .unwrap_or_else(|_| {
+                    chat.lines
+                        .iter()
+                        .rev()
+                        .filter(|l| !l.notice && !l.outgoing)
+                        .take(chat.unread)
+                        .any(|l| crate::notify::mentions(&l.text, nick))
+                })
+    });
+    app.chats[index].unread_mention = mentioned;
+}
+
 fn restore_local_unread(app: &mut App, store: &Store, account: &BareJid) {
-    for chat in app.chats.iter_mut().filter(|c| &c.account == account) {
-        if let Ok(Some(unread)) = store.unread_after_mark(account, &chat.jid, None) {
-            chat.unread = unread;
+    for index in 0..app.chats.len() {
+        let chat = &mut app.chats[index];
+        if &chat.account == account
+            && let Ok(Some(unread)) = store.unread_after_mark(account, &chat.jid, None)
+            && unread != chat.unread
+        {
+            chat.set_unread(unread);
+            refresh_unread_mention(app, store, index);
         }
     }
 }
@@ -5603,7 +5697,11 @@ mod tests {
             device: None,
             direction: Direction::Incoming,
             encrypted: false,
-            text: Some(format!("message {at}")),
+            text: Some(if at == 90 || at == 102 {
+                "@Me, look".into()
+            } else {
+                format!("message {at}")
+            }),
             at: Some(at),
             not_for_this_device: false,
             id: Some(format!("m{at}")),
@@ -5632,6 +5730,27 @@ mod tests {
         let server = app.server_chat(&me);
         let chat = app.chat(&me, &room, ChatKind::Room { nick: "me".into() });
         app.select(server);
+        app.chats[chat].muted = true;
+        // Both are already stored before the UI sees the first: unread in a
+        // never-opened chat follows event delivery until it has a read frontier.
+        let queued = [1, 2].map(|at| {
+            let mut incoming = message(at);
+            incoming.text = Some(if at == 1 { "@me" } else { "ordinary" }.into());
+            keep(&shared, &me, &incoming);
+            (at, incoming)
+        });
+        for (at, incoming) in queued {
+            apply(
+                &mut app,
+                Msg::Incoming {
+                    account: me.clone(),
+                    message: incoming,
+                    at,
+                },
+                &shared,
+            );
+            assert!(app.chats[chat].unread_mention);
+        }
         // The office laptop read through message 100. Its marker arrives before
         // some older archive pages, which are new to this laptop, but already read.
         let boundary = message(100);
@@ -5656,11 +5775,27 @@ mod tests {
                 },
                 &shared,
             );
+            assert_eq!(app.chats[chat].unread_mention, at >= 102, "archive row {at}");
         }
         assert_eq!(
             app.chats[chat].unread, 5,
             "81 already-read archive messages must not turn five new messages into 86"
         );
+        // A restart can restore more unread than fit in the loaded page.
+        app.chats[chat].lines.clear();
+        app.chats[chat].set_unread(0);
+        restore_local_unread(&mut app, &store, &me);
+        assert!(app.chats[chat].unread_mention);
+        apply(
+            &mut app,
+            Msg::ReadMarks {
+                account: me.clone(),
+                marks: vec![(room.clone(), "a102".into())],
+            },
+            &shared,
+        );
+        assert_eq!(app.chats[chat].unread, 3);
+        assert!(!app.chats[chat].unread_mention);
     }
 
     #[tokio::test]

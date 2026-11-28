@@ -242,6 +242,29 @@ fn chats(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn unread_badge<'a>(chats: impl Iterator<Item = &'a Chat>) -> Span<'static> {
+    let (count, mentioned) = chats.fold((0, false), |(count, mentioned), chat| {
+        (
+            count + chat.unread,
+            mentioned || (chat.unread > 0 && chat.unread_mention),
+        )
+    });
+    if count == 0 {
+        return Span::raw("");
+    }
+    let (label, colour) = if mentioned {
+        ("@", theme::warn())
+    } else {
+        ("", theme::accent())
+    };
+    Span::styled(
+        format!(" {label}{count} "),
+        Style::default()
+            .fg(colour)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+    )
+}
+
 /// An account's heading in the chat list: fold mark, state, address, and while folded
 /// the unread count of its chats, so nothing hides there unnoticed.
 fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragraph<'static> {
@@ -250,17 +273,7 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
         .get(account)
         .is_some_and(crate::app::Connection::online);
     let mark = if folded { "▸ " } else { "▾ " };
-    let unread: usize = app
-        .chats
-        .iter()
-        .filter(|c| &c.account == account)
-        .map(|c| c.unread)
-        .sum();
-    let badge = if folded && unread > 0 {
-        format!(" {unread} ")
-    } else {
-        String::new()
-    };
+    let badge = unread_badge(app.chats.iter().filter(|c| folded && &c.account == account));
     let room = (width as usize).saturating_sub(mark.width() + 2 + badge.width());
     let name = truncate(&account.to_string(), room);
     let gap = (width as usize).saturating_sub(mark.width() + 2 + name.width() + badge.width());
@@ -280,12 +293,7 @@ fn account_row(app: &App, account: &BareJid, folded: bool, width: u16) -> Paragr
             }
         }),
         Span::raw(" ".repeat(gap)),
-        Span::styled(
-            badge,
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
-        ),
+        badge,
     ]))
 }
 
@@ -301,23 +309,15 @@ fn folder_row(
     let width = width.saturating_sub(branch.width() as u16);
     let mark = if folded { "▸ " } else { "▾ " };
     let icon = format!("{} ", app.icons.folder);
-    let unread: usize = app
+    let folder = app
         .folders
         .iter()
-        .find(|f| &f.account == account && f.name == name)
-        .map(|f| {
-            app.chats
-                .iter()
-                .filter(|c| c.account == f.account && f.chats.contains(&c.jid))
-                .map(|c| c.unread)
-                .sum()
-        })
-        .unwrap_or(0);
-    let badge = if folded && unread > 0 {
-        format!(" {unread} ")
-    } else {
-        String::new()
-    };
+        .find(|f| folded && &f.account == account && f.name == name);
+    let badge = unread_badge(
+        app.chats
+            .iter()
+            .filter(|c| &c.account == account && folder.is_some_and(|f| f.chats.contains(&c.jid))),
+    );
     let room = (width as usize).saturating_sub(mark.width() + icon.width() + badge.width());
     let name = truncate(name, room);
     let gap = (width as usize).saturating_sub(mark.width() + icon.width() + name.width() + badge.width());
@@ -330,12 +330,7 @@ fn folder_row(
             Style::default().fg(theme::text()).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(gap)),
-        Span::styled(
-            badge,
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
-        ),
+        badge,
     ]))
 }
 
@@ -355,26 +350,24 @@ fn chat_row(
         ChatKind::Direct => "@ ".to_owned(),
         ChatKind::Server => format!("{} ", icons.service),
     };
-    let badge = if chat.unread > 0 {
-        format!(" {} ", chat.unread)
-    } else {
-        String::new()
-    };
-    let lock = if chat.omemo { "" } else { icons.chat_unlocked };
-    // Someone types there: a mark after the name.
-    let lock = if typing {
-        format!(" …{lock}")
-    } else {
-        lock.to_owned()
-    };
-    let lock = if chat.muted {
-        format!("{lock} {} ", icons.muted)
-    } else {
-        lock
-    };
-    let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + lock.width() + 1);
+    let badge = unread_badge(std::iter::once(chat));
+    let mut marks = String::new();
+    if typing {
+        marks.push_str(" …");
+    }
+    if !chat.omemo && chat.kind != ChatKind::Server {
+        marks.push_str(icons.chat_unlocked);
+    }
+    if chat.muted {
+        if !marks.ends_with(char::is_whitespace) {
+            marks.push(' ');
+        }
+        marks.push_str(icons.muted);
+        marks.push(' ');
+    }
+    let room_for_title = (width as usize).saturating_sub(icon.width() + badge.width() + marks.width() + 1);
     let title = truncate(&chat.title(), room_for_title);
-    let gap = (width as usize).saturating_sub(icon.width() + title.width() + lock.width() + badge.width());
+    let gap = (width as usize).saturating_sub(icon.width() + title.width() + marks.width() + badge.width());
     let base = if selected {
         theme::selected()
     } else if chat.unread > 0 {
@@ -401,7 +394,7 @@ fn chat_row(
         // On the selected row the colours are swapped: a coloured lock would turn into a
         // coloured block there.
         Span::styled(
-            lock,
+            marks,
             if selected {
                 base
             } else if typing {
@@ -411,12 +404,7 @@ fn chat_row(
             },
         ),
         Span::styled(" ".repeat(gap), base),
-        Span::styled(
-            badge,
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ),
+        badge,
     ]))
 }
 
@@ -532,16 +520,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                 icons.plain_mark = icons.plain_mark_open_chat;
             }
             let peer = (chat.kind == ChatKind::Direct).then(|| chat.title());
-            let own_name = match &chat.kind {
-                ChatKind::Room { nick } if !nick.is_empty() => Some(nick.clone()),
-                ChatKind::Direct if chat.jid != chat.account => Some(
-                    app.nicknames
-                        .get(&(chat.account.clone(), chat.account.clone()))
-                        .cloned()
-                        .unwrap_or_else(|| own.clone()),
-                ),
-                _ => None,
-            };
+            let own_name = app.mention_nick(chat);
             let mut rows = message_rows(
                 &chat.lines,
                 width,
@@ -552,7 +531,7 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     compact: app.compact,
                     new_since: chat.new_since,
                     peer: peer.as_deref(),
-                    own_name: own_name.as_deref(),
+                    own_name,
                     room: chat.is_room(),
                     hide_readers: !app.config_ui.show_readers || !chat.has_room_readers(),
                     audio_info: Some(&app.audio_info),
@@ -989,7 +968,7 @@ fn suggestions(frame: &mut Frame, app: &App, input: Rect, above: Rect) {
         .max()
         .unwrap_or(0) as u16
         + 2;
-    let width = wanted.clamp(24, input.width);
+    let width = wanted.max(24).min(input.width);
     let area = Rect::new(input.x, input.y.saturating_sub(height), width, height);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2061,6 +2040,9 @@ fn input_box(frame: &mut Frame, app: &mut App, area: Rect) {
     app.areas.mic_button =
         Rect::new(app.areas.emoji_button.right() + 1, area.y, mic.width() as u16, 1).intersection(area);
 
+    if inner.is_empty() {
+        return;
+    }
     if app.input.is_empty() {
         let hint = if app.current().is_some() {
             ""
@@ -4678,6 +4660,28 @@ mod tests {
     }
 
     #[test]
+    fn command_completion_survives_a_narrow_terminal_pane() {
+        let mut app = app_with_chat();
+        app.input = "/".into();
+        app.cursor = 1;
+        app.focus = Focus::Input;
+        screen(&mut app, 22, 20);
+        assert!(screen(&mut app, 120, 30).contains("/join"));
+        assert_eq!(app.input, "/");
+    }
+
+    #[test]
+    fn a_draft_survives_a_terminal_too_short_to_draw_the_input_cursor() {
+        let mut app = app_with_chat();
+        app.input = "привет".into();
+        app.cursor = 6;
+        app.focus = Focus::Input;
+        screen(&mut app, 60, 2);
+        assert!(screen(&mut app, 60, 15).contains("привет"));
+        assert_eq!(app.cursor, 6);
+    }
+
+    #[test]
     fn wrapping_respects_display_width_and_words() {
         assert_eq!(wrap("один два три", 8), ["один два", "три"]);
         assert_eq!(wrap("абвгдежзик", 4), ["абвг", "дежз", "ик"]);
@@ -5025,6 +5029,23 @@ mod tests {
         assert!(app.status.contains("не показывает"), "{}", app.status);
         app.on_mouse(click(at(&app, "bob", false).unwrap()));
         assert_eq!(app.current().unwrap().jid, jid("bob@example.org"));
+    }
+
+    #[test]
+    fn unread_badges_count_all_messages_and_mark_personal_mentions() {
+        let me = jid("me@home.org");
+        let mut chat = Chat::new(me.clone(), jid("anna@home.org"), ChatKind::Direct);
+        let mut other = Chat::new(me, jid("second@home.org"), ChatKind::Direct);
+        other.unread = 3;
+        chat.unread = 2;
+        chat.unread_mention = true;
+        let badge = unread_badge([&chat, &other].into_iter());
+        assert_eq!(badge.content, " @5 ");
+        assert_eq!(badge.style.fg, Some(theme::warn()));
+        chat.set_unread(0);
+        let badge = unread_badge([&chat, &other].into_iter());
+        assert_eq!(badge.content, " 3 ");
+        assert_eq!(badge.style.fg, Some(theme::accent()));
     }
 
     #[test]
@@ -7788,6 +7809,56 @@ mod tests {
     }
 
     #[test]
+    fn standalone_lock_keeps_its_font_cell_and_server_rows_omit_it() {
+        for icons in [theme::nerd(), theme::text_icons()] {
+            for kind in [
+                ChatKind::Server,
+                ChatKind::Direct,
+                ChatKind::Room { nick: "me".into() },
+            ] {
+                let mut chat = Chat::new(jid("me@example.org"), jid("example.org"), kind.clone());
+                chat.omemo = false;
+                let mut terminal = Terminal::new(TestBackend::new(26, 1)).unwrap();
+                terminal
+                    .draw(|f| f.render_widget(chat_row(&chat, false, 26, icons, "", false, false), f.area()))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let shown: String = (0..26).map(|x| buffer[(x, 0)].symbol()).collect();
+                if kind == ChatKind::Server {
+                    assert!(shown.contains(icons.service), "{shown}");
+                    assert!(!shown.contains(icons.chat_unlocked.trim()), "{shown}");
+                } else if icons == theme::nerd() {
+                    assert!(shown.contains("\u{f09c}\u{2002}"), "{shown:?}");
+                } else {
+                    assert!(shown.contains(icons.chat_unlocked.trim()), "{shown}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lock_spacer_reaches_the_terminal_before_and_after_selecting_the_chat() {
+        use crate::terminal_backend::StableBackend;
+        use ratatui::{backend::Backend, buffer::Buffer, widgets::Widget};
+
+        let mut chat = Chat::new(jid("me@example.org"), jid("bob@example.org"), ChatKind::Direct);
+        chat.omemo = false;
+        let area = Rect::new(0, 0, 26, 1);
+        let mut previous = Buffer::empty(area);
+        for selected in [false, true, false] {
+            let mut next = Buffer::empty(area);
+            chat_row(&chat, selected, area.width, theme::nerd(), "", false, false).render(area, &mut next);
+            let mut bytes = Vec::new();
+            StableBackend::new(&mut bytes)
+                .draw(previous.diff(&next).into_iter())
+                .unwrap();
+            let output = String::from_utf8(bytes).unwrap();
+            assert!(output.contains("\u{f09c}\u{2002}"), "{output:?}");
+            previous = next;
+        }
+    }
+
+    #[test]
     fn muted_and_unencrypted_marks_leave_a_cell_between_their_glyphs() {
         let mut chat = Chat::new(jid("me@example.org"), jid("bob@example.org"), ChatKind::Direct);
         chat.omemo = false;
@@ -7804,8 +7875,11 @@ mod tests {
                         .unwrap();
                     let buffer = terminal.backend().buffer();
                     let shown: String = (0..26).map(|x| buffer[(x, 0)].symbol()).collect();
+                    let (_, rest) = shown.split_once(icons.chat_unlocked.trim()).unwrap();
                     assert!(
-                        shown.contains(&format!("{} {}", icons.chat_unlocked.trim(), icons.muted)),
+                        rest.strip_prefix(char::is_whitespace)
+                            .unwrap()
+                            .starts_with(icons.muted),
                         "{shown}"
                     );
                 }

@@ -86,6 +86,29 @@ impl Store {
         Ok(())
     }
 
+    /// Search the incoming suffix represented by an unread counter, including
+    /// messages older than the UI's in-memory page. Stop on the first match.
+    pub fn recent_incoming_match(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        count: usize,
+        matches: impl Fn(&str) -> bool,
+    ) -> Result<bool, Error> {
+        let db = self.db.lock().unwrap();
+        let mut query = db.prepare_cached(
+            "SELECT body FROM message_history WHERE account = ?1 AND chat = ?2 AND outgoing = 0
+             ORDER BY at DESC, rowid DESC LIMIT ?3",
+        )?;
+        let mut rows = query.query(params![account.as_str(), chat.as_str(), count as i64])?;
+        while let Some(row) = rows.next()? {
+            if matches(&row.get::<_, String>(0)?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Unread after the later of the local read frontier and a known server marker.
     /// None means neither position is known here. No lexical ordering of opaque IDs.
     pub fn unread_after_mark(

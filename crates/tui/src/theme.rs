@@ -167,7 +167,9 @@ pub fn nerd() -> Icons {
         unlocked: tr!("\u{f09c} unencrypted", "\u{f09c} без шифрования"),
         plain_mark: tr!("\u{f09c} unencrypted · ", "\u{f09c} без шифрования · "),
         plain_mark_open_chat: "\u{f09c} ",
-        chat_unlocked: " \u{f09c}",
+        // Kitty expands a Nerd Font icon into a following space. An en space
+        // survives terminal diffing even when the next cell was already blank.
+        chat_unlocked: " \u{f09c}\u{2002}",
         picture: "\u{f03e}",
         file: "\u{f15b}",
         service: "\u{f233}",

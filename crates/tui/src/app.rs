@@ -202,6 +202,7 @@ pub struct Chat {
     pub kind: ChatKind,
     pub lines: Vec<Line>,
     pub unread: usize,
+    pub unread_mention: bool,
     /// Messages typed here go out encrypted. On unless the user turns it off.
     pub omemo: bool,
     /// No sound, desktop notification or terminal bell from this chat.
@@ -289,6 +290,7 @@ impl Chat {
             kind,
             lines: Vec::new(),
             unread: 0,
+            unread_mention: false,
             omemo: true,
             muted: false,
             bot: false,
@@ -318,6 +320,13 @@ impl Chat {
 
     pub fn has_room_readers(&self) -> bool {
         self.is_room() && self.room_irc == Some(false)
+    }
+
+    pub fn set_unread(&mut self, count: usize) {
+        self.unread = count;
+        if count == 0 {
+            self.unread_mention = false;
+        }
     }
 
     pub fn title(&self) -> String {
@@ -1217,6 +1226,20 @@ impl App {
         self.rename(&key);
     }
 
+    /// The nickname used when addressing this account in this conversation.
+    pub fn mention_nick<'a>(&'a self, chat: &'a Chat) -> Option<&'a str> {
+        match &chat.kind {
+            ChatKind::Room { nick } if !nick.is_empty() => Some(nick),
+            ChatKind::Direct if chat.account != chat.jid => self
+                .nicknames
+                .get(&(chat.account.clone(), chat.account.clone()))
+                .map(String::as_str)
+                .or_else(|| chat.account.node().map(|n| n.as_str()))
+                .or(Some(chat.account.as_str())),
+            _ => None,
+        }
+    }
+
     /// What a contact is called: the name in the roster, else the one they gave
     /// themselves; neither, and the address shows.
     pub fn name_of(&self, key: &(BareJid, BareJid)) -> Option<String> {
@@ -1261,7 +1284,7 @@ impl App {
             chat.read_mark = Some(id);
             chat.read_mark_here = after.is_some();
             if let Some(after) = after {
-                chat.unread = after;
+                chat.set_unread(after);
             }
         }
         if let Some(&on) = self.omemo_choice.get(&(account.clone(), jid.clone())) {
@@ -1410,7 +1433,7 @@ impl App {
         match self.selected {
             Some(index) if focused => {
                 self.note_new(index);
-                self.chats[index].unread = 0;
+                self.chats[index].set_unread(0);
                 self.mark_read(index)
             }
             _ => Vec::new(),
@@ -1842,7 +1865,7 @@ impl App {
         let Some(chat) = self.chats.get_mut(index).filter(|c| c.kind != ChatKind::Server) else {
             return Vec::new();
         };
-        chat.unread = 0;
+        chat.set_unread(0);
         chat.new_since = None;
         self.status = trf!("marked read: {}", "отмечено прочитанным: {}", chat.title());
         // A deliberate acknowledgement does not depend on terminal focus events.
@@ -1909,14 +1932,14 @@ impl App {
             chat.read_mark = Some(id);
             chat.read_mark_here = after.is_some();
             if let Some(after) = after {
-                chat.unread = after;
+                chat.set_unread(after);
                 if after == 0 {
                     chat.markable = None;
                 }
             }
             if self.selected == Some(index) && self.focused && chat.unread > 0 {
                 self.note_new(index);
-                self.chats[index].unread = 0;
+                self.chats[index].set_unread(0);
                 actions.extend(self.mark_read(index));
             }
         }
@@ -1959,7 +1982,7 @@ impl App {
         actions.extend(self.ask_avatar(index));
         actions.extend(self.ask_history(index));
         let chat = &mut self.chats[index];
-        chat.unread = 0;
+        chat.set_unread(0);
         // A room's pane lists its members who are away: read afresh on opening.
         if chat.is_room() {
             actions.push(Action::Members {
@@ -2175,7 +2198,7 @@ impl App {
         let chat = &mut self.chats[index];
         if !chat.read_mark_here && message.archive_id.is_some() && message.archive_id == chat.read_mark {
             chat.read_mark_here = true;
-            chat.unread = 0;
+            chat.set_unread(0);
             chat.markable = None;
         }
         if message.direction == Direction::Incoming {

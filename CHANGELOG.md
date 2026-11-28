@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Unread counters show `@3` in the theme's warning colour when at least one of the three unread messages mentions you. Folded folders and accounts show the same indication. Reading the mention on another device clears it here too.
+- The open-lock icon in the chat list gets its full display width on the first draw. The server row omits the chat encryption indicator.
+- Starting omtalk no longer sends graphics and cell-size queries through the keyboard stream. Delayed terminal replies can no longer appear in the draft.
+- Resizing a pane with a draft or command suggestions open no longer crashes the editor on small terminal sizes. Terminal input errors are reported on exit.
+- In group chats, when two clients of one account converge on the same nickname, the old nickname disappears as soon as the room reports its departure.
+
 ## 0.1.15 — 2026-11-27
 
 - In direct chats, the typing indicator shows the same contact name as incoming messages.
