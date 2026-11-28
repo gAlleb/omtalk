@@ -12,7 +12,7 @@ use std::{
 use symphonia::core::{
     audio::SampleBuffer,
     codecs::{CODEC_TYPE_NULL, Decoder as Codec, DecoderOptions},
-    formats::{FormatOptions, FormatReader},
+    formats::{FormatOptions, FormatReader, Packet},
     io::MediaSourceStream,
     meta::MetadataOptions,
     probe::Hint,
@@ -88,6 +88,7 @@ enum Source {
         format: Box<dyn FormatReader>,
         decoder: Box<dyn Codec>,
         track: u32,
+        first_decoded: bool,
     },
     Opus {
         packets: ogg::PacketReader<File>,
@@ -101,6 +102,22 @@ enum Source {
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
+
+fn next_track_packet(format: &mut dyn FormatReader, track: u32) -> Result<Option<Packet>, String> {
+    loop {
+        match format.next_packet() {
+            Ok(packet) if packet.track_id() == track => return Ok(Some(packet)),
+            Ok(_) => continue,
+            Err(symphonia::core::errors::Error::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(err(e)),
+        }
+    }
+}
+
 impl Reader {
     fn open(path: &Path) -> Result<Self, String> {
         // Opus-in-Ogg is decoded with the bundled libopus; Symphonia covers other
@@ -142,7 +159,7 @@ impl Reader {
             hint.with_extension(ext);
         }
         let stream = MediaSourceStream::new(Box::new(File::open(path).map_err(err)?), Default::default());
-        let format = symphonia::default::get_probe()
+        let mut format = symphonia::default::get_probe()
             .format(
                 &hint,
                 stream,
@@ -159,27 +176,30 @@ impl Reader {
             .iter()
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
             .ok_or("no audio track")?;
-        let rate = track
-            .codec_params
-            .sample_rate
-            .ok_or("unknown audio sample rate")?;
-        let channels = track
-            .codec_params
-            .channels
-            .ok_or("unknown audio channels")?
-            .count();
-        if rate == 0 || rate > 384_000 || channels == 0 || channels > 2 {
-            return Err("unsupported audio layout".into());
-        }
-        let decoder = symphonia::default::get_codecs()
+        let mut decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(err)?;
         let id = track.id;
+        let (rate, channels, first_decoded) =
+            match (track.codec_params.sample_rate, track.codec_params.channels) {
+                (Some(rate), Some(channels)) => (rate, channels.count(), false),
+                _ => {
+                    // AAC in MP4 may only describe its channels in the codec data.
+                    // The decoder keeps this packet's PCM available via last_decoded().
+                    let packet = next_track_packet(format.as_mut(), id)?.ok_or("empty audio file")?;
+                    let decoded = decoder.decode(&packet).map_err(err)?;
+                    (decoded.spec().rate, decoded.spec().channels.count(), true)
+                }
+            };
+        if rate == 0 || rate > 384_000 || channels == 0 || channels > 2 {
+            return Err("unsupported audio layout".into());
+        }
         Ok(Self {
             source: Source::Standard {
                 format,
                 decoder,
                 track: id,
+                first_decoded,
             },
             rate,
             channels,
@@ -218,33 +238,29 @@ impl Reader {
                 format,
                 decoder,
                 track,
-            } => loop {
-                let packet = match format.next_packet() {
-                    Ok(p) => p,
-                    Err(symphonia::core::errors::Error::IoError(e))
-                        if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                    {
+                first_decoded,
+            } => {
+                let decoded = if std::mem::take(first_decoded) {
+                    decoder.last_decoded()
+                } else {
+                    let Some(packet) = next_track_packet(format.as_mut(), *track)? else {
                         return Ok(None);
-                    }
-                    Err(e) => return Err(err(e)),
+                    };
+                    decoder.decode(&packet).map_err(err)?
                 };
-                if packet.track_id() != *track {
-                    continue;
-                }
-                let decoded = decoder.decode(&packet).map_err(err)?;
                 if decoded.spec().rate != self.rate || decoded.spec().channels.count() != self.channels {
                     return Err("audio layout changes within the file".into());
                 }
                 let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
                 samples.copy_interleaved_ref(decoded);
-                return Ok(Some(
+                Ok(Some(
                     samples
                         .samples()
                         .iter()
                         .map(|v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 })
                         .collect(),
-                ));
-            },
+                ))
+            }
         }
     }
 }
@@ -798,6 +814,21 @@ fn worker(rx: mpsc::Receiver<Command>, report: impl Fn(Event)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aac_in_mp4_uses_its_decoded_layout_and_keeps_the_first_packet() {
+        // Three AAC packets of a generated 440 Hz stereo tone. The MP4
+        // demuxer leaves the track's channel layout unspecified.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp3");
+        std::fs::write(&path, include_bytes!("../tests/fixtures/stereo-aac.m4a")).unwrap();
+        let reader = Reader::open(&path).unwrap();
+        assert_eq!((reader.rate, reader.channels), (48_000, 2));
+        let info = inspect(&path).unwrap();
+        assert_eq!(info.seconds, 3.0 * 1024.0 / 48_000.0);
+        assert!(info.peaks.iter().any(|&v| v > 0));
+    }
+
     #[test]
     fn opus_round_trip_keeps_duration_and_real_waveform_without_devices() {
         let dir = tempfile::tempdir().unwrap();

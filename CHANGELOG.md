@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The built-in player can play AAC attachments whose channel count is first reported by the decoder, including MP4 audio sent with an `.mp3` filename.
 - A line that mentions your nickname has an accent background across the chat pane, including its wrapped continuation. The nickname itself is bold and underlined.
 - Unread counters show `@3` in the theme's warning colour when at least one of the three unread messages mentions you. Folded folders and accounts show the same indication. Reading the mention on another device clears it here too.
 - The open-lock icon in the chat list gets its full display width on the first draw. The server row omits the chat encryption indicator.
