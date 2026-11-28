@@ -5356,6 +5356,140 @@ mod tests {
 
     #[cfg(feature = "insecure-tcp")]
     #[tokio::test(flavor = "multi_thread")]
+    async fn nick_command_keeps_the_local_roster_and_own_nick_in_sync_across_two_resources() {
+        use super::*;
+        use crate::config::Modifier;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use std::time::Duration;
+
+        // A subject echo on our own connection follows the presence events for each
+        // completed move. Render only after the ordinary UI pump has applied them.
+        async fn snapshot(
+            account: &Account,
+            room: &BareJid,
+            stage: &str,
+            rx: &mut mpsc::UnboundedReceiver<Msg>,
+            app: &mut App,
+            shared: &Shared,
+        ) -> (String, Vec<String>) {
+            account.set_subject(room, stage).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let msg = rx.recv().await.unwrap();
+                    let barrier =
+                        matches!(&msg, Msg::Topic { room: jid, topic, .. } if jid == room && topic == stage);
+                    apply(app, msg, shared);
+                    if barrier {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the room subject arrived after its presence updates");
+            let mut terminal = Terminal::new(TestBackend::new(128, 30)).unwrap();
+            terminal
+                .draw(|f| view::draw(f, app, &mut Pictures::new()))
+                .unwrap();
+            let right = app.areas.right.unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<_> = (right.y..right.bottom())
+                .filter_map(|y| {
+                    let row: String = (right.x..right.right())
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect();
+                    row.contains('●').then_some(row)
+                })
+                .collect();
+            let ChatKind::Room { nick } = &app.current().unwrap().kind else {
+                panic!("room was open")
+            };
+            (nick.clone(), rows)
+        }
+
+        let (_desktop_accounts, events, desktop) = login_plain("nickui").await;
+        let (_mobile_accounts, _mobile_events, mobile) = login_plain("nickui").await;
+        let me = desktop.jid().clone();
+        let room: BareJid = format!("nick-ui-{}@muc.localhost", receipts::new_id())
+            .parse()
+            .unwrap();
+        let omemo = Arc::new(Omemo::new(
+            desktop.clone(),
+            State::new(OwnKeys::generate(0).unwrap()),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            accounts: [(me.clone(), (desktop.clone(), omemo.clone()))].into(),
+            read_sync: Default::default(),
+            cache: dir.path().join("cache"),
+            viewer: String::new(),
+            auto_download: false,
+            image_links: false,
+            avatars: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            avatar_loads: Default::default(),
+            room_read_support: Default::default(),
+            store: Store::open(&dir.path().join("history.db")).unwrap(),
+            tx,
+        };
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 32);
+        let pump = tokio::spawn(pump(events, shared.clone()));
+        join(
+            &me,
+            &desktop,
+            &omemo,
+            &shared,
+            room.clone(),
+            Entry {
+                nick: Some("OldNick".into()),
+                open: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        desktop.set_room_name(&room, "Room").await.unwrap();
+        mobile.join(&room, "OldNick").await.unwrap();
+        let initial = snapshot(&desktop, &room, "stage-one", &mut rx, &mut app, &shared).await;
+
+        app.on_paste("/nick NewNick");
+        let actions = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(actions.iter().any(|a| matches!(a, Action::Nick { .. })));
+        for action in actions {
+            perform(action, shared.clone()).await;
+        }
+        let split = snapshot(&desktop, &room, "stage-two", &mut rx, &mut app, &shared).await;
+
+        // The second connection reads the account's real bookmark at its next entry.
+        let mark = mobile
+            .bookmarks()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|b| b.room == room)
+            .unwrap();
+        assert_eq!(mark.nick.as_deref(), Some("NewNick"));
+        mobile.join(&room, mark.nick.as_deref().unwrap()).await.unwrap();
+        let together = snapshot(&desktop, &room, "stage-three", &mut rx, &mut app, &shared).await;
+        pump.abort();
+        for ((own, rows), expected_nick, nicks) in [
+            (initial, "OldNick", &["OldNick"][..]),
+            (split, "NewNick", &["OldNick", "NewNick"][..]),
+            (together, "NewNick", &["NewNick"][..]),
+        ] {
+            assert_eq!(rows.len(), nicks.len(), "{rows:?}");
+            for nick in nicks {
+                assert_eq!(
+                    rows.iter().filter(|row| row.contains(nick)).count(),
+                    1,
+                    "{rows:?}"
+                );
+            }
+            assert_eq!(own, expected_nick, "local room nickname");
+        }
+    }
+
+    #[cfg(feature = "insecure-tcp")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn startup_enters_a_ready_room_while_another_room_does_not_answer() {
         use super::*;
         use std::time::Duration;
