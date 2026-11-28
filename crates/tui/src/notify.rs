@@ -231,8 +231,12 @@ pub fn mention_ranges(text: &str, nick: &str) -> Vec<std::ops::Range<usize>> {
         }
         index
     };
-    nick_matches(&text.to_lowercase(), &nick.to_lowercase())
-        .map(|range| original_index(range.start)..original_index(range.end))
+    let folded = text.to_lowercase();
+    nick_matches(&folded, &nick.to_lowercase())
+        .map(|range| {
+            let start = range.start - usize::from(folded[..range.start].ends_with('@'));
+            original_index(start)..original_index(range.end)
+        })
         .collect()
 }
 

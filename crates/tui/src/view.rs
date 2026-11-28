@@ -1,13 +1,14 @@
 //! Draws the model, and remembers where everything went, for the mouse.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use chrono::{Local, TimeZone};
 use crossterm::event::KeyModifiers;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui_image::StatefulImage;
@@ -709,6 +710,12 @@ fn center_pane(frame: &mut Frame, app: &mut App, area: Rect, pictures: &mut Pict
                     ..inner
                 },
             );
+            // Paint both the text and the empty cells up to the edge of the conversation.
+            let mention_style = mention_line_style(theme::accent(), theme::background());
+            for (offset, _) in shown.iter().enumerate().filter(|(_, row)| row.mentioned) {
+                let place = Rect::new(inner.x, top + offset as u16, inner.width, 1);
+                frame.buffer_mut().set_style(place, mention_style);
+            }
         }
         None => empty_state(frame, inner),
     }
@@ -785,7 +792,7 @@ fn highlight_selection(frame: &mut Frame, app: &App) {
         };
         for x in from.max(rect.x)..=to.min(rect.right().saturating_sub(1)) {
             let cell = &mut buffer[(x, rect.y)];
-            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            cell.modifier.toggle(Modifier::REVERSED);
         }
     }
 }
@@ -1050,6 +1057,8 @@ fn empty_state(frame: &mut Frame, area: Rect) {
 #[derive(Debug, Clone)]
 pub struct Row {
     pub text: TextLine<'static>,
+    /// Part of an incoming logical line that addresses the current user.
+    mentioned: bool,
     /// A fetched file a click on this row opens.
     pub open: Option<PathBuf>,
     pub picture: Option<PictureRow>,
@@ -1081,6 +1090,7 @@ impl From<TextLine<'static>> for Row {
     fn from(text: TextLine<'static>) -> Self {
         Self {
             text,
+            mentioned: false,
             open: None,
             picture: None,
             who: None,
@@ -1091,6 +1101,15 @@ impl From<TextLine<'static>> for Row {
             links: Vec::new(),
             audio: None,
             save: None,
+        }
+    }
+}
+
+impl Row {
+    fn body(spans: Vec<Span<'static>>, mentioned: bool) -> Self {
+        Self {
+            mentioned,
+            ..Self::from(TextLine::from(spans))
         }
     }
 }
@@ -1230,7 +1249,12 @@ pub fn message_rows(
             continue;
         }
         let who_shown = shown(line);
-        let nick = if line.outgoing { None } else { own_name };
+        let mentions = |text: &str| {
+            own_name
+                .filter(|_| !line.outgoing)
+                .map(|nick| crate::notify::mention_ranges(text, nick))
+                .unwrap_or_default()
+        };
         if compact {
             let who_style = if line.outgoing {
                 Style::default()
@@ -1286,7 +1310,13 @@ pub fn message_rows(
                 content_width.saturating_sub(marker.width()).max(1)
             };
             let mut first = true;
-            for styled in styled_wrap(&slot.link, text_width, Style::default().fg(theme::text()), nick) {
+            let ranges = mentions(&slot.link);
+            for styled in styled_wrap(
+                &slot.link,
+                text_width,
+                Style::default().fg(theme::text()),
+                &ranges,
+            ) {
                 let mut spans = vec![Span::raw(pad.clone())];
                 if !line.encrypted {
                     spans.push(Span::styled(
@@ -1299,7 +1329,7 @@ pub fn message_rows(
                     ));
                 }
                 spans.extend(styled);
-                rows.push(TextLine::from(spans).into());
+                rows.push(Row::body(spans, !ranges.is_empty()));
                 first = false;
             }
         }
@@ -1325,6 +1355,7 @@ pub fn message_rows(
                 for row in 0..PICTURE_ROWS {
                     rows.push(Row {
                         text: TextLine::from(""),
+                        mentioned: false,
                         open: path.clone(),
                         picture: Some(PictureRow {
                             url: slot.url.clone(),
@@ -1422,6 +1453,7 @@ pub fn message_rows(
                 (path.clone(), from, from + label.width())
             });
             rows.push(Row {
+                mentioned: false,
                 text: TextLine::from(spans),
                 open: path,
                 picture: None,
@@ -1499,30 +1531,34 @@ pub fn message_rows(
             let text_style = Style::default().fg(theme::text()).add_modifier(Modifier::ITALIC);
             let who = if line.outgoing { own } else { who_shown.as_str() };
             let lead = format!("* {who} ");
-            let action_start = lead.chars().count();
-            let action_text = format!("{lead}{action}");
-            let mut highlight = mention_style(action, nick);
-            for styled in wrap_styles(&action_text, text_width, |at| {
-                if at >= action_start {
-                    highlight(at - action_start, text_style)
-                } else if (2..action_start - 1).contains(&at) {
-                    who_style.add_modifier(Modifier::ITALIC)
-                } else {
-                    text_style
-                }
-            }) {
-                let mut spans = vec![Span::raw(pad.clone())];
-                if !line.encrypted {
-                    let mark = if first {
-                        marker.to_owned()
+            for (index, part) in action.split('\n').enumerate() {
+                let prefix = if index == 0 { lead.as_str() } else { "" };
+                let action_start = prefix.chars().count();
+                let action_text = format!("{prefix}{part}");
+                let ranges = mentions(part);
+                let mut highlight = mention_style(&ranges);
+                for styled in wrap_styles(&action_text, text_width, |at| {
+                    if at >= action_start {
+                        highlight(at - action_start, text_style)
+                    } else if (2..action_start.saturating_sub(1)).contains(&at) {
+                        who_style.add_modifier(Modifier::ITALIC)
                     } else {
-                        " ".repeat(marker.width())
-                    };
-                    spans.push(Span::styled(mark, Style::default().fg(theme::warn())));
+                        text_style
+                    }
+                }) {
+                    let mut spans = vec![Span::raw(pad.clone())];
+                    if !line.encrypted {
+                        let mark = if first {
+                            marker.to_owned()
+                        } else {
+                            " ".repeat(marker.width())
+                        };
+                        spans.push(Span::styled(mark, Style::default().fg(theme::warn())));
+                    }
+                    spans.extend(styled);
+                    rows.push(Row::body(spans, !ranges.is_empty()));
+                    first = false;
                 }
-                spans.extend(styled);
-                rows.push(TextLine::from(spans).into());
-                first = false;
             }
             if !header_delivery {
                 push_delivery(&mut rows, line, room, !hide_readers, body_width, gutter, false);
@@ -1561,42 +1597,46 @@ pub fn message_rows(
         }
         let quoted = Style::default().fg(theme::dim());
         for q in &quote {
-            for styled in styled_wrap(q, text_width.saturating_sub(2).max(1), quoted, nick) {
+            let ranges = mentions(q);
+            for styled in styled_wrap(q, text_width.saturating_sub(2).max(1), quoted, &ranges) {
                 let mut spans = vec![
                     Span::raw(pad.clone()),
                     Span::styled("▎ ", Style::default().fg(theme::accent())),
                 ];
                 spans.extend(styled);
-                rows.push(TextLine::from(spans).into());
+                rows.push(Row::body(spans, !ranges.is_empty()));
             }
         }
         // The rest as XEP-0393 has it: styled text, quotes, preformatted blocks.
         for block in crate::styling::blocks(said) {
+            use crate::styling::Block;
+            let ranges = mentions(match block {
+                Block::Text(text) | Block::Quote(_, text) | Block::Pre(text) | Block::Fence(text) => text,
+            });
             let (lead, parts): (Vec<Span<'static>>, Vec<Vec<Span<'static>>>) = match block {
-                crate::styling::Block::Text(text) => (
+                Block::Text(text) => (
                     Vec::new(),
-                    styled_wrap(text, text_width, Style::default().fg(theme::text()), nick),
+                    styled_wrap(text, text_width, Style::default().fg(theme::text()), &ranges),
                 ),
-                crate::styling::Block::Quote(depth, text) => (
+                Block::Quote(depth, text) => (
                     vec![Span::styled(
                         "▎ ".repeat(depth),
                         Style::default().fg(theme::accent()),
                     )],
-                    styled_wrap(text, text_width.saturating_sub(2 * depth).max(1), quoted, nick),
+                    styled_wrap(text, text_width.saturating_sub(2 * depth).max(1), quoted, &ranges),
                 ),
-                crate::styling::Block::Pre(text) => (vec![Span::raw(pad.clone())], {
-                    let mut highlight = mention_style(text, nick);
+                Block::Pre(text) => (vec![Span::raw(pad.clone())], {
+                    let mut highlight = mention_style(&ranges);
                     wrap_styles(text, text_width.saturating_sub(2).max(1), |at| {
                         highlight(at, Style::default().fg(theme::accent()))
                     })
                 }),
-                crate::styling::Block::Fence(text) => (
-                    Vec::new(),
-                    wrap(text, text_width)
-                        .into_iter()
-                        .map(|t| vec![Span::styled(t, Style::default().fg(theme::dim()))])
-                        .collect(),
-                ),
+                Block::Fence(text) => (Vec::new(), {
+                    let mut highlight = mention_style(&ranges);
+                    wrap_styles(text, text_width, |at| {
+                        highlight(at, Style::default().fg(theme::dim()))
+                    })
+                }),
             };
             for styled in parts {
                 let mut spans = vec![Span::raw(pad.clone())];
@@ -1621,7 +1661,7 @@ pub fn message_rows(
                 }
                 spans.extend(lead.iter().cloned());
                 spans.extend(styled);
-                rows.push(TextLine::from(spans).into());
+                rows.push(Row::body(spans, !ranges.is_empty()));
                 first = false;
             }
         }
@@ -1855,9 +1895,9 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 /// `text` (one line of a message) wrapped to `width`, each row as spans styled by
 /// XEP-0393 over `base`: strong bold, emphasis italic, strike crossed out, code in the
 /// accent colour, the directives dimmed.
-fn styled_wrap(text: &str, width: usize, base: Style, nick: Option<&str>) -> Vec<Vec<Span<'static>>> {
+fn styled_wrap(text: &str, width: usize, base: Style, mentions: &[Range<usize>]) -> Vec<Vec<Span<'static>>> {
     let marks = crate::styling::marks(text);
-    let mut highlight = mention_style(text, nick);
+    let mut highlight = mention_style(mentions);
     let style = |m: crate::styling::Mark| {
         let mut style = base;
         if m.directive {
@@ -1880,17 +1920,54 @@ fn styled_wrap(text: &str, width: usize, base: Style, nick: Option<&str>) -> Vec
     wrap_styles(text, width, |at| highlight(at, style(marks[at])))
 }
 
+/// Reverse the usual accent-on-background pair for palette-dependent ANSI colours.
+fn mention_line_style(accent: Color, background: Color) -> Style {
+    let cube = [0, 95, 135, 175, 215, 255];
+    let rgb = match accent {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Indexed(i @ 16..=231) => {
+            let n = usize::from(i - 16);
+            Some((cube[n / 36], cube[n / 6 % 6], cube[n % 6]))
+        }
+        Color::Indexed(i @ 232..=255) => {
+            let v = 8 + (i - 232) * 10;
+            Some((v, v, v))
+        }
+        _ => None,
+    };
+    if let Some((r, g, b)) = rgb {
+        // Pick black or white, whichever has higher contrast against the accent.
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+        let level = if luminance > 0.179 { 0 } else { 255 };
+        Style::default().fg(Color::Rgb(level, level, level)).bg(accent)
+    } else if accent == background {
+        Style::default()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(accent)
+            .bg(background)
+            .add_modifier(Modifier::REVERSED)
+    }
+}
+
 /// Apply highlights in source order so a nickname can span multiple display rows.
-fn mention_style(text: &str, nick: Option<&str>) -> impl FnMut(usize, Style) -> Style {
-    let mut ranges = nick
-        .map(|nick| crate::notify::mention_ranges(text, nick))
-        .unwrap_or_default()
-        .into_iter()
-        .peekable();
+fn mention_style(mentions: &[Range<usize>]) -> impl FnMut(usize, Style) -> Style {
+    let mut ranges = mentions.iter().peekable();
     move |at, base| {
         while ranges.next_if(|range| range.end <= at).is_some() {}
         if ranges.peek().is_some_and(|range| range.contains(&at)) {
-            base.fg(theme::accent()).add_modifier(Modifier::BOLD)
+            base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             base
         }
@@ -4620,11 +4697,15 @@ mod tests {
                     };
                     let mut cells = row[start + 1..].iter();
                     for word in ["login", "анна", "кот"] {
-                        assert_eq!(cells.next().unwrap().symbol(), "@");
-                        for c in word.chars() {
+                        for c in std::iter::once('@').chain(word.chars()) {
                             let cell = cells.next().unwrap();
                             assert_eq!(cell.symbol(), c.to_string());
-                            assert_eq!(cell.fg == theme::accent(), bodies < 2 && word == expected);
+                            assert_eq!(
+                                cell.modifier.contains(
+                                    ratatui::style::Modifier::UNDERLINED | ratatui::style::Modifier::BOLD
+                                ),
+                                bodies < 2 && word == expected
+                            );
                         }
                         cells.next();
                     }
@@ -4636,20 +4717,131 @@ mod tests {
     }
 
     #[test]
+    fn a_mention_paints_the_whole_wrapped_line_only() {
+        use ratatui::style::Modifier as TextModifier;
+        let me = jid("s@home.org");
+        let mut app = App::new(vec![me.clone()], Modifier::Ctrl, 26, 30);
+        let index = app.chat(&me, &jid("bob@home.org"), ChatKind::Direct);
+        app.select(index);
+        let body = "before\n~@s~ calls one two three four five six seven eight nine ten eleven twelve\nafter";
+        for prefix in ["", "/me "] {
+            let mut line = Line::message(1234, "bob".into(), format!("{prefix}{body}"), true, false);
+            line.reactions.insert("bob".into(), vec!["s".into()]);
+            app.push(index, line);
+        }
+        app.push(
+            index,
+            Line::message(1234, "bob".into(), "one's own @s".into(), true, true),
+        );
+        for compact in [false, true] {
+            app.compact = compact;
+            let mut terminal = Terminal::new(TestBackend::new(40, 50)).unwrap();
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let style = mention_line_style(theme::accent(), theme::background());
+            let mut expected = false;
+            let mut starts = 0;
+            let mut continuations = 0;
+            for (area, text) in &app.areas.message_rows {
+                if text.contains("~@s~") {
+                    expected = true;
+                    starts += 1;
+                } else if text.contains("after") {
+                    expected = false;
+                } else if expected {
+                    continuations += 1;
+                }
+                for x in area.x..area.right() {
+                    let cell = &buffer[(x, area.y)];
+                    let painted = Some(cell.fg) == style.fg
+                        && Some(cell.bg) == style.bg
+                        && cell.modifier.contains(style.add_modifier);
+                    assert_eq!(painted, expected, "x={x}, row={text:?}, compact={compact}");
+                    if cell.symbol() == "@" {
+                        assert_eq!(
+                            cell.modifier
+                                .contains(TextModifier::UNDERLINED | TextModifier::BOLD),
+                            expected
+                        );
+                    }
+                }
+                assert!(!text.ends_with(' '), "no padding in copied text: {text:?}");
+            }
+            assert_eq!(starts, 2);
+            assert!(continuations >= 2);
+
+            let (area, text) = app
+                .areas
+                .message_rows
+                .iter()
+                .find(|(_, text)| text.contains("~@s~"))
+                .unwrap();
+            let x = area.x + text.find('@').unwrap() as u16;
+            let y = area.y;
+            let prior = buffer[(x, y)].modifier;
+            app.selection = Some(((x, y), (x + 1, y)));
+            terminal
+                .draw(|f| draw(f, &mut app, &mut Pictures::new()))
+                .unwrap();
+            assert_eq!(app.selected_text(), "@s");
+            assert_eq!(
+                terminal.backend().buffer()[(x, y)].modifier,
+                prior ^ TextModifier::REVERSED
+            );
+            app.selection = None;
+        }
+    }
+
+    #[test]
+    fn mention_colours_contrast_with_light_and_dark_accents() {
+        use ratatui::style::Modifier as TextModifier;
+        let white = Color::Rgb(255, 255, 255);
+        let black = Color::Rgb(0, 0, 0);
+        for (accent, ink) in [
+            (white, black),
+            (black, white),
+            (Color::Indexed(226), black),
+            (Color::Indexed(232), white),
+        ] {
+            let style = mention_line_style(accent, accent);
+            let mut terminal = Terminal::new(TestBackend::new(8, 1)).unwrap();
+            terminal
+                .draw(|f| f.render_widget(Paragraph::new("s").style(style), f.area()))
+                .unwrap();
+            for cell in &terminal.backend().buffer().content {
+                assert_eq!((cell.fg, cell.bg), (ink, accent));
+            }
+        }
+        let fallback = mention_line_style(Color::Blue, Color::Blue);
+        assert!(fallback.add_modifier.contains(TextModifier::REVERSED));
+        assert_eq!(
+            (fallback.fg, fallback.bg),
+            (Some(Color::Reset), Some(Color::Reset))
+        );
+    }
+
+    #[test]
     fn mention_highlighting_survives_wrapping_and_retains_inline_emphasis() {
+        let text = "İ _hi_ ~@Алиса~ , Алиса-2 и @АЛИСА.";
         let rows = styled_wrap(
-            "İ _hi_ ~@Алиса~ , Алиса-2 и @АЛИСА.",
+            text,
             3,
             Style::default().fg(theme::text()),
-            Some("алиса"),
+            &crate::notify::mention_ranges(text, "алиса"),
         );
         let highlighted: Vec<_> = rows
             .iter()
             .flatten()
-            .filter(|s| s.style.fg == Some(theme::accent()))
+            .filter(|s| {
+                s.style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED)
+            })
             .collect();
         let words: String = highlighted.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(words, "АлисаАЛИСА");
+        assert_eq!(words, "@Алиса@АЛИСА");
         assert!(
             highlighted[0]
                 .style
