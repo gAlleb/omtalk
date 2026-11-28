@@ -218,6 +218,7 @@ enum Msg {
         account: BareJid,
         message: Incoming,
         at: i64,
+        corrected_in_store: bool,
     },
     /// A chat's history from the store, for a chat opened again: before what it has.
     Restored {
@@ -1138,7 +1139,12 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
             }
             Err(error) => app.status = error,
         },
-        Msg::Incoming { account, message, at } => {
+        Msg::Incoming {
+            account,
+            message,
+            at,
+            corrected_in_store,
+        } => {
             // The database already keeps repeated MAM/offline copies once. The view
             // must merge them too, before an alert or another unread is generated.
             if message.direction == omtalk_omemo::Direction::Incoming
@@ -1147,8 +1153,9 @@ fn apply(app: &mut App, msg: Msg, shared: &Shared) {
                 refresh_readers(app, &shared.store, &account, &message.peer);
                 return;
             }
-            // A correction changes the message it names, where it is: no alert.
-            if app.correct(&account, &message) {
+            // The original may be outside the loaded page. An edit saved in the
+            // history is still an edit: update the badge without appending or alerting.
+            if app.correct(&account, &message) || corrected_in_store {
                 if let Some(index) = app
                     .chats
                     .iter()
@@ -2123,16 +2130,17 @@ async fn pump(mut events: mpsc::UnboundedReceiver<AccountEvent>, shared: Shared)
 
 /// Saves a message to the history and shows it.
 fn deliver(shared: &Shared, account: &BareJid, message: Incoming) {
-    let at = keep(shared, account, &message);
+    let (at, corrected_in_store) = keep(shared, account, &message);
     let _ = shared.tx.send(Msg::Incoming {
         account: account.clone(),
         message,
         at,
+        corrected_in_store,
     });
 }
 
-/// Keeps a message in the store (a correction in the message it corrects); when it was.
-fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
+/// Returns the timestamp and whether the history updated an existing message.
+fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> (i64, bool) {
     let at = message.at.unwrap_or_else(now);
     if message.nick.is_some()
         && let (Some(message_id), Some(occupant_id)) = (&message.archive_id, &message.occupant_id)
@@ -2160,11 +2168,12 @@ fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
     let corrected = match (&message.replaces, &message.text) {
         (Some(id), Some(text)) => shared
             .store
-            .correct_message(
+            .correct_message_from(
                 account,
                 &message.peer,
                 id,
                 message.direction == Direction::Outgoing,
+                message.nick.as_deref(),
                 text,
             )
             .unwrap_or(false),
@@ -2193,7 +2202,7 @@ fn keep(shared: &Shared, account: &BareJid, message: &Incoming) -> i64 {
             },
         );
     }
-    at
+    (at, corrected)
 }
 
 /// Asks each room entered whether one is still in it (XEP-0410), and enters again the
@@ -4655,7 +4664,7 @@ mod tests {
                     replaces: None,
                     shared_file: false,
                 };
-                let at = keep(&shared, &me, &message);
+                let (at, _) = keep(&shared, &me, &message);
                 app.on_incoming(&me, &message, at);
             }
             let author = if anonymous {
@@ -5501,13 +5510,14 @@ mod tests {
                 message.direction, message.id, message.archive_id
             );
             received.push(message.clone());
-            let at = keep(&shared, &me, &message);
+            let (at, corrected_in_store) = keep(&shared, &me, &message);
             apply(
                 &mut app,
                 Msg::Incoming {
                     account: me.clone(),
                     message,
                     at,
+                    corrected_in_store,
                 },
                 &shared,
             );
@@ -5530,13 +5540,14 @@ mod tests {
             .into_iter()
             .filter(|m| m.text.as_ref().is_some_and(|t| t.contains(&unique)))
         {
-            let at = keep(&shared, &me, &message);
+            let (at, corrected_in_store) = keep(&shared, &me, &message);
             apply(
                 &mut app,
                 Msg::Incoming {
                     account: me.clone(),
                     message,
                     at,
+                    corrected_in_store,
                 },
                 &shared,
             );
@@ -5662,6 +5673,7 @@ mod tests {
                     account: recipient.clone(),
                     message,
                     at: now(),
+                    corrected_in_store: false,
                 },
                 &shared,
             );
@@ -5712,7 +5724,7 @@ mod tests {
             replaces: None,
             shared_file: false,
         };
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = Shared {
             accounts: Default::default(),
             read_sync: Default::default(),
@@ -5746,6 +5758,7 @@ mod tests {
                     account: me.clone(),
                     message: incoming,
                     at,
+                    corrected_in_store: false,
                 },
                 &shared,
             );
@@ -5772,6 +5785,7 @@ mod tests {
                     account: me.clone(),
                     message,
                     at,
+                    corrected_in_store: false,
                 },
                 &shared,
             );
@@ -5781,6 +5795,26 @@ mod tests {
             app.chats[chat].unread, 5,
             "81 already-read archive messages must not turn five new messages into 86"
         );
+        // Correct the only mention after the initial UI page has been discarded.
+        app.chats[chat].lines.clear();
+        let mut edit = message(106);
+        edit.replaces = Some("m102".into());
+        edit.text = Some("ordinary correction".into());
+        deliver(&shared, &me, edit);
+        apply(&mut app, rx.try_recv().unwrap(), &shared);
+        assert!(
+            !app.chats[chat].unread_mention,
+            "a corrected archived mention must disappear"
+        );
+        assert_eq!(app.chats[chat].unread, 5);
+        assert!(app.chats[chat].lines.is_empty(), "an edit is not a new live row");
+        let mut edit = message(107);
+        edit.replaces = Some("m102".into());
+        edit.text = Some("@me: edited again".into());
+        deliver(&shared, &me, edit);
+        apply(&mut app, rx.try_recv().unwrap(), &shared);
+        assert!(app.chats[chat].unread_mention, "a new archived mention counts");
+        assert_eq!(app.chats[chat].unread, 5);
         // A restart can restore more unread than fit in the loaded page.
         app.chats[chat].lines.clear();
         app.chats[chat].set_unread(0);
@@ -5862,6 +5896,7 @@ mod tests {
                     account: me.clone(),
                     message,
                     at,
+                    corrected_in_store: false,
                 },
                 &shared,
             );

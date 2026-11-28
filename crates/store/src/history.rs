@@ -220,8 +220,7 @@ impl Store {
         Ok(())
     }
 
-    /// Puts the corrected text into the message `id` of `chat`, one's own (`outgoing`)
-    /// or the peer's; whether there was such a message.
+    /// Corrects a direct message or one's own message in any chat.
     pub fn correct_message(
         &self,
         account: &BareJid,
@@ -230,10 +229,25 @@ impl Store {
         outgoing: bool,
         body: &str,
     ) -> Result<bool, Error> {
+        self.correct_message_from(account, chat, id, outgoing, None, body)
+    }
+
+    /// Incoming room message IDs belong to their author. A matching client ID
+    /// from another occupant leaves the original intact.
+    pub fn correct_message_from(
+        &self,
+        account: &BareJid,
+        chat: &BareJid,
+        id: &str,
+        outgoing: bool,
+        nick: Option<&str>,
+        body: &str,
+    ) -> Result<bool, Error> {
         let changed = self.db.lock().unwrap().execute(
             "UPDATE messages SET body = ?5, edited = 1
-             WHERE account = ?1 AND chat = ?2 AND id = ?3 AND outgoing = ?4",
-            params![account.as_str(), chat.as_str(), id, outgoing, body],
+             WHERE account = ?1 AND chat = ?2 AND id = ?3 AND outgoing = ?4
+               AND (outgoing = 1 OR nick IS ?6)",
+            params![account.as_str(), chat.as_str(), id, outgoing, body, nick],
         )?;
         Ok(changed > 0)
     }
@@ -828,6 +842,41 @@ mod tests {
         assert!(store.correct_message(&me, &bob, "b1", false, "опечатка").unwrap());
         let kept = &store.recent_messages(&me, &bob, 10).unwrap()[0];
         assert_eq!((kept.body.as_str(), kept.edited), ("опечатка", true));
+    }
+
+    #[test]
+    fn room_corrections_match_the_original_occupant() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("omtalk.db")).unwrap();
+        let me = jid("me@example.org");
+        let room = jid("team@muc.example.org");
+        for (nick, at) in [("anna", 1), ("bob", 2)] {
+            let line = StoredMessage {
+                id: Some("42".into()),
+                nick: Some(nick.into()),
+                sender: jid(&format!("{nick}@example.org")),
+                chat: room.clone(),
+                ..message("team@muc.example.org", nick, at)
+            };
+            store.save_message(&me, &line).unwrap();
+        }
+        for wrong in [None, Some("carol")] {
+            assert!(
+                !store
+                    .correct_message_from(&me, &room, "42", false, wrong, "edit")
+                    .unwrap()
+            );
+        }
+        assert!(
+            store
+                .correct_message_from(&me, &room, "42", false, Some("bob"), "edited by Bob")
+                .unwrap()
+        );
+        let rows = store.recent_messages(&me, &room, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|l| l.body.as_str()).collect::<Vec<_>>(),
+            ["anna", "edited by Bob"]
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 - The built-in player can play AAC attachments whose channel count is first reported by the decoder, including MP4 audio sent with an `.mp3` filename.
 - A line that mentions your nickname has an accent background across the chat pane, including its wrapped continuation. The nickname itself is bold and underlined.
-- Unread counters show `@3` in the theme's warning colour when at least one of the three unread messages mentions you. Folded folders and accounts show the same indication. Reading the mention on another device clears it here too.
+- Unread counters show `@3` in the theme's warning colour when at least one of the three unread messages mentions you. Folded folders and accounts show the same indication. The counter follows read markers from other devices and edits to older unread messages.
 - The open-lock icon in the chat list gets its full display width on the first draw. The server row omits the chat encryption indicator.
 - Starting omtalk no longer sends graphics and cell-size queries through the keyboard stream. Delayed terminal replies can no longer appear in the draft.
 - Resizing a pane with a draft or command suggestions open no longer crashes the editor on small terminal sizes. Terminal input errors are reported on exit.
